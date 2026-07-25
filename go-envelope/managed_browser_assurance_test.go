@@ -464,7 +464,11 @@ func TestManagedBrowserAssuranceServer(t *testing.T) {
 		t.Fatal(err)
 	}
 	baseURL := "http://" + managedBrowserAssuranceAddr
-	authBaseURL := "http://" + managedBrowserAuthAddr
+	_, authPort, err := net.SplitHostPort(managedBrowserAuthAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authBaseURL := "http://localhost:" + authPort
 	harness := newManagedBrowserHarness(t, baseURL, authBaseURL)
 	authServer := &http.Server{
 		Handler:           harness,

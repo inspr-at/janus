@@ -55,6 +55,16 @@ two minutes after the asserted authentication time. Changing Generate to Paste
 or Paste to Generate after step-up fails before any value byte is read. Logout
 and clean auth reset clear all flow, proof, and managed-login cookies.
 
+Successful login and step-up callbacks render a value-free Janus continuation
+document before entering the protected target. The document continues
+immediately and provides a same-origin fallback link. This ends the cross-site
+OIDC navigation before the next protected request, so browsers can send the
+host-only SameSite=Strict session and step-up cookies without
+weakening either cookie to Lax. Continuation targets are limited to the normal
+login allowlist or one exact managed setup intent; absolute URLs, extra query
+keys, fragments, control characters, and unknown continuation kinds fail
+closed.
+
 ## Simple managed-service UI
 
 Pharos is the entry point. Its service detail renders only reviewed declarations

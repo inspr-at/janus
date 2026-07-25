@@ -488,6 +488,21 @@ type AuthResetView struct {
 	AuthScreen    bool
 }
 
+type AuthContinuationView struct {
+	Title         string
+	CSPNonce      string
+	Mode          string
+	Session       Session
+	CSRF          string
+	Headline      string
+	Message       string
+	PrimaryHref   string
+	PrimaryLabel  string
+	RequestID     string
+	ValueReturned bool
+	AuthScreen    bool
+}
+
 type NoAccessView struct {
 	Title         string
 	CSPNonce      string
@@ -2083,8 +2098,10 @@ func (app *App) handleCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	app.writeSession(w, session)
 	returnPath := "/"
+	continuationKind := "login"
 	if managedIntentRef, managedLogin := app.readManagedLoginIntent(r); managedLogin {
 		returnPath = "/managed-service/setup?intent=" + url.QueryEscape(managedIntentRef)
+		continuationKind = "managed_login"
 	} else if regularReturn, ok := app.readOIDCLoginReturnPath(r); ok {
 		returnPath = regularReturn
 	}
@@ -2092,7 +2109,7 @@ func (app *App) handleCallback(w http.ResponseWriter, r *http.Request) {
 	app.clearManagedLoginIntentCookies(w)
 	app.clearOIDCLoginAttemptCookie(w)
 	app.audit(r, "auth.login.complete", "allowed", session.Subject, "")
-	http.Redirect(w, r, returnPath, http.StatusFound)
+	app.renderAuthContinuation(w, r, returnPath, continuationKind)
 }
 
 func (app *App) handleLogout(w http.ResponseWriter, r *http.Request) {
@@ -2108,6 +2125,73 @@ func (app *App) handleLogout(w http.ResponseWriter, r *http.Request) {
 	app.clearManagedStepUpCookies(w)
 	app.clearManagedLoginIntentCookies(w)
 	http.Redirect(w, r, "/", http.StatusFound)
+}
+
+func (app *App) renderAuthContinuation(w http.ResponseWriter, r *http.Request, target, kind string) {
+	if !validAuthContinuationTarget(target, kind) {
+		app.audit(r, "auth.continuation", "denied", "", "continuation target invalid")
+		app.renderAuthError(
+			w,
+			r,
+			http.StatusInternalServerError,
+			"login_restart_required",
+			"Janus refused an invalid sign-in continuation.",
+		)
+		return
+	}
+	headline := "Signed in"
+	message := "Janus accepted the identity check. Continuing inside Janus activates the signed browser session."
+	primaryLabel := "Open Janus"
+	switch kind {
+	case "managed_login":
+		headline = "Signed in"
+		message = "Janus accepted the identity check. Continuing keeps this exact Pharos setup request attached."
+		primaryLabel = "Continue to secret setup"
+	case "managed_step_up":
+		headline = "Passkey confirmed"
+		message = "Janus accepted the fresh passkey check. Continuing finishes the secure same-site handoff for this secret change."
+		primaryLabel = "Continue to secret change"
+	}
+	// A completed OIDC callback is a cross-site navigation. Rendering one
+	// same-origin document before the protected target lets Strict session and
+	// step-up cookies participate without weakening their SameSite policy.
+	w.Header().Set("Refresh", "0; url="+target)
+	renderTemplateStatus(w, app.templates, "auth_continue", http.StatusOK, AuthContinuationView{
+		Title:         "Janus sign-in complete",
+		CSPNonce:      cspNonceFromContext(r.Context()),
+		Mode:          app.cfg.ProductMode,
+		Session:       Session{},
+		Headline:      headline,
+		Message:       message,
+		PrimaryHref:   target,
+		PrimaryLabel:  primaryLabel,
+		RequestID:     requestID(r),
+		ValueReturned: false,
+		AuthScreen:    true,
+	})
+}
+
+func validAuthContinuationTarget(target, kind string) bool {
+	if target == "" || strings.ContainsAny(target, "\r\n\t") {
+		return false
+	}
+	parsed, err := url.Parse(target)
+	if err != nil || parsed.IsAbs() || parsed.Host != "" || parsed.Fragment != "" {
+		return false
+	}
+	switch kind {
+	case "login":
+		safe, ok := safeLoginReturnPath(target)
+		return ok && safe == target
+	case "managed_login", "managed_step_up":
+		if parsed.Path != "/managed-service/setup" {
+			return false
+		}
+		_, ok := exactManagedIntentQuery(parsed)
+		return ok
+	default:
+		return false
+	}
 }
 
 func (app *App) renderSetup(w http.ResponseWriter, r *http.Request) {
@@ -4754,6 +4838,29 @@ func mustTemplates() *template.Template {
       <span><i aria-hidden="true"></i>Janus never asks for or displays a secret value.</span>
       <span><i aria-hidden="true"></i>Identity values stay out of the access and evidence pages.</span>
       <span><i aria-hidden="true"></i><code>value_returned=false</code></span>
+    </div>
+  </div>
+</section>
+{{ template "base_bottom" . }}
+{{- end }}
+
+	{{ define "auth_continue" -}}
+{{ template "base_top" . }}
+<section class="auth-landing" id="command-center">
+  <div class="auth-card">
+    <div class="intro-copy">
+      <div class="eyebrow">{{ .Mode }} · secure handoff</div>
+      <h1>{{ .Headline }}</h1>
+      <p>{{ .Message }}</p>
+    </div>
+    <div class="toolbar">
+      <a class="button primary" href="{{ .PrimaryHref }}">{{ .PrimaryLabel }}</a>
+    </div>
+    <div class="auth-trust" aria-label="Login continuation safety boundary">
+      <span><i aria-hidden="true"></i>The session cookie stays Strict and host-only.</span>
+      <span><i aria-hidden="true"></i>No identity, token, or secret value is shown.</span>
+      <span><i aria-hidden="true"></i><code>value_returned=false</code></span>
+      <span class="mono">request_id={{ .RequestID }}</span>
     </div>
   </div>
 </section>

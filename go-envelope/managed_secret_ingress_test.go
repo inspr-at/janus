@@ -501,9 +501,16 @@ func TestManagedStepUpCompletionBindsSubjectStateRoleAndFreshAssertion(t *testin
 	if !app.completeManagedStepUpCallback(response, request, session, flow, state, now.Unix(), []string{"user", "mfa"}) {
 		t.Fatalf("expected step-up completion, got %d body=%s", response.Code, response.Body.String())
 	}
-	if response.Code != http.StatusFound ||
-		response.Header().Get("Location") != "/managed-service/setup?intent="+managedTestIntentRef {
-		t.Fatalf("unexpected completion redirect: status=%d location=%q", response.Code, response.Header().Get("Location"))
+	if response.Code != http.StatusOK ||
+		response.Header().Get("Refresh") != "0; url=/managed-service/setup?intent="+managedTestIntentRef ||
+		!strings.Contains(response.Body.String(), `href="/managed-service/setup?intent=`+managedTestIntentRef+`"`) ||
+		!strings.Contains(response.Body.String(), "Passkey confirmed") {
+		t.Fatalf(
+			"unexpected completion handoff: status=%d refresh=%q body=%s",
+			response.Code,
+			response.Header().Get("Refresh"),
+			response.Body.String(),
+		)
 	}
 	proofCookie := cookieByName(t, response.Result().Cookies(), hostStepUpProofCookie)
 	if !proofCookie.HttpOnly || !proofCookie.Secure || proofCookie.SameSite != http.SameSiteStrictMode {
@@ -604,9 +611,10 @@ func TestOIDCCallbackCompletesOnlyBoundPasswordlessStepUp(t *testing.T) {
 	request.AddCookie(&http.Cookie{Name: hostPKCECookie, Value: pkce})
 	response := httptest.NewRecorder()
 	app.routes().ServeHTTP(response, request)
-	if response.Code != http.StatusFound ||
-		response.Header().Get("Location") != "/managed-service/setup?intent="+managedTestIntentRef {
-		t.Fatalf("bound passwordless callback did not complete: status=%d location=%q body=%s", response.Code, response.Header().Get("Location"), response.Body.String())
+	if response.Code != http.StatusOK ||
+		response.Header().Get("Refresh") != "0; url=/managed-service/setup?intent="+managedTestIntentRef ||
+		!strings.Contains(response.Body.String(), "Passkey confirmed") {
+		t.Fatalf("bound passwordless callback did not complete: status=%d refresh=%q body=%s", response.Code, response.Header().Get("Refresh"), response.Body.String())
 	}
 	proofCookie := cookieByName(t, response.Result().Cookies(), hostStepUpProofCookie)
 	proofRequest := httptest.NewRequest(http.MethodGet, "/", nil)

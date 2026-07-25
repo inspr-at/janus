@@ -706,7 +706,12 @@ func (app *App) completeManagedStepUpCallback(
 	app.clearOIDCLoginAttemptCookie(w)
 	app.clearManagedLoginIntentCookies(w)
 	app.audit(r, "managed_secret.step_up.complete", "allowed", session.Subject, "fresh passwordless assertion accepted")
-	http.Redirect(w, r, "/managed-service/setup?intent="+url.QueryEscape(flow.IntentRef), http.StatusFound)
+	app.renderAuthContinuation(
+		w,
+		r,
+		"/managed-service/setup?intent="+url.QueryEscape(flow.IntentRef),
+		"managed_step_up",
+	)
 	return true
 }
 
