@@ -21,6 +21,7 @@ use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine as _};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use fs2::FileExt;
 use janus_core::{ScopeRef, SecretValue};
+use rustix::fs::{fchown, Uid};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
@@ -198,6 +199,7 @@ struct ExecutorPaths {
     identity: PathBuf,
     cache_root: PathBuf,
     runtime_root: PathBuf,
+    executor_uid: u32,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -326,6 +328,7 @@ impl HostExecutor {
                 identity: PathBuf::from(SYSTEM_IDENTITY_PATH),
                 cache_root: PathBuf::from(SYSTEM_CACHE_ROOT),
                 runtime_root: PathBuf::from(SYSTEM_RUNTIME_ROOT),
+                executor_uid: 0,
             },
         )
     }
@@ -351,16 +354,16 @@ impl HostExecutor {
         let decrypted = self.open_packet(packet, now)?;
         let slot = self.resolve_slot(&decrypted.binding)?;
         let slot_dir = self.slot_cache_dir(&slot.slot_ref);
-        ensure_private_dir(&self.paths.cache_root, self.config.owner_uid)?;
-        ensure_private_dir(&slot_dir, self.config.owner_uid)?;
-        let _lock = lock_slot(&slot_dir, self.config.owner_uid)?;
+        ensure_private_dir(&self.paths.cache_root, self.paths.executor_uid)?;
+        ensure_private_dir(&slot_dir, self.paths.executor_uid)?;
+        let _lock = lock_slot(&slot_dir, self.paths.executor_uid)?;
         self.reconcile_interrupted_install(slot, now)?;
-        reject_partial_files(&slot_dir, self.config.owner_uid)?;
+        reject_partial_files(&slot_dir, self.paths.executor_uid)?;
 
         let current_path = slot_dir.join("current.envelope");
         let previous_path = slot_dir.join("previous.envelope");
         let state_path = slot_dir.join("state.json");
-        let current_state = load_optional_state(&state_path, self.config.owner_uid)?;
+        let current_state = load_optional_state(&state_path, self.paths.executor_uid)?;
         if let Some(state) = &current_state {
             validate_state_binding(state, &self.config.host_ref, slot)?;
             if state.current.packet_sha256 == decrypted.packet_sha256 {
@@ -387,7 +390,7 @@ impl HostExecutor {
         if entry_exists(&previous_path, "host_cache_previous_unavailable")? {
             validate_private_regular_metadata(
                 &previous_path,
-                self.config.owner_uid,
+                self.paths.executor_uid,
                 "host_cache_previous_unsafe",
             )?;
             fs::remove_file(&previous_path)
@@ -397,14 +400,14 @@ impl HostExecutor {
             let current_packet = read_private_regular(
                 &current_path,
                 MAX_PACKET_BYTES,
-                Some(self.config.owner_uid),
+                Some(self.paths.executor_uid),
                 "host_cache_current_unavailable",
             )?;
             atomic_write(
                 &previous_path,
                 &current_packet,
                 0o600,
-                self.config.owner_uid,
+                self.paths.executor_uid,
                 "host_cache_rotation_failed",
             )?;
             true
@@ -415,7 +418,7 @@ impl HostExecutor {
             &current_path,
             packet,
             0o600,
-            self.config.owner_uid,
+            self.paths.executor_uid,
             "host_cache_write_failed",
         ) {
             if preserved_current {
@@ -441,7 +444,7 @@ impl HostExecutor {
             committed: false,
             integrity_hash: String::new(),
         };
-        write_state(&state_path, state, self.config.owner_uid)?;
+        write_state(&state_path, state, self.paths.executor_uid)?;
         sync_dir(&slot_dir, "host_cache_sync_failed")?;
         Ok(outcome(
             "install",
@@ -469,11 +472,11 @@ impl HostExecutor {
         validate_control(request, &self.config.host_ref)?;
         let slot = self.control_slot(request)?;
         let slot_dir = self.slot_cache_dir(&slot.slot_ref);
-        let _lock = lock_slot(&slot_dir, self.config.owner_uid)?;
+        let _lock = lock_slot(&slot_dir, self.paths.executor_uid)?;
         self.reconcile_interrupted_install(slot, SystemTime::now())?;
-        reject_partial_files(&slot_dir, self.config.owner_uid)?;
+        reject_partial_files(&slot_dir, self.paths.executor_uid)?;
         let state_path = slot_dir.join("state.json");
-        let mut state = load_required_state(&state_path, self.config.owner_uid)?;
+        let mut state = load_required_state(&state_path, self.paths.executor_uid)?;
         validate_control_state(request, &state)?;
         if state.committed {
             return Ok(outcome_from_control(
@@ -487,7 +490,7 @@ impl HostExecutor {
         if state.previous.is_some() {
             validate_private_regular_metadata(
                 &previous_path,
-                self.config.owner_uid,
+                self.paths.executor_uid,
                 "host_cache_previous_unsafe",
             )?;
             fs::remove_file(&previous_path)
@@ -496,7 +499,7 @@ impl HostExecutor {
         state.previous = None;
         state.rollback_deadline_unix_secs = None;
         state.committed = true;
-        write_state(&state_path, state, self.config.owner_uid)?;
+        write_state(&state_path, state, self.paths.executor_uid)?;
         sync_dir(&slot_dir, "host_cache_sync_failed")?;
         Ok(outcome_from_control(
             "commit",
@@ -515,11 +518,11 @@ impl HostExecutor {
         validate_control(request, &self.config.host_ref)?;
         let slot = self.control_slot(request)?;
         let slot_dir = self.slot_cache_dir(&slot.slot_ref);
-        let _lock = lock_slot(&slot_dir, self.config.owner_uid)?;
+        let _lock = lock_slot(&slot_dir, self.paths.executor_uid)?;
         self.reconcile_interrupted_install(slot, now)?;
-        reject_partial_files(&slot_dir, self.config.owner_uid)?;
+        reject_partial_files(&slot_dir, self.paths.executor_uid)?;
         let state_path = slot_dir.join("state.json");
-        let mut state = load_required_state(&state_path, self.config.owner_uid)?;
+        let mut state = load_required_state(&state_path, self.paths.executor_uid)?;
         validate_control_state(request, &state)?;
         if state.committed {
             return Err(HostEnvelopeError::new(
@@ -536,7 +539,7 @@ impl HostExecutor {
             let current_path = slot_dir.join("current.envelope");
             validate_private_regular_metadata(
                 &current_path,
-                self.config.owner_uid,
+                self.paths.executor_uid,
                 "host_cache_current_unavailable",
             )?;
             let runtime_target = self
@@ -569,7 +572,7 @@ impl HostExecutor {
         let previous_packet = read_private_regular(
             &previous_path,
             MAX_PACKET_BYTES,
-            Some(self.config.owner_uid),
+            Some(self.paths.executor_uid),
             "host_cache_previous_unavailable",
         )?;
         let previous = self.open_packet(&previous_packet, now)?;
@@ -585,7 +588,7 @@ impl HostExecutor {
             &current_path,
             &previous_packet,
             0o600,
-            self.config.owner_uid,
+            self.paths.executor_uid,
             "host_cache_write_failed",
         )?;
         fs::remove_file(&previous_path)
@@ -594,7 +597,7 @@ impl HostExecutor {
         state.previous = None;
         state.rollback_deadline_unix_secs = None;
         state.committed = true;
-        write_state(&state_path, state, self.config.owner_uid)?;
+        write_state(&state_path, state, self.paths.executor_uid)?;
         sync_dir(&slot_dir, "host_cache_sync_failed")?;
         Ok(outcome(
             "rollback",
@@ -613,25 +616,25 @@ impl HostExecutor {
         validate_quarantine_control(request, &self.config.host_ref)?;
         let slot = self.quarantine_control_slot(request)?;
         let slot_dir = self.slot_cache_dir(&slot.slot_ref);
-        let _lock = lock_slot(&slot_dir, self.config.owner_uid)?;
+        let _lock = lock_slot(&slot_dir, self.paths.executor_uid)?;
         self.reconcile_interrupted_install(slot, SystemTime::now())?;
-        reject_partial_files(&slot_dir, self.config.owner_uid)?;
+        reject_partial_files(&slot_dir, self.paths.executor_uid)?;
         let quarantine_root = self.paths.cache_root.join(".quarantine");
-        ensure_private_dir(&quarantine_root, self.config.owner_uid)?;
+        ensure_private_dir(&quarantine_root, self.paths.executor_uid)?;
         let quarantine_slot_root = quarantine_root.join(&request.slot_ref);
-        ensure_private_dir(&quarantine_slot_root, self.config.owner_uid)?;
+        ensure_private_dir(&quarantine_slot_root, self.paths.executor_uid)?;
         let quarantine_dir = quarantine_slot_root.join(&request.operation_ref);
-        ensure_private_dir(&quarantine_dir, self.config.owner_uid)?;
+        ensure_private_dir(&quarantine_dir, self.paths.executor_uid)?;
         let quarantine_packet_path = quarantine_dir.join("current.envelope");
         let quarantine_state_path = quarantine_dir.join("state.json");
         let existing_quarantine =
-            load_optional_quarantine_state(&quarantine_state_path, self.config.owner_uid)?;
+            load_optional_quarantine_state(&quarantine_state_path, self.paths.executor_uid)?;
         if let Some(existing) = existing_quarantine.as_ref() {
             validate_quarantine_binding(existing, request)?;
             validate_cached_packet(
                 &quarantine_packet_path,
                 &existing.current,
-                self.config.owner_uid,
+                self.paths.executor_uid,
                 "host_quarantine_packet_unavailable",
             )?;
         }
@@ -639,7 +642,7 @@ impl HostExecutor {
         let state_path = slot_dir.join("state.json");
         let current_path = slot_dir.join("current.envelope");
         if existing_quarantine.is_none() {
-            let state = load_required_state(&state_path, self.config.owner_uid)?;
+            let state = load_required_state(&state_path, self.paths.executor_uid)?;
             validate_quarantine_state(request, &state)?;
             if !state.committed || state.previous.is_some() {
                 return Err(HostEnvelopeError::new(
@@ -649,7 +652,7 @@ impl HostExecutor {
             let packet = read_private_regular(
                 &current_path,
                 MAX_PACKET_BYTES,
-                Some(self.config.owner_uid),
+                Some(self.paths.executor_uid),
                 "host_cache_current_unavailable",
             )?;
             if sha256_hex(&packet) != state.current.packet_sha256 {
@@ -662,7 +665,7 @@ impl HostExecutor {
                 let interrupted = read_private_regular(
                     &quarantine_packet_path,
                     MAX_PACKET_BYTES,
-                    Some(self.config.owner_uid),
+                    Some(self.paths.executor_uid),
                     "host_quarantine_packet_unavailable",
                 )?;
                 if interrupted != packet {
@@ -673,7 +676,7 @@ impl HostExecutor {
                     &quarantine_packet_path,
                     &packet,
                     0o600,
-                    self.config.owner_uid,
+                    self.paths.executor_uid,
                     "host_quarantine_write_failed",
                 )?;
             }
@@ -692,24 +695,24 @@ impl HostExecutor {
                     packet_sha256: sha256_hex(&packet),
                     integrity_hash: String::new(),
                 },
-                self.config.owner_uid,
+                self.paths.executor_uid,
             )?;
         }
 
         self.remove_runtime_file(slot)?;
         remove_private_file_if_present(
             &current_path,
-            self.config.owner_uid,
+            self.paths.executor_uid,
             "host_cache_current_unavailable",
         )?;
         remove_private_file_if_present(
             &slot_dir.join("previous.envelope"),
-            self.config.owner_uid,
+            self.paths.executor_uid,
             "host_cache_previous_unavailable",
         )?;
         remove_private_file_if_present(
             &state_path,
-            self.config.owner_uid,
+            self.paths.executor_uid,
             "host_cache_state_unavailable",
         )?;
         sync_dir(&slot_dir, "host_cache_sync_failed")?;
@@ -734,16 +737,17 @@ impl HostExecutor {
         }
         let slot = self.quarantine_control_slot(request)?;
         let slot_dir = self.slot_cache_dir(&slot.slot_ref);
-        let _lock = lock_slot(&slot_dir, self.config.owner_uid)?;
+        let _lock = lock_slot(&slot_dir, self.paths.executor_uid)?;
         let quarantine_dir = self.quarantine_dir(request);
         let quarantine_state_path = quarantine_dir.join("state.json");
-        let state = load_required_quarantine_state(&quarantine_state_path, self.config.owner_uid)?;
+        let state =
+            load_required_quarantine_state(&quarantine_state_path, self.paths.executor_uid)?;
         validate_quarantine_binding(&state, request)?;
         let packet_path = quarantine_dir.join("current.envelope");
         let packet = read_private_regular(
             &packet_path,
             MAX_PACKET_BYTES,
-            Some(self.config.owner_uid),
+            Some(self.paths.executor_uid),
             "host_quarantine_packet_unavailable",
         )?;
         if sha256_hex(&packet) != state.packet_sha256 {
@@ -769,7 +773,7 @@ impl HostExecutor {
             &slot_dir.join("current.envelope"),
             &packet,
             0o600,
-            self.config.owner_uid,
+            self.paths.executor_uid,
             "host_cache_write_failed",
         )?;
         write_state(
@@ -786,17 +790,17 @@ impl HostExecutor {
                 committed: true,
                 integrity_hash: String::new(),
             },
-            self.config.owner_uid,
+            self.paths.executor_uid,
         )?;
         self.materialize(slot, &opened.value)?;
         remove_private_file_if_present(
             &packet_path,
-            self.config.owner_uid,
+            self.paths.executor_uid,
             "host_quarantine_packet_unavailable",
         )?;
         remove_private_file_if_present(
             &quarantine_state_path,
-            self.config.owner_uid,
+            self.paths.executor_uid,
             "host_quarantine_state_unavailable",
         )?;
         Ok(outcome_from_quarantine_control(
@@ -820,7 +824,7 @@ impl HostExecutor {
         }
         let slot = self.quarantine_control_slot(request)?;
         let slot_dir = self.slot_cache_dir(&slot.slot_ref);
-        let _lock = lock_slot(&slot_dir, self.config.owner_uid)?;
+        let _lock = lock_slot(&slot_dir, self.paths.executor_uid)?;
         if entry_exists(
             &slot_dir.join("current.envelope"),
             "host_cache_current_unavailable",
@@ -834,7 +838,7 @@ impl HostExecutor {
         let quarantine_dir = self.quarantine_dir(request);
         let quarantine_state_path = quarantine_dir.join("state.json");
         let Some(state) =
-            load_optional_quarantine_state(&quarantine_state_path, self.config.owner_uid)?
+            load_optional_quarantine_state(&quarantine_state_path, self.paths.executor_uid)?
         else {
             return Ok(outcome_from_quarantine_control(
                 "purge-quarantine",
@@ -846,12 +850,12 @@ impl HostExecutor {
         validate_quarantine_binding(&state, request)?;
         remove_private_file_if_present(
             &quarantine_dir.join("current.envelope"),
-            self.config.owner_uid,
+            self.paths.executor_uid,
             "host_quarantine_packet_unavailable",
         )?;
         remove_private_file_if_present(
             &quarantine_state_path,
-            self.config.owner_uid,
+            self.paths.executor_uid,
             "host_quarantine_state_unavailable",
         )?;
         sync_dir(&quarantine_dir, "host_quarantine_sync_failed")?;
@@ -869,20 +873,20 @@ impl HostExecutor {
         for slot in &self.config.slots {
             let slot_dir = self.slot_cache_dir(&slot.slot_ref);
             let state_path = slot_dir.join("state.json");
-            match load_optional_state(&state_path, self.config.owner_uid)? {
+            match load_optional_state(&state_path, self.paths.executor_uid)? {
                 Some(state) => {
                     validate_state_binding(&state, &self.config.host_ref, slot)?;
                     validate_cached_packet(
                         &slot_dir.join("current.envelope"),
                         &state.current,
-                        self.config.owner_uid,
+                        self.paths.executor_uid,
                         "host_cache_current_unavailable",
                     )?;
                     if let Some(previous) = &state.previous {
                         validate_cached_packet(
                             &slot_dir.join("previous.envelope"),
                             previous,
-                            self.config.owner_uid,
+                            self.paths.executor_uid,
                             "host_cache_previous_unavailable",
                         )?;
                     }
@@ -926,10 +930,11 @@ impl HostExecutor {
         now: SystemTime,
     ) -> HostResult<HostExecutorOutcome> {
         let slot_dir = self.slot_cache_dir(&slot.slot_ref);
-        let _lock = lock_slot(&slot_dir, self.config.owner_uid)?;
+        let _lock = lock_slot(&slot_dir, self.paths.executor_uid)?;
         self.reconcile_interrupted_install(slot, now)?;
-        reject_partial_files(&slot_dir, self.config.owner_uid)?;
-        let Some(state) = load_optional_state(&slot_dir.join("state.json"), self.config.owner_uid)?
+        reject_partial_files(&slot_dir, self.paths.executor_uid)?;
+        let Some(state) =
+            load_optional_state(&slot_dir.join("state.json"), self.paths.executor_uid)?
         else {
             return Ok(HostExecutorOutcome {
                 action: "restore".to_string(),
@@ -954,7 +959,7 @@ impl HostExecutor {
         let packet = read_private_regular(
             &slot_dir.join("current.envelope"),
             MAX_PACKET_BYTES,
-            Some(self.config.owner_uid),
+            Some(self.paths.executor_uid),
             "host_cache_current_unavailable",
         )?;
         let opened = self.open_packet(&packet, now)?;
@@ -1000,7 +1005,7 @@ impl HostExecutor {
         key.verify(&signature_message(&packet.key_id, &ciphertext), &signature)
             .map_err(|_| HostEnvelopeError::new("host_envelope_signature_invalid"))?;
         let mut plaintext =
-            decrypt_with_identity(&ciphertext, &self.paths.identity, self.config.owner_uid)?;
+            decrypt_with_identity(&ciphertext, &self.paths.identity, self.paths.executor_uid)?;
         let parsed = parse_plaintext(&plaintext);
         plaintext.zeroize();
         let (binding, value) = parsed?;
@@ -1102,7 +1107,7 @@ impl HostExecutor {
         }
         validate_private_directory_metadata(
             &root,
-            self.config.owner_uid,
+            self.paths.executor_uid,
             "host_quarantine_state_unavailable",
         )?;
         let mut active = None;
@@ -1121,14 +1126,14 @@ impl HostExecutor {
             let operation_dir = entry.path();
             validate_private_directory_metadata(
                 &operation_dir,
-                self.config.owner_uid,
+                self.paths.executor_uid,
                 "host_quarantine_state_invalid",
             )?;
             let state_path = operation_dir.join("state.json");
             if !entry_exists(&state_path, "host_quarantine_state_invalid")? {
                 continue;
             }
-            let state = load_required_quarantine_state(&state_path, self.config.owner_uid)?;
+            let state = load_required_quarantine_state(&state_path, self.paths.executor_uid)?;
             validate_quarantine_record(&state)?;
             if state.operation_ref != operation_ref
                 || state.host_ref != self.config.host_ref
@@ -1141,7 +1146,7 @@ impl HostExecutor {
             validate_cached_packet(
                 &operation_dir.join("current.envelope"),
                 &state.current,
-                self.config.owner_uid,
+                self.paths.executor_uid,
                 "host_quarantine_packet_unavailable",
             )?;
             if active.is_some() {
@@ -1179,14 +1184,15 @@ impl HostExecutor {
     }
 
     fn materialize(&self, slot: &HostSecretSlotV1, value: &SecretValue) -> HostResult<()> {
-        ensure_private_dir(&self.paths.runtime_root, self.config.owner_uid)?;
+        ensure_private_dir(&self.paths.runtime_root, self.paths.executor_uid)?;
         let service_dir = self.paths.runtime_root.join(&slot.service_ref);
-        ensure_private_dir(&service_dir, self.config.owner_uid)?;
+        ensure_private_dir(&service_dir, self.paths.executor_uid)?;
         let target = service_dir.join(format!("{}.env", slot.slot_ref));
-        atomic_write(
+        atomic_write_owned(
             &target,
             value.expose_bytes(),
             0o400,
+            self.paths.executor_uid,
             self.config.owner_uid,
             "host_runtime_write_failed",
         )?;
@@ -1210,7 +1216,7 @@ impl HostExecutor {
         let current_path = slot_dir.join("current.envelope");
         let previous_path = slot_dir.join("previous.envelope");
         let state_path = slot_dir.join("state.json");
-        let state = load_optional_state(&state_path, self.config.owner_uid)?;
+        let state = load_optional_state(&state_path, self.paths.executor_uid)?;
 
         let current_exists = entry_exists(&current_path, "host_cache_current_unavailable")?;
         let previous_exists = entry_exists(&previous_path, "host_cache_previous_unavailable")?;
@@ -1218,7 +1224,7 @@ impl HostExecutor {
             let packet = read_private_regular(
                 &current_path,
                 MAX_PACKET_BYTES,
-                Some(self.config.owner_uid),
+                Some(self.paths.executor_uid),
                 "host_cache_current_unavailable",
             )?;
             let opened = self.open_packet(&packet, now)?;
@@ -1242,7 +1248,7 @@ impl HostExecutor {
                     committed: false,
                     integrity_hash: String::new(),
                 },
-                self.config.owner_uid,
+                self.paths.executor_uid,
             )?;
             return Ok(());
         }
@@ -1257,13 +1263,13 @@ impl HostExecutor {
         let current_packet = read_private_regular(
             &current_path,
             MAX_PACKET_BYTES,
-            Some(self.config.owner_uid),
+            Some(self.paths.executor_uid),
             "host_cache_current_unavailable",
         )?;
         let previous_packet = read_private_regular(
             &previous_path,
             MAX_PACKET_BYTES,
-            Some(self.config.owner_uid),
+            Some(self.paths.executor_uid),
             "host_cache_previous_unavailable",
         )?;
         let current_hash = sha256_hex(&current_packet);
@@ -1304,7 +1310,7 @@ impl HostExecutor {
                     committed: false,
                     integrity_hash: String::new(),
                 },
-                self.config.owner_uid,
+                self.paths.executor_uid,
             )?;
         }
         Ok(())
@@ -1316,6 +1322,7 @@ fn validate_config(config: &HostExecutorConfigV1) -> HostResult<BTreeMap<String,
         || config.schema_version != SCHEMA_VERSION
         || !valid_ref("host_", &config.host_ref)
         || ScopeRef::from_opaque(config.scope_ref.clone()).is_err()
+        || config.owner_uid == u32::MAX
         || config.producer_keys.is_empty()
         || config.producer_keys.len() > MAX_KEYS
         || config.slots.is_empty()
@@ -1749,12 +1756,23 @@ fn atomic_write(
     owner_uid: u32,
     reason: &'static str,
 ) -> HostResult<()> {
+    atomic_write_owned(path, bytes, mode, owner_uid, owner_uid, reason)
+}
+
+fn atomic_write_owned(
+    path: &Path,
+    bytes: &[u8],
+    mode: u32,
+    directory_owner_uid: u32,
+    file_owner_uid: u32,
+    reason: &'static str,
+) -> HostResult<()> {
     let parent = path
         .parent()
         .ok_or_else(|| HostEnvelopeError::new(reason))?;
-    ensure_private_dir(parent, owner_uid)?;
+    ensure_private_dir(parent, directory_owner_uid)?;
     if entry_exists(path, reason)? {
-        validate_private_regular_metadata(path, owner_uid, reason)?;
+        validate_private_regular_metadata(path, file_owner_uid, reason)?;
     }
     let tmp = parent.join(format!(
         ".janus-host-{}.{}.tmp",
@@ -1769,12 +1787,21 @@ fn atomic_write(
             .map_err(|_| HostEnvelopeError::new(reason))?;
         file.set_permissions(fs::Permissions::from_mode(mode))
             .map_err(|_| HostEnvelopeError::new(reason))?;
+        if file
+            .metadata()
+            .map_err(|_| HostEnvelopeError::new(reason))?
+            .uid()
+            != file_owner_uid
+        {
+            fchown(&file, Some(Uid::from_raw(file_owner_uid)), None)
+                .map_err(|_| HostEnvelopeError::new(reason))?;
+        }
         file.write_all(bytes)
             .map_err(|_| HostEnvelopeError::new(reason))?;
         file.sync_all()
             .map_err(|_| HostEnvelopeError::new(reason))?;
         drop(file);
-        let metadata = validate_private_regular_metadata(&tmp, owner_uid, reason)?;
+        let metadata = validate_private_regular_metadata(&tmp, file_owner_uid, reason)?;
         if metadata.mode() & 0o777 != mode {
             return Err(HostEnvelopeError::new(reason));
         }
