@@ -200,6 +200,15 @@ pub(super) struct EntryJournalSummary {
     pub release_matches: bool,
 }
 
+impl EntryJournalSummary {
+    pub(super) fn is_terminal(&self) -> bool {
+        matches!(
+            self.phase.as_str(),
+            "completed" | "destroyed" | "rolled_back"
+        )
+    }
+}
+
 pub(super) struct EntryTransaction {
     plan: EntryPlan,
     release: ReleaseAdmission,
@@ -1691,19 +1700,7 @@ impl EntryTransaction {
             if summary.secret_ref.as_str() != self.plan.file.secret_ref {
                 continue;
             }
-            if !summary.release_matches {
-                anyhow::bail!(
-                    "lifecycle entry denied reason_code=entry_conflicting_release value_returned=false"
-                );
-            }
-            if !matches!(
-                summary.phase.as_str(),
-                "completed" | "destroyed" | "rolled_back"
-            ) {
-                anyhow::bail!(
-                    "lifecycle entry denied reason_code=entry_conflicting_operation value_returned=false"
-                );
-            }
+            ensure_prior_journal_is_terminal(&summary)?;
             maximum = maximum.max(summary.generation);
             if summary.phase == "completed"
                 && matches!(summary.operation_kind.as_str(), "create" | "replace")
@@ -2029,6 +2026,20 @@ impl EntryTransaction {
     fn consumer_ref(&self) -> Result<ConsumerRef> {
         Ok(ConsumerRef::new(self.plan.file.consumer_ref.clone())?)
     }
+}
+
+fn ensure_prior_journal_is_terminal(summary: &EntryJournalSummary) -> Result<()> {
+    if summary.is_terminal() {
+        return Ok(());
+    }
+    if !summary.release_matches {
+        anyhow::bail!(
+            "lifecycle entry denied reason_code=entry_conflicting_release value_returned=false"
+        );
+    }
+    anyhow::bail!(
+        "lifecycle entry denied reason_code=entry_conflicting_operation value_returned=false"
+    )
 }
 
 fn load_plan(path: &Path) -> Result<EntryPlan> {
@@ -2738,6 +2749,38 @@ mod tests {
             .reviewed_at_unix_secs
             .saturating_sub(MAX_REVIEW_AGE.as_secs() + 1);
         assert!(validate_plan(&stale, SystemTime::now()).is_err());
+    }
+
+    fn journal_summary(phase: &str, release_matches: bool) -> EntryJournalSummary {
+        EntryJournalSummary {
+            operation_id: "webtx_0123456789abcdef".to_string(),
+            secret_ref: SecretRef::new("sec_fixture").unwrap(),
+            operation_kind: "create".to_string(),
+            generation: 3,
+            phase: phase.to_string(),
+            reason_code: "entry_fixture".to_string(),
+            preflighted_at_unix_secs: 1,
+            release_matches,
+        }
+    }
+
+    #[test]
+    fn predecessor_terminal_journals_preserve_history_without_blocking_upgrade() {
+        for phase in ["completed", "destroyed", "rolled_back"] {
+            ensure_prior_journal_is_terminal(&journal_summary(phase, false)).unwrap();
+        }
+
+        let release_mismatch =
+            ensure_prior_journal_is_terminal(&journal_summary("validated", false))
+                .unwrap_err()
+                .to_string();
+        assert!(release_mismatch.contains("entry_conflicting_release"));
+
+        let active_operation =
+            ensure_prior_journal_is_terminal(&journal_summary("validated", true))
+                .unwrap_err()
+                .to_string();
+        assert!(active_operation.contains("entry_conflicting_operation"));
     }
 
     #[test]
