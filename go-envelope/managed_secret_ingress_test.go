@@ -287,6 +287,20 @@ func TestManagedSetupPageRequiresPasskeyBeforeRenderingValueInput(t *testing.T) 
 			t.Fatalf("managed setup %s should contain %q, got %q", header, expected, got)
 		}
 	}
+	csp := response.Header().Get("Content-Security-Policy")
+	if !strings.Contains(csp, "form-action 'self' https://auth.example.test;") ||
+		strings.Contains(csp, "/oauth/v2/authorize") {
+		t.Fatalf("managed setup CSP must allow only the configured OIDC authorization origin: %s", csp)
+	}
+
+	healthRequest := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	healthResponse := httptest.NewRecorder()
+	app.routes().ServeHTTP(healthResponse, healthRequest)
+	healthCSP := healthResponse.Header().Get("Content-Security-Policy")
+	if !strings.Contains(healthCSP, "form-action 'self';") ||
+		strings.Contains(healthCSP, "auth.example.test") {
+		t.Fatalf("OIDC form destination must stay scoped to the managed setup page: %s", healthCSP)
+	}
 }
 
 func TestManagedSetupFailureStatesStayPlainValueFreeAndRetryable(t *testing.T) {

@@ -791,7 +791,7 @@ func (app *App) securityHeaders(next http.Handler) http.Handler {
 		nonce := randomNonce(18)
 		r = r.WithContext(context.WithValue(r.Context(), cspNonceKey{}, nonce))
 		w.Header().Set("Cache-Control", "no-store")
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'none'; object-src 'none'; worker-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'; connect-src 'self'; font-src 'self'; img-src 'self' data:; manifest-src 'self'; style-src 'self' 'nonce-"+nonce+"'; upgrade-insecure-requests")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'none'; object-src 'none'; worker-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action "+app.formActionSources(r)+"; connect-src 'self'; font-src 'self'; img-src 'self' data:; manifest-src 'self'; style-src 'self' 'nonce-"+nonce+"'; upgrade-insecure-requests")
 		w.Header().Set("Cross-Origin-Embedder-Policy", "credentialless")
 		w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
 		w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
@@ -811,6 +811,33 @@ func (app *App) securityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("Permissions-Policy", "camera=(), geolocation=(), microphone=()")
 		next.ServeHTTP(w, r)
 	})
+}
+
+func (app *App) formActionSources(r *http.Request) string {
+	const sameOrigin = "'self'"
+	// Browsers enforce form-action across redirects. The managed setup POST
+	// redirects to OIDC for a fresh passkey assertion, so only that source page
+	// receives the configured authorization origin as an additional target.
+	if r == nil ||
+		r.Method != http.MethodGet ||
+		r.URL.Path != "/managed-service/setup" ||
+		app.oauth == nil {
+		return sameOrigin
+	}
+	authURL, err := url.Parse(app.oauth.Endpoint.AuthURL)
+	if err != nil ||
+		authURL.Host == "" ||
+		authURL.User != nil ||
+		strings.ContainsAny(authURL.Host, " \t\r\n;,'\"\\") {
+		return sameOrigin
+	}
+	hostname := authURL.Hostname()
+	loopbackHTTP := authURL.Scheme == "http" &&
+		(hostname == "localhost" || hostname == "127.0.0.1" || hostname == "::1")
+	if authURL.Scheme != "https" && !loopbackHTTP {
+		return sameOrigin
+	}
+	return sameOrigin + " " + authURL.Scheme + "://" + authURL.Host
 }
 
 func (app *App) rateLimit(next http.Handler) http.Handler {

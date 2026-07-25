@@ -27,6 +27,7 @@ import (
 const (
 	managedBrowserAssuranceEnv  = "JANUS_MANAGED_BROWSER_ASSURANCE_SERVER"
 	managedBrowserAssuranceAddr = "127.0.0.1:18082"
+	managedBrowserAuthAddr      = "127.0.0.1:18083"
 	managedBrowserRemoveIntent  = "intent_abcdef0123456789"
 	managedBrowserRemoveOp      = "op_abcdef0123456789"
 )
@@ -213,7 +214,7 @@ type managedBrowserHarness struct {
 	mu             sync.Mutex
 }
 
-func newManagedBrowserHarness(t *testing.T, baseURL string) *managedBrowserHarness {
+func newManagedBrowserHarness(t *testing.T, baseURL, authBaseURL string) *managedBrowserHarness {
 	t.Helper()
 	app := newTestApp(t)
 	issuer := baseURL + "/__managed-browser/issuer"
@@ -239,8 +240,8 @@ func newManagedBrowserHarness(t *testing.T, baseURL string) *managedBrowserHarne
 		RedirectURL:  baseURL + "/oidc/callback",
 		Scopes:       []string{"openid", "email", "profile"},
 		Endpoint: oauth2.Endpoint{
-			AuthURL:  baseURL + "/__managed-browser/authorize",
-			TokenURL: baseURL + "/__managed-browser/token",
+			AuthURL:  authBaseURL + "/__managed-browser/authorize",
+			TokenURL: authBaseURL + "/__managed-browser/token",
 		},
 	}
 	app.verifier = oidc.NewVerifier(
@@ -458,9 +459,24 @@ func TestManagedBrowserAssuranceServer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	authListener, err := net.Listen("tcp", managedBrowserAuthAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
 	baseURL := "http://" + managedBrowserAssuranceAddr
+	authBaseURL := "http://" + managedBrowserAuthAddr
+	harness := newManagedBrowserHarness(t, baseURL, authBaseURL)
+	authServer := &http.Server{
+		Handler:           harness,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	go func() {
+		if err := authServer.Serve(authListener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			fmt.Printf("managed_browser_auth_server_error=%v\n", err)
+		}
+	}()
 	server := &http.Server{
-		Handler:           newManagedBrowserHarness(t, baseURL),
+		Handler:           harness,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	fmt.Println("managed_browser_assurance_server=ready")
