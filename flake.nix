@@ -50,7 +50,7 @@
 
             meta = {
               description = "Janus split-plane permit broker, administration runtime, and reference-only Warden";
-              homepage = "https://github.com/markus-barta/janus";
+              homepage = "https://github.com/inspr-at/janus";
               license = pkgs.lib.licenses.agpl3Only;
               platforms = supportedSystems;
               mainProgram = "janusd-use";

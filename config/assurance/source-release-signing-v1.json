@@ -2,24 +2,24 @@
   "schema_version": 1,
   "owner": "JANUS-324",
   "effective_from": "2026-07-22T14:00:17Z",
-  "repository": "markus-barta/janus",
+  "repository": "inspr-at/janus",
   "signed_subset": [
     {
       "tag_prefix": "go-envelope-v",
       "workflow": ".github/workflows/go-envelope.yml",
-      "image": "ghcr.io/markus-barta/janus/janus-envelope"
+      "image": "ghcr.io/inspr-at/janus/janus-envelope"
     },
     {
       "tag_prefix": "rust-engine-v",
       "workflow": ".github/workflows/rust.yml",
-      "image": "ghcr.io/markus-barta/janus/janus-engine"
+      "image": "ghcr.io/inspr-at/janus/janus-engine"
     }
   ],
   "method": {
     "tool": "cosign",
     "mode": "keyless_oidc",
     "issuer": "https://token.actions.githubusercontent.com",
-    "identity_prefix": "https://github.com/markus-barta/janus/",
+    "identity_prefix": "https://github.com/inspr-at/janus/",
     "artifact": "source-release.json",
     "bundle": "source-release.sigstore.json"
   },
@@ -31,6 +31,6 @@
     }
   ],
   "pre_policy_release_disposition": "deny_unlisted",
-  "recovery": "Rerun the release workflow only for the unchanged reviewed tag and commit. A workflow identity or repository change requires a reviewed policy update before signing resumes.",
-  "history": "Only the exact entries in grandfathered_releases remain admissible without a source bundle. All other pre-policy releases are superseded and outside this policy without deleting or rewriting their history. Every release at or after effective_from must carry the source bundle while image signing remains mandatory."
+  "recovery": "Rerun the release workflow only for the unchanged reviewed tag and commit in the canonical repository. A workflow identity or repository change requires a reviewed policy update before signing resumes.",
+  "history": "The repository moved from markus-barta/janus to inspr-at/janus without rewriting Git or release history. Only the exact entries in grandfathered_releases remain admissible without a source bundle. Releases signed under the former repository identity remain published history but are superseded by this canonical identity policy. Every new release must carry the source bundle while image signing remains mandatory."
 }

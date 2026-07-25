@@ -23,7 +23,7 @@ scripts/admit-engine-release.sh \
   --channel stable \
   --mode enterprise \
   --previous-mode enterprise \
-  --image ghcr.io/markus-barta/janus/janus-engine \
+  --image ghcr.io/inspr-at/janus/janus-engine \
   --tag "${JANUS_ENGINE_RELEASE_TAG}" \
   --digest sha256:... \
   --output /run/janus/release-admission.json

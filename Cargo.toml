@@ -22,7 +22,7 @@ version = "0.1.12"
 edition = "2021"
 rust-version = "1.80"
 authors = ["Markus Barta <mba@barta.cm>"]
-repository = "https://github.com/markus-barta/janus"
+repository = "https://github.com/inspr-at/janus"
 license = "AGPL-3.0-only"
 
 [workspace.lints.rust]

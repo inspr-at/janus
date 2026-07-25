@@ -9,7 +9,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X 'main.buildCo
 
 FROM alpine:3.22.5@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
 LABEL org.opencontainers.image.title="Janus governance envelope"
-LABEL org.opencontainers.image.source="https://github.com/markus-barta/janus"
+LABEL org.opencontainers.image.source="https://github.com/inspr-at/janus"
 LABEL org.opencontainers.image.licenses="AGPL-3.0-only"
 LABEL org.opencontainers.image.base.name="docker.io/library/alpine:3.22.5"
 LABEL org.opencontainers.image.base.digest="sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce"
