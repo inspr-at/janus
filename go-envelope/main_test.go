@@ -1391,6 +1391,39 @@ func TestSafeLoginReturnPathRejectsOpenRedirectAndUnsafeRoutes(t *testing.T) {
 	}
 }
 
+func TestAuthContinuationTargetIsExactAndSameOrigin(t *testing.T) {
+	for _, tc := range []struct {
+		target string
+		kind   string
+		want   bool
+	}{
+		{target: "/", kind: "login", want: true},
+		{target: "/auth/smoke", kind: "login", want: true},
+		{target: "/managed-service/setup?intent=intent_0123456789abcdef", kind: "managed_login", want: true},
+		{target: "/managed-service/setup?intent=intent_0123456789abcdef", kind: "managed_step_up", want: true},
+		{target: "/managed-service/setup?intent=intent_0123456789abcdef&next=/", kind: "managed_step_up", want: false},
+		{target: "/managed-service/setup?intent=invalid", kind: "managed_step_up", want: false},
+		{target: "https://evil.example.test/", kind: "login", want: false},
+		{target: "//evil.example.test/", kind: "login", want: false},
+		{target: "/auth/smoke\r\nRefresh: 0;url=https://evil.example.test", kind: "login", want: false},
+		{target: "/", kind: "unknown", want: false},
+	} {
+		if got := validAuthContinuationTarget(tc.target, tc.kind); got != tc.want {
+			t.Fatalf("target=%q kind=%q got=%v want=%v", tc.target, tc.kind, got, tc.want)
+		}
+	}
+
+	app := newTestApp(t)
+	req := httptest.NewRequest(http.MethodGet, "/oidc/callback", nil)
+	out := httptest.NewRecorder()
+	app.renderAuthContinuation(out, req, "https://evil.example.test/", "login")
+	if out.Code != http.StatusInternalServerError || out.Header().Get("Refresh") != "" ||
+		strings.Contains(out.Body.String(), "evil.example.test") ||
+		!strings.Contains(out.Body.String(), "value_returned=false") {
+		t.Fatalf("invalid continuation must fail closed and value-free: status=%d refresh=%q body=%s", out.Code, out.Header().Get("Refresh"), out.Body.String())
+	}
+}
+
 func TestLoginRedirectClearsUnsafeReturnCookie(t *testing.T) {
 	app := newTestApp(t)
 	app.oauth = testOAuthConfig()

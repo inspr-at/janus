@@ -64,7 +64,20 @@ test("passwordless import forgets the value across back, refresh, and duplicate 
   await page
     .getByRole("radio", { name: /Paste a value I already have/ })
     .check();
+  const authorizationRequest = page.waitForRequest(
+    (request) =>
+      new URL(request.url()).pathname === "/__managed-browser/authorize",
+  );
+  const callbackResponse = page.waitForResponse(
+    (response) => new URL(response.url()).pathname === "/oidc/callback",
+  );
   await page.getByRole("button", { name: "Continue with passkey" }).click();
+  expect(new URL((await authorizationRequest).url()).hostname).toBe("localhost");
+  const callback = await callbackResponse;
+  expect(callback.status()).toBe(200);
+  expect(callback.headers().refresh).toBe(
+    "0; url=/managed-service/setup?intent=intent_0123456789abcdef",
+  );
   await expect(
     page.getByRole("heading", { name: "Enter the value once" }),
   ).toBeVisible();
