@@ -47,7 +47,10 @@ that still bind to its reviewed catalog. A valid, unexpired prepared host
 delivery remains resumable; incomplete or expired create/replace work is
 rolled back. A nonterminal removal is preserved and resumed explicitly;
 process restart never restores a detached service secret. A duplicate terminal
-operation returns its existing status without applying again.
+operation returns its existing status without applying again. Integrity-checked
+terminal journals from a predecessor release remain immutable history: startup
+does not resume them, while their generations still prevent attempt-number
+reuse after an upgrade. A nonterminal predecessor journal remains fail-closed.
 
 Web journals use a deterministic `webtx_` namespace derived from the external
 `op_` reference. Startup recovery ignores lifecycle-entry journals from other

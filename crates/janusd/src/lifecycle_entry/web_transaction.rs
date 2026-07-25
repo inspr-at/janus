@@ -25,9 +25,9 @@ use tokio::time::{timeout, Duration};
 use zeroize::Zeroize;
 
 use super::{
-    read_regular_bounded, scan_journal_summaries, stable_error_reason, validate_plan, EntryPhase,
-    EntryPlan, EntryPlanFile, EntrySource, EntryStatus, EntryTransaction,
-    ManagedEntryOperationKind,
+    read_regular_bounded, scan_journal_summaries, stable_error_reason, validate_plan,
+    EntryJournalSummary, EntryPhase, EntryPlan, EntryPlanFile, EntrySource, EntryStatus,
+    EntryTransaction, ManagedEntryOperationKind,
 };
 
 const CATALOG_SCHEMA: &str = "inspr.janus.managed-web-transaction-catalog.v2";
@@ -1104,13 +1104,7 @@ async fn reconcile_catalog(catalog: &ReviewedCatalog, release: &ReleaseAdmission
             let Some(operation_ref) = external_operation_ref(&summary.operation_id) else {
                 continue;
             };
-            if !summary.release_matches {
-                anyhow::bail!("web transaction journal release binding changed");
-            }
-            if matches!(
-                summary.phase.as_str(),
-                "completed" | "destroyed" | "rolled_back"
-            ) {
+            if !journal_needs_startup_reconciliation(&summary)? {
                 continue;
             }
             let mut matching = None;
@@ -1166,6 +1160,16 @@ async fn reconcile_catalog(catalog: &ReviewedCatalog, release: &ReleaseAdmission
         }
     }
     Ok(())
+}
+
+fn journal_needs_startup_reconciliation(summary: &EntryJournalSummary) -> Result<bool> {
+    if summary.is_terminal() {
+        return Ok(false);
+    }
+    if !summary.release_matches {
+        anyhow::bail!("web transaction journal release binding changed");
+    }
+    Ok(true)
 }
 
 fn request_for_entry(
@@ -1405,6 +1409,7 @@ fn external_operation_ref(operation_id: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use janus_core::SecretRef;
 
     fn request() -> TransactionRequest {
         TransactionRequest {
@@ -1546,6 +1551,30 @@ mod tests {
             Some("op_0123456789abcdef")
         );
         assert!(external_operation_ref("entry-admin-operation").is_none());
+    }
+
+    fn journal_summary(phase: &str, release_matches: bool) -> EntryJournalSummary {
+        EntryJournalSummary {
+            operation_id: "webtx_0123456789abcdef".to_string(),
+            secret_ref: SecretRef::new("sec_fixture").unwrap(),
+            operation_kind: "create".to_string(),
+            generation: 3,
+            phase: phase.to_string(),
+            reason_code: "entry_fixture".to_string(),
+            preflighted_at_unix_secs: 1,
+            release_matches,
+        }
+    }
+
+    #[test]
+    fn startup_skips_terminal_predecessor_journals_but_rejects_active_ones() {
+        for phase in ["completed", "destroyed", "rolled_back"] {
+            assert!(!journal_needs_startup_reconciliation(&journal_summary(phase, false)).unwrap());
+        }
+        assert!(journal_needs_startup_reconciliation(&journal_summary("validated", true)).unwrap());
+        assert!(
+            journal_needs_startup_reconciliation(&journal_summary("validated", false)).is_err()
+        );
     }
 
     #[tokio::test]
