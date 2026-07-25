@@ -19,7 +19,8 @@ use super::{
     HostExecutor, HostExecutorOutcome,
 };
 
-const CONFIG_SCHEMA: &str = "inspr.janus.managed-host-agent-config.v1";
+const CONFIG_SCHEMA: &str = "inspr.janus.managed-host-agent-config.v2";
+const CONFIG_SCHEMA_VERSION: u16 = 2;
 const CLAIM_SCHEMA: &str = "inspr.pharos.managed-service-operation-claim.v1";
 const LEASE_SCHEMA: &str = "inspr.pharos.managed-service-operation-lease.v1";
 const RESULT_SCHEMA: &str = "inspr.pharos.managed-service-operation-result.v1";
@@ -63,7 +64,7 @@ type AgentResult<T> = Result<T, ManagedHostAgentError>;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-struct ManagedHostAgentConfigV1 {
+struct ManagedHostAgentConfigV2 {
     schema: String,
     schema_version: u16,
     host_ref: String,
@@ -71,6 +72,7 @@ struct ManagedHostAgentConfigV1 {
     janus_origin: String,
     token_file: String,
     docker_executable: String,
+    compose_executable: String,
     compose_project: String,
     poll_interval_seconds: u64,
     profiles: Vec<ManagedHostProfileV1>,
@@ -288,7 +290,7 @@ struct DockerHealth {
 }
 
 struct ManagedHostAgent {
-    config: ManagedHostAgentConfigV1,
+    config: ManagedHostAgentConfigV2,
     token: String,
     http: ureq::Agent,
 }
@@ -302,7 +304,7 @@ pub fn run_from_system() -> AgentResult<()> {
         "managed_host_agent_config_unavailable",
     )
     .map_err(|_| ManagedHostAgentError::new("managed_host_agent_config_unavailable"))?;
-    let config: ManagedHostAgentConfigV1 = decode_strict(&config_raw)
+    let config: ManagedHostAgentConfigV2 = decode_strict(&config_raw)
         .map_err(|_| ManagedHostAgentError::new("managed_host_agent_config_invalid"))?;
     let agent = ManagedHostAgent::new(config)?;
     let executor = HostExecutor::from_system()
@@ -319,7 +321,7 @@ pub fn run_from_system() -> AgentResult<()> {
 }
 
 impl ManagedHostAgent {
-    fn new(config: ManagedHostAgentConfigV1) -> AgentResult<Self> {
+    fn new(config: ManagedHostAgentConfigV2) -> AgentResult<Self> {
         validate_config(&config)?;
         let token = read_private_regular(
             Path::new(&config.token_file),
@@ -971,7 +973,8 @@ impl ManagedHostAgent {
         {
             return Err(ManagedHostAgentError::new("managed_host_removal_uncertain"));
         }
-        let exact = Command::new(&self.config.docker_executable)
+        let exact = self
+            .docker_command()
             .args([
                 "inspect",
                 "--format",
@@ -993,9 +996,8 @@ impl ManagedHostAgent {
     }
 
     fn compose_command(&self, profile: &ManagedHostProfileV1) -> Command {
-        let mut command = Command::new(&self.config.docker_executable);
+        let mut command = Command::new(&self.config.compose_executable);
         command.args([
-            "compose",
             "--project-name",
             &self.config.compose_project,
             "--file",
@@ -1004,12 +1006,17 @@ impl ManagedHostAgent {
         command
     }
 
+    fn docker_command(&self) -> Command {
+        Command::new(&self.config.docker_executable)
+    }
+
     fn verify(
         &self,
         profile: &ManagedHostProfileV1,
         generation: u64,
     ) -> AgentResult<ManagedHealthEvidenceV1> {
-        let output = Command::new(&self.config.docker_executable)
+        let output = self
+            .docker_command()
             .args([
                 "inspect",
                 "--format",
@@ -1192,14 +1199,15 @@ fn endpoint(origin: &str, path: &str) -> AgentResult<Url> {
         .map_err(|_| ManagedHostAgentError::new("managed_host_target_invalid"))
 }
 
-fn validate_config(config: &ManagedHostAgentConfigV1) -> AgentResult<()> {
+fn validate_config(config: &ManagedHostAgentConfigV2) -> AgentResult<()> {
     if config.schema != CONFIG_SCHEMA
-        || config.schema_version != SCHEMA_VERSION
+        || config.schema_version != CONFIG_SCHEMA_VERSION
         || !valid_ref("host_", &config.host_ref)
         || validate_origin(&config.pharos_origin).is_err()
         || validate_origin(&config.janus_origin).is_err()
         || !absolute_clean(&config.token_file)
         || !absolute_clean(&config.docker_executable)
+        || !absolute_clean(&config.compose_executable)
         || !safe_runtime_name(&config.compose_project)
         || !(2..=300).contains(&config.poll_interval_seconds)
         || config.profiles.is_empty()
@@ -1502,15 +1510,17 @@ fn unix_seconds() -> AgentResult<i64> {
 mod tests {
     use super::*;
 
-    fn config() -> ManagedHostAgentConfigV1 {
-        ManagedHostAgentConfigV1 {
+    fn config() -> ManagedHostAgentConfigV2 {
+        ManagedHostAgentConfigV2 {
             schema: CONFIG_SCHEMA.to_string(),
-            schema_version: SCHEMA_VERSION,
+            schema_version: CONFIG_SCHEMA_VERSION,
             host_ref: "host_58f36c72a91e".to_string(),
             pharos_origin: "https://pharos.example.test".to_string(),
             janus_origin: "https://vault.example.test".to_string(),
             token_file: "/run/credentials/janus-managed-host-agent/token".to_string(),
             docker_executable: "/nix/store/0123456789abcdef-docker/bin/docker".to_string(),
+            compose_executable: "/nix/store/0123456789abcdef-docker-compose/bin/docker-compose"
+                .to_string(),
             compose_project: "janus-managed-canary".to_string(),
             poll_interval_seconds: 5,
             profiles: vec![ManagedHostProfileV1 {
@@ -1536,6 +1546,13 @@ mod tests {
             validate_config(&fixture).expect_err("relative path denied"),
             ManagedHostAgentError::new("managed_host_agent_config_invalid")
         );
+
+        let mut fixture = config();
+        fixture.compose_executable = "docker-compose".to_string();
+        assert_eq!(
+            validate_config(&fixture).expect_err("relative Compose executable denied"),
+            ManagedHostAgentError::new("managed_host_agent_config_invalid")
+        );
     }
 
     #[test]
@@ -1549,6 +1566,44 @@ mod tests {
                 "--force-recreate",
                 "secret-canary",
             ]
+        );
+    }
+
+    #[test]
+    fn runtime_tools_keep_compose_and_inspect_separate() {
+        let fixture = config();
+        let agent = ManagedHostAgent {
+            config: fixture,
+            token: "t".repeat(32),
+            http: ureq::AgentBuilder::new().build(),
+        };
+        let command = agent.compose_command(&agent.config.profiles[0]);
+        assert_eq!(
+            command.get_program(),
+            "/nix/store/0123456789abcdef-docker-compose/bin/docker-compose"
+        );
+        assert_ne!(
+            command.get_program(),
+            Path::new(&agent.config.docker_executable).as_os_str()
+        );
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            [
+                "--project-name",
+                "janus-managed-canary",
+                "--file",
+                "/etc/janus-managed/canary.compose.yaml",
+            ]
+        );
+
+        let command = agent.docker_command();
+        assert_eq!(
+            command.get_program(),
+            "/nix/store/0123456789abcdef-docker/bin/docker"
+        );
+        assert_ne!(
+            command.get_program(),
+            Path::new(&agent.config.compose_executable).as_os_str()
         );
     }
 
