@@ -56,7 +56,7 @@ def validate_policy(policy: dict[str, Any]) -> None:
     effective_from_text = policy.get("effective_from")
     effective_from = parse_canonical_utc(effective_from_text, "effective_from")
     require(effective_from_text == EFFECTIVE_FROM, "source-signing cutoff changed")
-    require(policy.get("repository") == "markus-barta/janus", "repository changed")
+    require(policy.get("repository") == "inspr-at/janus", "repository changed")
     subset = policy.get("signed_subset")
     require(isinstance(subset, list) and len(subset) == 2, "released-source subset must be exact")
     require({item.get("tag_prefix") for item in subset} == {"go-envelope-v", "rust-engine-v"}, "released-source tag subset changed")
@@ -213,11 +213,11 @@ def self_test(policy: dict[str, Any]) -> None:
         raise SourcePolicyError("post-cutoff grandfather fixture passed")
     manifest = {
         "schema_version": 1,
-        "repository": "markus-barta/janus",
+        "repository": "inspr-at/janus",
         "tag": "rust-engine-v0.0.0-fixture",
         "commit": "0" * 40,
         "workflow": ".github/workflows/rust.yml",
-        "image": "ghcr.io/markus-barta/janus/janus-engine",
+        "image": "ghcr.io/inspr-at/janus/janus-engine",
         "image_digest": "sha256:" + "0" * 64,
     }
     try:

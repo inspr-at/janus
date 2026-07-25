@@ -524,11 +524,11 @@ mod tests {
   "deny_mode_downgrade": true,
   "channels": [{{
     "name": "stable",
-    "image": "ghcr.io/markus-barta/janus/janus-engine",
+    "image": "ghcr.io/inspr-at/janus/janus-engine",
     "tag_prefix": "rust-engine-v",
-    "repository": "markus-barta/janus",
-    "signer_workflow": "markus-barta/janus/.github/workflows/rust.yml",
-    "certificate_identity_prefix": "https://github.com/markus-barta/janus/.github/workflows/rust.yml@refs/tags/",
+    "repository": "inspr-at/janus",
+    "signer_workflow": "inspr-at/janus/.github/workflows/rust.yml",
+    "certificate_identity_prefix": "https://github.com/inspr-at/janus/.github/workflows/rust.yml@refs/tags/",
     "oidc_issuer": "https://token.actions.githubusercontent.com",
     "provenance_predicate_type": "https://slsa.dev/provenance/v1",
     "sbom_predicate_type": "https://spdx.dev/Document/v2.3"
@@ -552,20 +552,20 @@ mod tests {
             "mode": "enterprise",
             "previous_mode": "enterprise",
             "artifact": {
-                "image": "ghcr.io/markus-barta/janus/janus-engine",
+                "image": "ghcr.io/inspr-at/janus/janus-engine",
                 "tag": "rust-engine-v0.1.6",
                 "digest": DIGEST,
                 "development": false
             },
             "signature": {
                 "verified": true,
-                "identity": "https://github.com/markus-barta/janus/.github/workflows/rust.yml@refs/tags/rust-engine-v0.1.6",
+                "identity": "https://github.com/inspr-at/janus/.github/workflows/rust.yml@refs/tags/rust-engine-v0.1.6",
                 "oidc_issuer": "https://token.actions.githubusercontent.com"
             },
             "provenance": {
                 "verified": true,
-                "repository": "markus-barta/janus",
-                "signer_workflow": "markus-barta/janus/.github/workflows/rust.yml",
+                "repository": "inspr-at/janus",
+                "signer_workflow": "inspr-at/janus/.github/workflows/rust.yml",
                 "source_ref": "refs/tags/rust-engine-v0.1.6",
                 "predicate_type": "https://slsa.dev/provenance/v1"
             },

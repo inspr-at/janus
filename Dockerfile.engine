@@ -30,7 +30,7 @@ FROM scratch
 
 LABEL org.opencontainers.image.title="Janus Rust engine"
 LABEL org.opencontainers.image.description="Static Janus secret-handling binaries with no runtime OS packages or shell"
-LABEL org.opencontainers.image.source="https://github.com/markus-barta/janus"
+LABEL org.opencontainers.image.source="https://github.com/inspr-at/janus"
 LABEL org.opencontainers.image.licenses="AGPL-3.0-only"
 LABEL org.opencontainers.image.base.name="scratch"
 

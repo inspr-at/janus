@@ -4,7 +4,7 @@ set -euo pipefail
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 admit="${repo}/scripts/admit-engine-release.sh"
 policy="${repo}/config/release-channels/v1.json"
-image="ghcr.io/markus-barta/janus/janus-engine"
+image="ghcr.io/inspr-at/janus/janus-engine"
 tag="rust-engine-v0.1.12"
 digest="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 revoked="sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
