@@ -55,6 +55,7 @@ impl Fixture {
                 identity: identity_path.clone(),
                 cache_root: cache_root.clone(),
                 runtime_root: runtime_root.clone(),
+                executor_uid: owner_uid,
             },
         )
         .expect("executor");
@@ -241,6 +242,48 @@ fn install_caches_only_ciphertext_and_materializes_private_runtime_value() {
 }
 
 #[test]
+fn privileged_executor_separates_cache_and_runtime_ownership() {
+    let fixture = Fixture::new();
+    if fixture.owner_uid != 0 {
+        return;
+    }
+
+    let runtime_owner_uid = 65_534;
+    let executor = HostExecutor::new(
+        config(&fixture.signing_key, runtime_owner_uid),
+        ExecutorPaths {
+            identity: fixture.identity_path.clone(),
+            cache_root: fixture.cache_root.clone(),
+            runtime_root: fixture.runtime_root.clone(),
+            executor_uid: fixture.owner_uid,
+        },
+    )
+    .expect("privileged executor");
+    executor
+        .install(&fixture.packet(1, b"split-owner-canary"), now())
+        .expect("split-owner install");
+
+    assert_eq!(
+        fs::metadata(fixture.slot_cache().join("current.envelope"))
+            .expect("cache metadata")
+            .uid(),
+        fixture.owner_uid
+    );
+    assert_eq!(
+        fs::metadata(fixture.runtime_root.join(SERVICE_REF))
+            .expect("runtime directory metadata")
+            .uid(),
+        fixture.owner_uid
+    );
+    assert_eq!(
+        fs::metadata(fixture.runtime_target())
+            .expect("runtime target metadata")
+            .uid(),
+        runtime_owner_uid
+    );
+}
+
+#[test]
 fn failed_first_install_rolls_back_runtime_and_ciphertext_before_activation() {
     let fixture = Fixture::new();
     fixture
@@ -330,6 +373,7 @@ fn exact_host_scope_slot_declaration_epoch_and_generation_are_enforced() {
             identity: fixture.identity_path.clone(),
             cache_root: fixture.cache_root.join("revoked-cache"),
             runtime_root: fixture.runtime_root.join("revoked-runtime"),
+            executor_uid: fixture.owner_uid,
         },
     )
     .expect("revocation executor");
@@ -700,6 +744,7 @@ fn retired_host_removes_runtime_and_bounded_input_rejects_oversize() {
             identity: fixture.identity_path.clone(),
             cache_root: fixture.cache_root.clone(),
             runtime_root: fixture.runtime_root.clone(),
+            executor_uid: fixture.owner_uid,
         },
     )
     .expect("retired executor");
