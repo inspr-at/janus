@@ -3109,6 +3109,43 @@ func assertCoreSecurityHeaders(t *testing.T, name string, out *httptest.Response
 	}
 }
 
+func TestManagedSetupFormActionSourcesFailClosed(t *testing.T) {
+	setupRequest := httptest.NewRequest(http.MethodGet, "/managed-service/setup?intent=intent_0123456789abcdef", nil)
+	postRequest := httptest.NewRequest(http.MethodPost, "/managed-service/setup/step-up", nil)
+	healthRequest := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	tests := []struct {
+		name    string
+		request *http.Request
+		authURL string
+		oauth   bool
+		want    string
+	}{
+		{name: "configured HTTPS origin", request: setupRequest, authURL: "https://auth.example.test/oauth/v2/authorize", oauth: true, want: "'self' https://auth.example.test"},
+		{name: "loopback HTTP origin", request: setupRequest, authURL: "http://127.0.0.1:18083/authorize", oauth: true, want: "'self' http://127.0.0.1:18083"},
+		{name: "nil request", request: nil, authURL: "https://auth.example.test/authorize", oauth: true, want: "'self'"},
+		{name: "nil OAuth config", request: setupRequest, want: "'self'"},
+		{name: "POST response", request: postRequest, authURL: "https://auth.example.test/authorize", oauth: true, want: "'self'"},
+		{name: "unrelated page", request: healthRequest, authURL: "https://auth.example.test/authorize", oauth: true, want: "'self'"},
+		{name: "external HTTP", request: setupRequest, authURL: "http://auth.example.test/authorize", oauth: true, want: "'self'"},
+		{name: "userinfo", request: setupRequest, authURL: "https://user@auth.example.test/authorize", oauth: true, want: "'self'"},
+		{name: "hostile host delimiter", request: setupRequest, authURL: "https://auth.example.test;script-src/authorize", oauth: true, want: "'self'"},
+		{name: "invalid URL", request: setupRequest, authURL: "://invalid", oauth: true, want: "'self'"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			app := &App{}
+			if test.oauth {
+				app.oauth = &oauth2.Config{
+					Endpoint: oauth2.Endpoint{AuthURL: test.authURL},
+				}
+			}
+			if got := app.formActionSources(test.request); got != test.want {
+				t.Fatalf("expected %q, got %q", test.want, got)
+			}
+		})
+	}
+}
+
 func assertStyleNonceMatchesCSP(t *testing.T, out *httptest.ResponseRecorder) {
 	t.Helper()
 	csp := out.Header().Get("Content-Security-Policy")

@@ -55,6 +55,11 @@ test("passwordless import forgets the value across back, refresh, and duplicate 
   await expect(page.locator('input[name="secret_value"]')).toHaveCount(0);
   await expect(page.getByText("Reveal", { exact: true })).toHaveCount(0);
   await expect(page.getByText("Copy", { exact: true })).toHaveCount(0);
+  await expect(page.locator(".managed-source-choice")).toHaveCount(2);
+  await expect(page.locator(".managed-source-choice").first()).toHaveCSS(
+    "display",
+    "grid",
+  );
 
   await page
     .getByRole("radio", { name: /Paste a value I already have/ })

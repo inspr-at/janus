@@ -1178,7 +1178,7 @@ table.ledger tr:last-child td { border-bottom: 0; }
 }
 .managed-source-fieldset > .lead { margin: 5px 0 14px; }
 .managed-source-choices { display: grid; gap: 10px; }
-.managed-source-choice {
+form.managed-action-form .managed-source-choice {
   display: grid;
   grid-template-columns: 18px 34px minmax(0, 1fr);
   gap: 12px;
@@ -1328,7 +1328,7 @@ table.ledger tr:last-child td { border-bottom: 0; }
   .managed-details dl { grid-template-columns: 1fr; }
   .managed-section-head { display: grid; }
   .managed-primary-action { width: 100%; min-width: 0; }
-  .managed-source-choice { grid-template-columns: 18px 30px minmax(0, 1fr); padding-inline: 11px; }
+  form.managed-action-form .managed-source-choice { grid-template-columns: 18px 30px minmax(0, 1fr); padding-inline: 11px; }
   .managed-progress li b { font-size: 10px; }
 }
 
