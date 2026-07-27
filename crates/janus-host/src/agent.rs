@@ -477,24 +477,36 @@ impl ManagedHostAgent {
                 self.report(lease, "succeeded", "phase_succeeded", None, None, None)?;
             }
             AgentPhase::Verify => {
-                if !staged_exact(executor, lease)? {
-                    let rollback = if lease.operation_kind == "replace" {
-                        self.recover_replacement(executor, lease, profile).ok()
-                    } else {
-                        None
-                    };
-                    let (outcome, reason) =
-                        if lease.operation_kind == "replace" && rollback.is_none() {
-                            ("uncertain", "executor_failed")
+                let exact_phase = match exact_generation_phase(executor, lease)? {
+                    Some(phase) => phase,
+                    None => {
+                        let rollback = if lease.operation_kind == "replace" {
+                            self.recover_replacement(executor, lease, profile).ok()
                         } else {
-                            ("failed", "verification_failed")
+                            None
                         };
-                    self.report_failure_and_reconcile(lease, outcome, reason, rollback)?;
-                    return Ok(());
-                }
+                        let (outcome, reason) =
+                            if lease.operation_kind == "replace" && rollback.is_none() {
+                                ("uncertain", "executor_failed")
+                            } else {
+                                ("failed", "verification_failed")
+                            };
+                        self.report_failure_and_reconcile(lease, outcome, reason, rollback)?;
+                        return Ok(());
+                    }
+                };
                 let evidence = match self.verify(profile, lease.generation) {
                     Ok(evidence) => evidence,
                     Err(_) => {
+                        if !verification_requires_commit(exact_phase) {
+                            // A periodic health renewal observes an already
+                            // committed generation. Losing fresh health proof
+                            // must make the operation unhealthy, but must not
+                            // invoke staged-generation rollback or reconcile
+                            // the completed central transaction again.
+                            self.report(lease, "failed", "verification_failed", None, None, None)?;
+                            return Ok(());
+                        }
                         let (rollback, recovered) = if lease.operation_kind == "replace" {
                             let rollback = self.recover_replacement(executor, lease, profile).ok();
                             let recovered = rollback.is_some();
@@ -526,6 +538,14 @@ impl ManagedHostAgent {
                     return Err(ManagedHostAgentError::new(
                         "managed_host_activation_unconfirmed",
                     ));
+                }
+                if !verification_requires_commit(exact_phase) {
+                    // Pharos periodically reopens an active operation to renew
+                    // bounded health evidence. The committed host generation
+                    // is already reconciled and has no rollback material, so a
+                    // successful exact health refresh must not require a
+                    // second central commit.
+                    return Ok(());
                 }
                 // Janus must commit the central transaction while the host's
                 // previous generation is still recoverable. A lost response is
@@ -1500,18 +1520,49 @@ where
     ))
 }
 
-fn staged_exact(executor: &HostExecutor, lease: &ManagedOperationLeaseV1) -> AgentResult<bool> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExactGenerationPhase {
+    Staged,
+    Active,
+}
+
+fn verification_requires_commit(phase: ExactGenerationPhase) -> bool {
+    phase == ExactGenerationPhase::Staged
+}
+
+fn exact_generation_phase(
+    executor: &HostExecutor,
+    lease: &ManagedOperationLeaseV1,
+) -> AgentResult<Option<ExactGenerationPhase>> {
     let outcomes = executor
         .status()
         .map_err(|_| ManagedHostAgentError::new("managed_host_status_unavailable"))?;
-    Ok(outcomes.iter().any(|outcome| {
-        outcome.host_ref == lease.host_ref
-            && outcome.service_ref.as_deref() == Some(&lease.service_ref)
-            && outcome.slot_ref.as_deref() == Some(&lease.slot_ref)
-            && outcome.operation_ref.as_deref() == Some(&lease.operation_ref)
-            && outcome.generation == Some(lease.generation)
-            && outcome.phase == "staged"
-    }))
+    Ok(exact_generation_phase_from_outcomes(&outcomes, lease))
+}
+
+fn exact_generation_phase_from_outcomes(
+    outcomes: &[HostExecutorOutcome],
+    lease: &ManagedOperationLeaseV1,
+) -> Option<ExactGenerationPhase> {
+    outcomes.iter().find_map(|outcome| {
+        if outcome.host_ref != lease.host_ref
+            || outcome.service_ref.as_deref() != Some(&lease.service_ref)
+            || outcome.slot_ref.as_deref() != Some(&lease.slot_ref)
+            || outcome.operation_ref.as_deref() != Some(&lease.operation_ref)
+            || outcome.generation != Some(lease.generation)
+        {
+            return None;
+        }
+        match outcome.phase.as_str() {
+            "staged" => Some(ExactGenerationPhase::Staged),
+            "active" => Some(ExactGenerationPhase::Active),
+            _ => None,
+        }
+    })
+}
+
+fn staged_exact(executor: &HostExecutor, lease: &ManagedOperationLeaseV1) -> AgentResult<bool> {
+    Ok(exact_generation_phase(executor, lease)? == Some(ExactGenerationPhase::Staged))
 }
 
 fn control_for_lease(lease: &ManagedOperationLeaseV1) -> HostEnvelopeControlV1 {
@@ -1788,6 +1839,65 @@ mod tests {
         );
         assert_eq!(inspections, 1);
         assert_eq!(sleeps, 0);
+    }
+
+    #[test]
+    fn verification_renews_the_exact_committed_generation_without_recommit() {
+        let lease = ManagedOperationLeaseV1 {
+            schema: LEASE_SCHEMA.to_string(),
+            schema_version: SCHEMA_VERSION,
+            lease_ref: "lease_49c0e8a17d63".to_string(),
+            operation_ref: "op_58f36c72a91e".to_string(),
+            operation_kind: "create".to_string(),
+            host_ref: "host_58f36c72a91e".to_string(),
+            service_ref: "svc_0bca8d31f7e2".to_string(),
+            slot_ref: "slot_49c0e8a17d63".to_string(),
+            declaration_fingerprint: "decl_a84f209c4b32".to_string(),
+            generation: 5,
+            purge_not_before_unix_secs: None,
+            phase: AgentPhase::Verify,
+            profile_ref: "health_2a02f96c33d4".to_string(),
+            leased_at_unix_secs: 1_800_000_000,
+            expires_at_unix_secs: 1_800_000_060,
+            value_returned: false,
+        };
+        let outcome = |phase: &str| HostExecutorOutcome {
+            action: "status".to_string(),
+            host_ref: lease.host_ref.clone(),
+            service_ref: Some(lease.service_ref.clone()),
+            slot_ref: Some(lease.slot_ref.clone()),
+            operation_ref: Some(lease.operation_ref.clone()),
+            generation: Some(lease.generation),
+            phase: phase.to_string(),
+            reason_code: "host_envelope_status_ok".to_string(),
+            value_returned: false,
+        };
+
+        let staged = exact_generation_phase_from_outcomes(&[outcome("staged")], &lease);
+        assert_eq!(staged, Some(ExactGenerationPhase::Staged));
+        assert!(staged.is_some_and(verification_requires_commit));
+
+        let active = exact_generation_phase_from_outcomes(&[outcome("active")], &lease);
+        assert_eq!(active, Some(ExactGenerationPhase::Active));
+        assert!(active.is_some_and(|phase| !verification_requires_commit(phase)));
+
+        let mut wrong_generation = outcome("active");
+        wrong_generation.generation = Some(lease.generation + 1);
+        assert_eq!(
+            exact_generation_phase_from_outcomes(&[wrong_generation], &lease),
+            None
+        );
+
+        let mut wrong_operation = outcome("active");
+        wrong_operation.operation_ref = Some("op_attacker000001".to_string());
+        assert_eq!(
+            exact_generation_phase_from_outcomes(&[wrong_operation], &lease),
+            None
+        );
+        assert_eq!(
+            exact_generation_phase_from_outcomes(&[outcome("missing")], &lease),
+            None
+        );
     }
 
     #[test]
