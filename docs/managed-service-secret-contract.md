@@ -129,16 +129,19 @@ files, atomic replacement, directory sync, and a per-slot lock. Plaintext is
 written atomically as a mode-0400 runtime file under `/run`; it never enters
 the cache, argv, environment, Nix store, Git, Pharos, status, or errors.
 Symlinked, hard-linked, partial, oversized, stale, downgraded, revoked,
-expired, cross-host, cross-scope, cross-slot, and declaration-drift inputs fail
-closed.
+cross-host, cross-scope, cross-slot, and declaration-drift inputs fail closed.
+Expiry always blocks first installation and uncommitted recovery.
 
 The current ciphertext restores the runtime file after reboot without central
-Janus. Replacement retains exactly one previous signed ciphertext for a
-bounded rollback window. Commit removes it; rollback expiry blocks unsafe
-startup rather than silently accepting either generation. An interrupted
-atomic replacement is reconciled only when the old state and both signed
-packets prove the exact before/after relationship. A corrupt state or partial
-file is rejected.
+Janus. Once committed, delivery expiry does not destroy that offline recovery
+property; restore still revalidates the producer signature, exact host/scope/
+slot/declaration/generation bindings, the declarative minimum revocation epoch,
+and explicit envelope revocations. Replacement retains exactly one previous
+signed ciphertext for a bounded rollback window. Commit removes it; rollback
+expiry blocks unsafe startup rather than silently accepting either generation.
+An interrupted atomic replacement is reconciled only when the old state and
+both signed packets prove the exact before/after relationship. A corrupt state
+or partial file is rejected.
 
 Host-key rotation requires a newly signed envelope for the new recipient
 before the old identity is removed. Raising the declarative revocation epoch

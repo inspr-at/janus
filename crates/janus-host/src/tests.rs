@@ -668,6 +668,62 @@ fn expired_envelopes_and_expired_rollback_windows_fail_closed() {
 }
 
 #[test]
+fn committed_cache_restores_after_delivery_expiry_but_staged_cache_still_expires() {
+    let fixture = Fixture::new();
+    fixture
+        .executor
+        .install(&fixture.packet(1, b"committed"), now())
+        .expect("install committed generation");
+    fixture
+        .executor
+        .commit(&control(1))
+        .expect("commit generation");
+    fs::remove_file(fixture.runtime_target()).expect("simulate runtime loss");
+
+    let restored = fixture
+        .executor
+        .restore_all(now() + Duration::from_secs(3600))
+        .expect("restore committed cache after delivery expiry");
+    assert_eq!(restored[0].reason_code, "host_envelope_restored_offline");
+    assert_eq!(
+        fs::read(fixture.runtime_target()).expect("restored runtime"),
+        b"committed"
+    );
+    fs::remove_file(fixture.runtime_target()).expect("simulate another runtime loss");
+    let mut revoked_config = config(&fixture.signing_key, fixture.owner_uid);
+    revoked_config.revoked_envelope_refs = vec!["env_00000001".to_string()];
+    let revoked_executor = HostExecutor::new(
+        revoked_config,
+        ExecutorPaths {
+            identity: fixture.identity_path.clone(),
+            cache_root: fixture.cache_root.clone(),
+            runtime_root: fixture.runtime_root.clone(),
+            executor_uid: fixture.owner_uid,
+        },
+    )
+    .expect("revoked executor");
+    assert_eq!(
+        revoked_executor
+            .restore_all(now() + Duration::from_secs(3600))
+            .unwrap_err(),
+        HostEnvelopeError::new("host_envelope_binding_denied")
+    );
+
+    let fixture = Fixture::new();
+    fixture
+        .executor
+        .install(&fixture.packet(1, b"staged"), now())
+        .expect("install staged generation");
+    assert_eq!(
+        fixture
+            .executor
+            .restore_all(now() + Duration::from_secs(3600))
+            .unwrap_err(),
+        HostEnvelopeError::new("host_envelope_rollback_expired")
+    );
+}
+
+#[test]
 fn partial_symlink_hardlink_and_tampered_cache_objects_are_rejected() {
     let fixture = Fixture::new();
     fixture
