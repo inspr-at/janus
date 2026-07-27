@@ -34,6 +34,11 @@ const MAX_JSON_BYTES: usize = 32 * 1024;
 const MAX_PACKET_BYTES: usize = 256 * 1024;
 const MAX_PROFILES: usize = 128;
 const MAX_COMMAND_OUTPUT_BYTES: usize = 16 * 1024;
+// Docker reports a newly started container as `starting` until its first
+// probe completes. Inspect immediately, then allow at most 30 seconds for the
+// reviewed healthcheck to converge without weakening the final healthy gate.
+const HEALTH_VERIFY_MAX_ATTEMPTS: usize = 31;
+const HEALTH_VERIFY_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Stable, value-free agent failure.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1015,6 +1020,16 @@ impl ManagedHostAgent {
         profile: &ManagedHostProfileV1,
         generation: u64,
     ) -> AgentResult<ManagedHealthEvidenceV1> {
+        wait_for_healthy_state(
+            generation,
+            HEALTH_VERIFY_MAX_ATTEMPTS,
+            HEALTH_VERIFY_RETRY_INTERVAL,
+            || self.inspect_docker_state(profile),
+            thread::sleep,
+        )
+    }
+
+    fn inspect_docker_state(&self, profile: &ManagedHostProfileV1) -> AgentResult<DockerState> {
         let output = self
             .docker_command()
             .args([
@@ -1034,31 +1049,8 @@ impl ManagedHostAgent {
                 "managed_host_verification_failed",
             ));
         }
-        let state: DockerState = decode_strict(&output.stdout)
-            .map_err(|_| ManagedHostAgentError::new("managed_host_verification_failed"))?;
-        let health = state
-            .health
-            .ok_or_else(|| ManagedHostAgentError::new("managed_host_verification_failed"))?;
-        if !state.running
-            || state.status != "running"
-            || health.status != "healthy"
-            || health.failing_streak != 0
-        {
-            return Err(ManagedHostAgentError::new(
-                "managed_host_verification_failed",
-            ));
-        }
-        let _ = health.log;
-        let now = unix_seconds()?;
-        Ok(ManagedHealthEvidenceV1 {
-            generation,
-            materialized: true,
-            process_state: "running",
-            probe_state: "healthy",
-            heartbeat_observed_at_unix_secs: now,
-            process_observed_at_unix_secs: now,
-            probe_observed_at_unix_secs: now,
-        })
+        decode_strict(&output.stdout)
+            .map_err(|_| ManagedHostAgentError::new("managed_host_verification_failed"))
     }
 
     fn profile_for_lease(
@@ -1449,6 +1441,65 @@ fn docker_state_is_stopped(raw: &[u8]) -> bool {
     decode_strict::<DockerState>(raw).is_ok_and(|state| !state.running && state.status == "exited")
 }
 
+fn wait_for_healthy_state<I, S>(
+    generation: u64,
+    max_attempts: usize,
+    retry_interval: Duration,
+    mut inspect: I,
+    mut sleep: S,
+) -> AgentResult<ManagedHealthEvidenceV1>
+where
+    I: FnMut() -> AgentResult<DockerState>,
+    S: FnMut(Duration),
+{
+    if max_attempts == 0 {
+        return Err(ManagedHostAgentError::new(
+            "managed_host_verification_failed",
+        ));
+    }
+    for attempt in 0..max_attempts {
+        match inspect() {
+            Err(_) => {
+                return Err(ManagedHostAgentError::new(
+                    "managed_host_verification_failed",
+                ));
+            }
+            Ok(state) if !state.running && matches!(state.status.as_str(), "dead" | "exited") => {
+                return Err(ManagedHostAgentError::new(
+                    "managed_host_verification_failed",
+                ));
+            }
+            Ok(state) if state.running && state.status == "running" => {
+                let Some(health) = state.health else {
+                    return Err(ManagedHostAgentError::new(
+                        "managed_host_verification_failed",
+                    ));
+                };
+                if health.status == "healthy" && health.failing_streak == 0 {
+                    let _ = health.log;
+                    let now = unix_seconds()?;
+                    return Ok(ManagedHealthEvidenceV1 {
+                        generation,
+                        materialized: true,
+                        process_state: "running",
+                        probe_state: "healthy",
+                        heartbeat_observed_at_unix_secs: now,
+                        process_observed_at_unix_secs: now,
+                        probe_observed_at_unix_secs: now,
+                    });
+                }
+            }
+            Ok(_) => {}
+        }
+        if attempt + 1 < max_attempts {
+            sleep(retry_interval);
+        }
+    }
+    Err(ManagedHostAgentError::new(
+        "managed_host_verification_failed",
+    ))
+}
+
 fn staged_exact(executor: &HostExecutor, lease: &ManagedOperationLeaseV1) -> AgentResult<bool> {
     let outcomes = executor
         .status()
@@ -1605,6 +1656,138 @@ mod tests {
             command.get_program(),
             Path::new(&agent.config.compose_executable).as_os_str()
         );
+    }
+
+    #[test]
+    fn verification_waits_for_the_first_successful_health_probe() {
+        let mut states = std::collections::VecDeque::from([
+            decode_strict(
+                br#"{"Running":true,"Status":"running","Health":{"Status":"starting","FailingStreak":0,"Log":[]}}"#,
+            )
+            .unwrap(),
+            decode_strict(
+                br#"{"Running":true,"Status":"running","Health":{"Status":"healthy","FailingStreak":0,"Log":[]}}"#,
+            )
+            .unwrap(),
+        ]);
+        let mut sleeps = 0;
+        let evidence = wait_for_healthy_state(
+            4,
+            3,
+            Duration::ZERO,
+            || Ok(states.pop_front().unwrap()),
+            |_| sleeps += 1,
+        )
+        .expect("starting health converges");
+        assert_eq!(evidence.generation, 4);
+        assert!(evidence.materialized);
+        assert_eq!(evidence.process_state, "running");
+        assert_eq!(evidence.probe_state, "healthy");
+        assert_eq!(sleeps, 1);
+    }
+
+    #[test]
+    fn verification_fails_closed_after_the_bounded_health_wait() {
+        let mut inspections = 0;
+        let mut sleeps = 0;
+        let error = wait_for_healthy_state(
+            4,
+            3,
+            Duration::ZERO,
+            || {
+                inspections += 1;
+                Ok(decode_strict(
+                    br#"{"Running":true,"Status":"running","Health":{"Status":"unhealthy","FailingStreak":3,"Log":[]}}"#,
+                )
+                .unwrap())
+            },
+            |_| sleeps += 1,
+        )
+        .err()
+        .expect("permanent unhealthy state fails closed");
+        assert_eq!(
+            error,
+            ManagedHostAgentError::new("managed_host_verification_failed")
+        );
+        assert_eq!(inspections, 3);
+        assert_eq!(sleeps, 2);
+    }
+
+    #[test]
+    fn verification_does_not_wait_for_a_terminal_container() {
+        let mut inspections = 0;
+        let mut sleeps = 0;
+        let error = wait_for_healthy_state(
+            4,
+            31,
+            Duration::ZERO,
+            || {
+                inspections += 1;
+                Ok(decode_strict(
+                    br#"{"Running":false,"Status":"exited","Health":{"Status":"unhealthy","FailingStreak":0,"Log":[]}}"#,
+                )
+                .unwrap())
+            },
+            |_| sleeps += 1,
+        )
+        .err()
+        .expect("terminal container fails immediately");
+        assert_eq!(
+            error,
+            ManagedHostAgentError::new("managed_host_verification_failed")
+        );
+        assert_eq!(inspections, 1);
+        assert_eq!(sleeps, 0);
+    }
+
+    #[test]
+    fn verification_does_not_wait_without_a_declared_healthcheck() {
+        let mut inspections = 0;
+        let mut sleeps = 0;
+        let error = wait_for_healthy_state(
+            4,
+            31,
+            Duration::ZERO,
+            || {
+                inspections += 1;
+                Ok(decode_strict(br#"{"Running":true,"Status":"running"}"#).unwrap())
+            },
+            |_| sleeps += 1,
+        )
+        .err()
+        .expect("missing healthcheck fails immediately");
+        assert_eq!(
+            error,
+            ManagedHostAgentError::new("managed_host_verification_failed")
+        );
+        assert_eq!(inspections, 1);
+        assert_eq!(sleeps, 0);
+    }
+
+    #[test]
+    fn verification_does_not_wait_after_an_inspection_error() {
+        let mut inspections = 0;
+        let mut sleeps = 0;
+        let error = wait_for_healthy_state(
+            4,
+            31,
+            Duration::ZERO,
+            || {
+                inspections += 1;
+                Err(ManagedHostAgentError::new(
+                    "managed_host_verification_failed",
+                ))
+            },
+            |_| sleeps += 1,
+        )
+        .err()
+        .expect("inspection error fails immediately");
+        assert_eq!(
+            error,
+            ManagedHostAgentError::new("managed_host_verification_failed")
+        );
+        assert_eq!(inspections, 1);
+        assert_eq!(sleeps, 0);
     }
 
     #[test]
