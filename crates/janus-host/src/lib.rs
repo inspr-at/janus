@@ -962,7 +962,16 @@ impl HostExecutor {
             Some(self.paths.executor_uid),
             "host_cache_current_unavailable",
         )?;
-        let opened = self.open_packet(&packet, now)?;
+        // Expiry bounds delivery and first installation, not the lifetime of
+        // an already-committed encrypted host cache. A committed generation
+        // must remain available for offline reboot recovery; its signature,
+        // exact declaration binding, revocation epoch, and explicit
+        // revocation list are still revalidated below.
+        let opened = if state.committed {
+            self.open_committed_packet(&packet, now)?
+        } else {
+            self.open_packet(&packet, now)?
+        };
         self.resolve_slot(&opened.binding)?;
         if opened.packet_sha256 != state.current.packet_sha256
             || opened.binding.generation != state.current.generation
@@ -979,6 +988,23 @@ impl HostExecutor {
     }
 
     fn open_packet(&self, raw_packet: &[u8], now: SystemTime) -> HostResult<DecryptedHostEnvelope> {
+        self.open_packet_with_expiry(raw_packet, now, false)
+    }
+
+    fn open_committed_packet(
+        &self,
+        raw_packet: &[u8],
+        now: SystemTime,
+    ) -> HostResult<DecryptedHostEnvelope> {
+        self.open_packet_with_expiry(raw_packet, now, true)
+    }
+
+    fn open_packet_with_expiry(
+        &self,
+        raw_packet: &[u8],
+        now: SystemTime,
+        allow_expired: bool,
+    ) -> HostResult<DecryptedHostEnvelope> {
         let packet: SignedHostEnvelopeV1 =
             decode_strict_json(raw_packet, "host_envelope_packet_invalid")?;
         if packet.schema != ENVELOPE_SCHEMA
@@ -1009,7 +1035,7 @@ impl HostExecutor {
         let parsed = parse_plaintext(&plaintext);
         plaintext.zeroize();
         let (binding, value) = parsed?;
-        self.validate_host_binding(&binding, now)?;
+        self.validate_host_binding(&binding, now, allow_expired)?;
         Ok(DecryptedHostEnvelope {
             binding,
             value,
@@ -1021,6 +1047,7 @@ impl HostExecutor {
         &self,
         binding: &HostEnvelopeBindingV1,
         now: SystemTime,
+        allow_expired: bool,
     ) -> HostResult<()> {
         validate_binding(binding)?;
         if binding.host_ref != self.config.host_ref
@@ -1036,7 +1063,7 @@ impl HostExecutor {
         }
         let now = unix_seconds(now)?;
         if binding.issued_at_unix_secs > now.saturating_add(CLOCK_SKEW.as_secs())
-            || now >= binding.expires_at_unix_secs
+            || (!allow_expired && now >= binding.expires_at_unix_secs)
         {
             return Err(HostEnvelopeError::new("host_envelope_expired"));
         }

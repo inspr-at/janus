@@ -3,7 +3,7 @@ set -euo pipefail
 
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 image="${JANUS_PUBLISHED_ENGINE_IMAGE:-ghcr.io/inspr-at/janus/janus-engine}"
-tag="${JANUS_PUBLISHED_ENGINE_TAG:-rust-engine-v0.1.16}"
+tag="${JANUS_PUBLISHED_ENGINE_TAG:-rust-engine-v0.1.17}"
 platform="${JANUS_PUBLISHED_ENGINE_PLATFORM:-}"
 digest="${JANUS_PUBLISHED_ENGINE_DIGEST:-}"
 digest_source="provided"
