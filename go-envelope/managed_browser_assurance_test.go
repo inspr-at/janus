@@ -224,6 +224,10 @@ func newManagedBrowserHarness(t *testing.T, baseURL, authBaseURL string) *manage
 	}
 	authority := newManagedBrowserAuthority(issuer)
 	executor := &managedBrowserExecutor{}
+	authOrigin, err := url.Parse(authBaseURL)
+	if err != nil || authOrigin.Port() == "" {
+		t.Fatal("managed browser auth origin is invalid")
+	}
 	app.cfg.PublicURL = baseURL
 	app.cfg.OIDCIssuer = issuer
 	app.cfg.OIDCClientID = "managed-browser-client"
@@ -232,7 +236,9 @@ func newManagedBrowserHarness(t *testing.T, baseURL, authBaseURL string) *manage
 		OwnerSubjects: map[string]bool{managedTestSubject: true},
 	}
 	app.cfg.ManagedSetup = &managedSetupRuntimeConfig{
-		PharosReturnOrigin: baseURL,
+		// Use the same host on a different port so browser assurance proves the
+		// Janus completion page can cross origins without broadening form-action.
+		PharosReturnOrigin: "http://127.0.0.1:" + authOrigin.Port(),
 	}
 	app.oauth = &oauth2.Config{
 		ClientID:     app.cfg.OIDCClientID,

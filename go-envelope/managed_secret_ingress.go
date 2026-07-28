@@ -23,12 +23,15 @@ import (
 const (
 	managedStepUpFlowTTL       = 5 * time.Minute
 	managedStepUpProofTTL      = 2 * time.Minute
+	managedCompletionTTL       = 10 * time.Minute
 	managedStepUpClockSkew     = 30 * time.Second
 	managedFormPrefixMaxBytes  = 384
 	managedStepUpFlowDomain    = "inspr.janus.managed-step-up-flow.v1"
 	managedStepUpProofDomain   = "inspr.janus.managed-step-up-proof.v1"
 	managedLoginIntentDomain   = "inspr.janus.managed-login-intent.v1"
+	managedCompletionDomain    = "inspr.janus.managed-completion.v1"
 	managedSecretFormMediaType = "application/x-www-form-urlencoded"
+	managedCompletionPrefix    = "/managed-service/setup/complete/"
 )
 
 type managedStepUpFlow struct {
@@ -57,6 +60,17 @@ type managedLoginIntent struct {
 	ExpiresAt int64  `json:"expires_at"`
 }
 
+type managedCompletionReceipt struct {
+	Schema          string `json:"schema"`
+	IntentRef       string `json:"intent_ref"`
+	OperationRef    string `json:"operation_ref"`
+	OperationKind   string `json:"operation_kind"`
+	Source          string `json:"source"`
+	HumanSessionRef string `json:"human_session_ref"`
+	CompletedAt     int64  `json:"completed_at"`
+	ExpiresAt       int64  `json:"expires_at"`
+}
+
 type managedSetupPageData struct {
 	Title            string
 	ActivePage       string
@@ -81,6 +95,22 @@ type managedSetupPageData struct {
 	RequestID        string
 }
 
+type managedCompletionPageData struct {
+	Title            string
+	ActivePage       string
+	CSPNonce         string
+	Mode             string
+	Session          Session
+	SessionRoleBadge string
+	CSRF             string
+	OperationKind    string
+	Headline         string
+	Message          string
+	ReturnURL        string
+	OperationRef     string
+	RequestID        string
+}
+
 func (app *App) handleManagedSetup(w http.ResponseWriter, r *http.Request) {
 	managedSecretResponseBoundary(w)
 	session := currentSession(r.Context())
@@ -88,6 +118,19 @@ func (app *App) handleManagedSetup(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		app.audit(r, "managed_secret.setup.view", "denied", session.Subject, "invalid intent reference")
 		app.renderSafeFailure(w, r, http.StatusBadRequest, "setup_link_invalid", "This setup link is not valid. Start again from Pharos.", nil)
+		return
+	}
+	if receipt, found := app.readManagedCompletionReceipt(r); found &&
+		receipt.IntentRef == intentRef &&
+		receipt.HumanSessionRef == managedHumanSessionRef(app.cfg.OIDCIssuer, session.Subject) {
+		target, valid := managedSetupCompletionURL(receipt.OperationRef)
+		if !valid {
+			app.clearManagedCompletionCookies(w)
+			app.renderSafeFailure(w, r, http.StatusBadRequest, "completion_invalid", "Open the operation from Pharos.", nil)
+			return
+		}
+		app.audit(r, "managed_secret.setup.recover", "allowed", session.Subject, "existing value-free operation")
+		http.Redirect(w, r, target, http.StatusSeeOther)
 		return
 	}
 	inspection, err := app.inspectManagedSetupIntent(r.Context(), session, intentRef)
@@ -132,6 +175,54 @@ func (app *App) handleManagedSetup(w http.ResponseWriter, r *http.Request) {
 		ConsumerLabel:    managedConsumerLabel(inspection.Context.ConsumerKind),
 		DeliveryLabel:    managedDeliveryLabel(inspection.Context.DeliveryKind),
 		StepUpReady:      stepUpReady,
+		RequestID:        requestID(r),
+	})
+}
+
+func (app *App) handleManagedSetupComplete(w http.ResponseWriter, r *http.Request) {
+	managedSecretResponseBoundary(w)
+	session := currentSession(r.Context())
+	if !app.managedSetupEnabled() {
+		app.audit(r, "managed_secret.completion.view", "denied", session.Subject, "managed setup unavailable")
+		app.renderSafeFailure(w, r, http.StatusServiceUnavailable, "managed_setup_unavailable", "Managed secret setup is not ready.", nil)
+		return
+	}
+	operationRef := r.PathValue("operationRef")
+	if r.URL.RawQuery != "" || !validManagedRef("op_", operationRef) {
+		app.audit(r, "managed_secret.completion.view", "denied", session.Subject, "completion path invalid")
+		app.renderSafeFailure(w, r, http.StatusBadRequest, "completion_invalid", "Open the operation from Pharos.", nil)
+		return
+	}
+	receipt, ok := app.readManagedCompletionReceipt(r)
+	if !ok ||
+		receipt.OperationRef != operationRef ||
+		receipt.HumanSessionRef != managedHumanSessionRef(app.cfg.OIDCIssuer, session.Subject) {
+		app.audit(r, "managed_secret.completion.view", "denied", session.Subject, "completion receipt unavailable")
+		app.renderSafeFailure(w, r, http.StatusConflict, "completion_unavailable", "Open the operation from Pharos.", nil)
+		return
+	}
+	returnURL, err := managedReturnURL(app.cfg.ManagedSetup.PharosReturnOrigin, receipt.OperationRef)
+	if err != nil {
+		app.audit(r, "managed_secret.completion.view", "denied", session.Subject, "return target unavailable")
+		app.renderSafeFailure(w, r, http.StatusServiceUnavailable, "return_target_unavailable", "The secret change was accepted, but Janus could not open its operation status.", nil)
+		return
+	}
+	headline, message := managedCompletionCopy(receipt.OperationKind)
+	w.Header().Set("Refresh", "1; url="+returnURL)
+	app.audit(r, "managed_secret.completion.view", "allowed", session.Subject, "value-free Pharos continuation")
+	renderTemplateStatus(w, app.templates, "managed_secret_complete", http.StatusOK, managedCompletionPageData{
+		Title:            "Janus — Checking service",
+		ActivePage:       "vault",
+		CSPNonce:         cspNonceFromContext(r.Context()),
+		Mode:             app.cfg.ProductMode,
+		Session:          session,
+		SessionRoleBadge: SessionRoleBadge(session),
+		CSRF:             app.csrfToken(session),
+		OperationKind:    receipt.OperationKind,
+		Headline:         headline,
+		Message:          message,
+		ReturnURL:        returnURL,
+		OperationRef:     receipt.OperationRef,
 		RequestID:        requestID(r),
 	})
 }
@@ -216,14 +307,6 @@ func (app *App) handleManagedSetupExecute(w http.ResponseWriter, r *http.Request
 		app.renderSafeFailure(w, r, http.StatusForbidden, "request_integrity_failed", "Reload the setup page and try again.", nil)
 		return
 	}
-	proof, ok := app.readManagedStepUpProof(r)
-	humanSessionRef := managedHumanSessionRef(app.cfg.OIDCIssuer, session.Subject)
-	if !ok || proof.HumanSessionRef != humanSessionRef {
-		app.audit(r, "managed_secret.execute", "denied", session.Subject, "fresh passwordless assertion required")
-		app.renderSafeFailure(w, r, http.StatusForbidden, "passwordless_step_up_required", "Confirm with your passkey again before changing this secret.", nil)
-		return
-	}
-
 	prefix, err := readManagedSecretFormPrefix(r.Body)
 	if err != nil {
 		app.audit(r, "managed_secret.execute", "denied", session.Subject, "request form invalid")
@@ -231,6 +314,28 @@ func (app *App) handleManagedSetupExecute(w http.ResponseWriter, r *http.Request
 		return
 	}
 	defer zeroizeBytes(prefix)
+	humanSessionRef := managedHumanSessionRef(app.cfg.OIDCIssuer, session.Subject)
+	if receipt, found := app.readManagedCompletionReceipt(r); found &&
+		receipt.HumanSessionRef == humanSessionRef &&
+		validateManagedSecretFormPrefix(prefix, app.csrfToken(session), receipt.IntentRef, receipt.Source) {
+		target, valid := managedSetupCompletionURL(receipt.OperationRef)
+		if !valid {
+			app.clearManagedCompletionCookies(w)
+			app.renderSafeFailure(w, r, http.StatusBadRequest, "completion_invalid", "Open the operation from Pharos.", nil)
+			return
+		}
+		w.Header().Set("Clear-Site-Data", `"cache", "storage"`)
+		app.audit(r, "managed_secret.execute", "allowed", session.Subject, "duplicate resolved to existing operation")
+		http.Redirect(w, r, target, http.StatusSeeOther)
+		return
+	}
+
+	proof, ok := app.readManagedStepUpProof(r)
+	if !ok || proof.HumanSessionRef != humanSessionRef {
+		app.audit(r, "managed_secret.execute", "denied", session.Subject, "fresh passwordless assertion required")
+		app.renderSafeFailure(w, r, http.StatusForbidden, "passwordless_step_up_required", "Confirm with your passkey again before changing this secret.", nil)
+		return
+	}
 	if !validateManagedSecretFormPrefix(prefix, app.csrfToken(session), proof.IntentRef, proof.Source) {
 		app.audit(r, "managed_secret.execute", "denied", session.Subject, "request integrity failed")
 		app.renderSafeFailure(w, r, http.StatusForbidden, "request_integrity_failed", "Reload the setup page and try again.", nil)
@@ -284,14 +389,21 @@ func (app *App) handleManagedSetupExecute(w http.ResponseWriter, r *http.Request
 		app.renderSafeFailure(w, r, http.StatusServiceUnavailable, "secret_change_incomplete", "Janus could not confirm completion. Use the operation status in Pharos before trying again.", nil)
 		return
 	}
-	returnURL, err := managedReturnURL(app.cfg.ManagedSetup.PharosReturnOrigin, result.OperationRef)
-	if err != nil {
+	target, valid := managedSetupCompletionURL(result.OperationRef)
+	if !valid {
 		app.audit(r, "managed_secret.execute", "denied", session.Subject, "return target unavailable")
 		app.renderSafeFailure(w, r, http.StatusServiceUnavailable, "return_target_unavailable", "The secret change completed, but Janus could not open its operation status.", nil)
 		return
 	}
+	app.writeManagedCompletionReceipt(w, managedCompletionReceipt{
+		IntentRef:       accepted.Intent.IntentRef,
+		OperationRef:    result.OperationRef,
+		OperationKind:   accepted.Intent.OperationKind,
+		Source:          accepted.Source,
+		HumanSessionRef: humanSessionRef,
+	})
 	app.auditWithRef(r, "managed_secret.execute", "allowed", session.Subject, result.SecretRef, "operation registered without value return")
-	http.Redirect(w, r, returnURL, http.StatusSeeOther)
+	http.Redirect(w, r, target, http.StatusSeeOther)
 }
 
 func (app *App) inspectManagedSetupIntent(ctx context.Context, session Session, intentRef string) (managedSetupInspection, error) {
@@ -325,6 +437,31 @@ func exactManagedIntentQuery(raw *url.URL) (string, bool) {
 	}
 	intentRef := values.Get("intent")
 	return intentRef, validManagedRef("intent_", intentRef)
+}
+
+func managedSetupCompletionURL(operationRef string) (string, bool) {
+	if !validManagedRef("op_", operationRef) {
+		return "", false
+	}
+	return managedCompletionPrefix + operationRef, true
+}
+
+func managedSetupCompletionPath(path string) bool {
+	operationRef, ok := strings.CutPrefix(path, managedCompletionPrefix)
+	return ok && !strings.Contains(operationRef, "/") && validManagedRef("op_", operationRef)
+}
+
+func managedCompletionCopy(operationKind string) (string, string) {
+	switch operationKind {
+	case "create":
+		return "Secret accepted", "Janus encrypted the new value. Pharos is checking delivery and service health."
+	case "replace":
+		return "Replacement accepted", "Janus prepared the new version. Pharos is checking delivery and service health."
+	case "remove":
+		return "Removal accepted", "Janus started the safe removal. Pharos is checking the service and recovery state."
+	default:
+		return "Change accepted", "Pharos is checking the service."
+	}
 }
 
 func strictFormRequest(r *http.Request, requireBody bool) bool {
@@ -559,6 +696,21 @@ func (app *App) writeManagedLoginIntent(w http.ResponseWriter, intentRef string)
 	)
 }
 
+func (app *App) writeManagedCompletionReceipt(w http.ResponseWriter, receipt managedCompletionReceipt) {
+	now := time.Now().UTC()
+	receipt.Schema = managedCompletionDomain
+	receipt.CompletedAt = now.Unix()
+	receipt.ExpiresAt = now.Add(managedCompletionTTL).Unix()
+	app.writeManagedSignedCookie(
+		w,
+		app.cfg.ManagedCompletionCookieName(),
+		managedCompletionDomain,
+		receipt,
+		http.SameSiteStrictMode,
+		managedCompletionTTL,
+	)
+}
+
 func (app *App) writeManagedSignedCookie(w http.ResponseWriter, name, domain string, value any, sameSite http.SameSite, ttl time.Duration) {
 	raw, err := json.Marshal(value)
 	if err != nil {
@@ -624,6 +776,26 @@ func (app *App) readManagedLoginIntent(r *http.Request) (string, bool) {
 		return "", false
 	}
 	return intent.IntentRef, true
+}
+
+func (app *App) readManagedCompletionReceipt(r *http.Request) (managedCompletionReceipt, bool) {
+	cookie, err := firstCookie(r, app.cfg.ManagedCompletionCookieName(), managedDoneCookie)
+	if err != nil {
+		return managedCompletionReceipt{}, false
+	}
+	var receipt managedCompletionReceipt
+	if !app.decodeManagedSignedCookie(cookie.Value, managedCompletionDomain, &receipt) ||
+		receipt.Schema != managedCompletionDomain ||
+		!validManagedRef("intent_", receipt.IntentRef) ||
+		!validManagedRef("op_", receipt.OperationRef) ||
+		!validManagedRef("hsn_", receipt.HumanSessionRef) ||
+		(receipt.OperationKind != "create" && receipt.OperationKind != "replace" && receipt.OperationKind != "remove") ||
+		!validManagedSource(receipt.Source) ||
+		(receipt.OperationKind == "remove") != (receipt.Source == "remove") ||
+		!validManagedStepUpTimes(receipt.CompletedAt, receipt.ExpiresAt, managedCompletionTTL, time.Now().UTC()) {
+		return managedCompletionReceipt{}, false
+	}
+	return receipt, true
 }
 
 func (app *App) decodeManagedSignedCookie(value, domain string, target any) bool {
@@ -738,5 +910,12 @@ func (app *App) clearManagedLoginIntentCookies(w http.ResponseWriter) {
 	app.clearCookie(w, app.cfg.ManagedLoginCookieName())
 	if app.cfg.ManagedLoginCookieName() != managedLoginCookie {
 		app.clearCookie(w, managedLoginCookie)
+	}
+}
+
+func (app *App) clearManagedCompletionCookies(w http.ResponseWriter) {
+	app.clearCookie(w, app.cfg.ManagedCompletionCookieName())
+	if app.cfg.ManagedCompletionCookieName() != managedDoneCookie {
+		app.clearCookie(w, managedDoneCookie)
 	}
 }

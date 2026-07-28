@@ -7,7 +7,7 @@ argument, JSON request, or agent tool.
 
 ## Route and trust boundary
 
-The three UI-only routes are:
+The four UI-only routes are:
 
 - `GET /managed-service/setup?intent=intent_…` — inspect the signed intent and
   render value-free context.
@@ -18,6 +18,9 @@ The three UI-only routes are:
 - `POST /managed-service/setup/execute` — require the same controls plus a
   fresh signed step-up proof, consume the intent, and only then read the
   value-bearing field.
+- `GET /managed-service/setup/complete/op_…` — require the same authenticated
+  human session plus a short-lived signed completion receipt, render the
+  value-free **Check** state, and continue to the exact Pharos operation.
 
 The setup intent is kept across an ordinary login in a short-lived signed,
 HttpOnly, SameSite=Lax cookie. It contains only the opaque intent reference and
@@ -25,7 +28,10 @@ timestamps. The normal login flow clears a stale setup cookie.
 
 All managed setup responses are `no-store, no-transform` with identity content
 encoding. The global Janus boundary also supplies a no-script, no-third-party
-CSP, `no-referrer`, framing isolation, and same-origin resource policy.
+CSP, framing isolation, and same-origin resource policy. Managed form pages use
+an origin-only referrer so Chromium supplies the non-null exact `Origin`
+required by the same-origin POST gate without forwarding an intent-bearing
+path.
 
 ## Passwordless step-up
 
@@ -73,13 +79,18 @@ does not provide editable host, service, slot, path, command, callback, or
 source fields to Pharos. Pharos signs the slot's complete reviewed source
 policy and sends only the opaque intent reference to Janus.
 
-Janus re-resolves that declaration and renders the safe service and slot labels
-with the host/service/slot authority locked. It offers Generate and/or Paste
-only when present in the signed source policy. The chosen option is then bound
-to the fresh passkey flow described above. The ordinary Vault presents managed
-records as **Service secret** with consumer, host, lifecycle, age, rotation,
-and health metadata; it never renders reveal or copy actions. `/vault/new` is
-labelled **Advanced manual setup** and remains a configuration-only fallback.
+Janus re-resolves that declaration and renders one compact locked-target card
+with the safe service, managed host, and slot labels. The four-stage rail stays
+**Target → Confirm → Add/Replace/Remove → Check**. Each page presents one
+decision or primary action; repeated trust prose and technical references are
+collapsed. Janus offers Generate and/or Paste only when present in the signed
+source policy, and generated remains the recommended default. The chosen
+option is then bound to the fresh passkey flow described above.
+
+The ordinary Vault presents managed records as **Service secret** with
+consumer, host, lifecycle, age, rotation, and health metadata; it never renders
+reveal or copy actions. `/vault/new` is labelled **Advanced manual setup** and
+remains a configuration-only fallback.
 
 ## One-time value path
 
@@ -107,6 +118,21 @@ capitalization, and common password-manager capture disabled. It has no reveal
 or copy action and no script. Completion clears first-party browser cache and
 storage without clearing the authenticated session.
 
+After one accepted transaction, Janus writes a signed, host-only, HttpOnly,
+Secure, SameSite=Strict completion receipt. It contains only the exact intent,
+operation, operation kind, selected source, one-way human-session reference,
+and bounded timestamps. The POST redirects to a same-origin GET completion
+page before the browser leaves Janus. That page marks **Check** current,
+announces concise value-free progress, automatically opens the exact Pharos
+operation after one second, and retains an ordinary fallback link.
+
+This same-origin POST/Redirect/GET handoff is deliberate. Chromium applies
+`form-action` across form-response redirects, so a direct POST redirect to the
+separate Pharos origin can be blocked after the operation already succeeded.
+The completion page fixes navigation without allowlisting Pharos as a form
+destination, adding browser script, weakening `script-src 'none'`, or retaining
+the value.
+
 ## Retry and failure semantics
 
 - A malformed or unauthenticated request cannot consume an intent or read the
@@ -115,10 +141,14 @@ storage without clearing the authenticated session.
   downstream failure intentionally burns that intent. This is a
   security-over-availability choice: recovery starts with a new Pharos intent
   so no retry can replay a value after Janus has admitted it into memory.
-- Refresh, back, resubmit, and network retry can reach the consumer again, but
-  replay storage prevents a second typed transaction or second import.
-- Successful completion redirects with HTTP 303 to the configured Pharos
-  operation URL. The URL contains only the opaque operation reference.
+- Refresh, back, an interrupted cross-origin navigation, and an immediate
+  repeated POST resolve through the exact completion receipt to the already
+  created operation. The receipt expires after ten minutes; replay storage
+  remains the durable boundary preventing a second typed transaction or second
+  import.
+- Successful completion redirects with HTTP 303 to the same-origin completion
+  GET, which then opens the configured Pharos operation URL. Both URLs contain
+  only the opaque operation reference.
 - Responses and audit contain controlled reason classes, request/operation/
   secret references where appropriate, and `value_returned=false`; they never
   contain the submitted bytes.

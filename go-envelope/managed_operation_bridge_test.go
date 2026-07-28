@@ -631,7 +631,7 @@ func TestManagedBrowserImportRegistersHostDeliveryAndFinalizesWithoutValueReturn
 	response := httptest.NewRecorder()
 	app.routes().ServeHTTP(response, request)
 	if response.Code != http.StatusSeeOther ||
-		response.Header().Get("Location") != "https://pharos.barta.cm/managed-service/operations/"+managedTestOpRef ||
+		response.Header().Get("Location") != managedCompletionPrefix+managedTestOpRef ||
 		!valueObserved {
 		t.Fatalf("browser handoff failed: status=%d location=%q observed=%t", response.Code, response.Header().Get("Location"), valueObserved)
 	}

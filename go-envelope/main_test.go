@@ -1484,7 +1484,7 @@ func TestAuthResetClearsAllJanusCookiesAndRendersValueFreeRecovery(t *testing.T)
 
 	req := httptest.NewRequest(http.MethodGet, "/auth/reset", nil)
 	req.Header.Set("X-Request-Id", "auth-reset-123")
-	for _, name := range []string{hostSessionCookie, sessionCookie, hostStateCookie, stateCookie, hostNonceCookie, nonceCookie, hostPKCECookie, pkceCookie, hostReturnCookie, returnCookie, hostAttemptCookie, attemptCookie, hostStepUpFlowCookie, stepUpFlowCookie, hostStepUpProofCookie, stepUpProofCookie, hostManagedLoginCookie, managedLoginCookie} {
+	for _, name := range []string{hostSessionCookie, sessionCookie, hostStateCookie, stateCookie, hostNonceCookie, nonceCookie, hostPKCECookie, pkceCookie, hostReturnCookie, returnCookie, hostAttemptCookie, attemptCookie, hostStepUpFlowCookie, stepUpFlowCookie, hostStepUpProofCookie, stepUpProofCookie, hostManagedLoginCookie, managedLoginCookie, hostManagedDoneCookie, managedDoneCookie} {
 		req.AddCookie(&http.Cookie{Name: name, Value: name + "-secret-cookie-secret"})
 	}
 	out := httptest.NewRecorder()
@@ -1512,7 +1512,7 @@ func TestAuthResetClearsAllJanusCookiesAndRendersValueFreeRecovery(t *testing.T)
 			t.Fatalf("auth reset clearing cookie should not carry a value: %#v", cookie)
 		}
 	}
-	for _, name := range []string{hostSessionCookie, sessionCookie, hostStateCookie, stateCookie, hostNonceCookie, nonceCookie, hostPKCECookie, pkceCookie, hostReturnCookie, returnCookie, hostAttemptCookie, attemptCookie, hostStepUpFlowCookie, stepUpFlowCookie, hostStepUpProofCookie, stepUpProofCookie, hostManagedLoginCookie, managedLoginCookie} {
+	for _, name := range []string{hostSessionCookie, sessionCookie, hostStateCookie, stateCookie, hostNonceCookie, nonceCookie, hostPKCECookie, pkceCookie, hostReturnCookie, returnCookie, hostAttemptCookie, attemptCookie, hostStepUpFlowCookie, stepUpFlowCookie, hostStepUpProofCookie, stepUpProofCookie, hostManagedLoginCookie, managedLoginCookie, hostManagedDoneCookie, managedDoneCookie} {
 		if !cleared[name] {
 			t.Fatalf("expected auth reset to clear %s; cleared=%#v cookies=%#v", name, cleared, out.Result().Cookies())
 		}
@@ -3373,6 +3373,7 @@ func TestRouteValueLeakSentinelCoversPublicAPIAndUI(t *testing.T) {
 			},
 		},
 		{name: "managed secret setup unavailable", pattern: "GET /managed-service/setup", method: http.MethodGet, path: "/managed-service/setup?intent=intent_0123456789abcdef", status: http.StatusForbidden},
+		{name: "managed secret completion unavailable", pattern: "GET /managed-service/setup/complete/{operationRef}", method: http.MethodGet, path: "/managed-service/setup/complete/op_0123456789abcdef", status: http.StatusServiceUnavailable},
 		{name: "managed secret step-up unavailable", pattern: "POST /managed-service/setup/step-up", method: http.MethodPost, path: "/managed-service/setup/step-up", status: http.StatusServiceUnavailable},
 		{name: "managed secret execute unavailable", pattern: "POST /managed-service/setup/execute", method: http.MethodPost, path: "/managed-service/setup/execute", status: http.StatusServiceUnavailable},
 		{name: "managed host envelope unavailable", pattern: "GET /internal/managed-service-host-envelopes/{hostRef}/{operationRef}", method: http.MethodGet, path: "/internal/managed-service-host-envelopes/host_0123456789abcdef/op_0123456789abcdef", status: http.StatusNotFound},
