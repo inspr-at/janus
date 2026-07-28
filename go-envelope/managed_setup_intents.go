@@ -644,6 +644,18 @@ func (store *managedReplayStore) consume(intent managedSetupIntent, now int64) (
 	return operationRef, nil
 }
 
+func (store *managedReplayStore) recover(intentRef string, now int64) (string, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	record, ok := store.document.Intents[intentRef]
+	if !ok ||
+		record.ExpiresAtUnixSecond <= now ||
+		!validManagedRef("op_", record.OperationRef) {
+		return "", managedIntentError("managed_intent_recovery_unavailable")
+	}
+	return record.OperationRef, nil
+}
+
 type managedAcceptedIntent struct {
 	Intent                    managedSetupIntent
 	Context                   managedDeclarationContext
@@ -660,6 +672,10 @@ type managedSetupInspection struct {
 type managedSetupIntentAuthority interface {
 	Inspect(context.Context, string, string) (managedSetupInspection, error)
 	Consume(context.Context, string, string, string) (managedAcceptedIntent, error)
+}
+
+type managedSetupIntentRecovery interface {
+	Recover(context.Context, string, string, string) (managedAcceptedIntent, error)
 }
 
 type managedSetupIntentConsumer struct {
@@ -735,6 +751,28 @@ func (consumer *managedSetupIntentConsumer) Consume(ctx context.Context, intentR
 	}
 	now := consumer.now().Unix()
 	operationRef, err := consumer.replays.consume(inspection.Intent, now)
+	if err != nil {
+		return managedAcceptedIntent{}, normalizeManagedIntentError(err)
+	}
+	return managedAcceptedIntent{
+		Intent:       inspection.Intent,
+		Context:      inspection.Context,
+		Source:       source,
+		OperationRef: operationRef,
+	}, nil
+}
+
+func (consumer *managedSetupIntentConsumer) Recover(ctx context.Context, intentRef, humanSessionRef, source string) (managedAcceptedIntent, error) {
+	inspection, err := consumer.Inspect(ctx, intentRef, humanSessionRef)
+	if err != nil {
+		return managedAcceptedIntent{}, err
+	}
+	if inspection.Intent.OperationKind == "remove" && source != "remove" ||
+		inspection.Intent.OperationKind != "remove" &&
+			!containsManagedSource(inspection.Intent.AllowedSources, source) {
+		return managedAcceptedIntent{}, managedIntentError("managed_intent_source_denied")
+	}
+	operationRef, err := consumer.replays.recover(intentRef, consumer.now().Unix())
 	if err != nil {
 		return managedAcceptedIntent{}, normalizeManagedIntentError(err)
 	}

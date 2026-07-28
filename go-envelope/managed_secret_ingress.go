@@ -315,9 +315,15 @@ func (app *App) handleManagedSetupExecute(w http.ResponseWriter, r *http.Request
 	}
 	defer zeroizeBytes(prefix)
 	humanSessionRef := managedHumanSessionRef(app.cfg.OIDCIssuer, session.Subject)
+	intentRef, source, prefixOK := managedSecretFormPrefixIdentity(
+		prefix,
+		app.csrfToken(session),
+	)
 	if receipt, found := app.readManagedCompletionReceipt(r); found &&
 		receipt.HumanSessionRef == humanSessionRef &&
-		validateManagedSecretFormPrefix(prefix, app.csrfToken(session), receipt.IntentRef, receipt.Source) {
+		prefixOK &&
+		receipt.IntentRef == intentRef &&
+		receipt.Source == source {
 		target, valid := managedSetupCompletionURL(receipt.OperationRef)
 		if !valid {
 			app.clearManagedCompletionCookies(w)
@@ -328,6 +334,26 @@ func (app *App) handleManagedSetupExecute(w http.ResponseWriter, r *http.Request
 		app.audit(r, "managed_secret.execute", "allowed", session.Subject, "duplicate resolved to existing operation")
 		http.Redirect(w, r, target, http.StatusSeeOther)
 		return
+	}
+	if prefixOK {
+		if receipt, recovered := app.recoverManagedCompletion(
+			r.Context(),
+			intentRef,
+			humanSessionRef,
+			source,
+		); recovered {
+			target, valid := managedSetupCompletionURL(receipt.OperationRef)
+			if !valid {
+				app.renderSafeFailure(w, r, http.StatusBadRequest, "completion_invalid", "Open the operation from Pharos.", nil)
+				return
+			}
+			app.clearManagedStepUpProofCookies(w)
+			app.writeManagedCompletionReceipt(w, receipt)
+			w.Header().Set("Clear-Site-Data", `"cache", "storage"`)
+			app.audit(r, "managed_secret.execute", "allowed", session.Subject, "existing operation status recovered without value read")
+			http.Redirect(w, r, target, http.StatusSeeOther)
+			return
+		}
 	}
 
 	proof, ok := app.readManagedStepUpProof(r)
@@ -404,6 +430,30 @@ func (app *App) handleManagedSetupExecute(w http.ResponseWriter, r *http.Request
 	})
 	app.auditWithRef(r, "managed_secret.execute", "allowed", session.Subject, result.SecretRef, "operation registered without value return")
 	http.Redirect(w, r, target, http.StatusSeeOther)
+}
+
+func (app *App) recoverManagedCompletion(
+	ctx context.Context,
+	intentRef string,
+	humanSessionRef string,
+	source string,
+) (managedCompletionReceipt, bool) {
+	authority, authorityOK := app.managedSetup.(managedSetupIntentRecovery)
+	transaction, transactionOK := app.managedTxn.(managedTransactionRecovery)
+	if !authorityOK || !transactionOK {
+		return managedCompletionReceipt{}, false
+	}
+	accepted, err := authority.Recover(ctx, intentRef, humanSessionRef, source)
+	if err != nil || transaction.Recover(ctx, accepted) != nil {
+		return managedCompletionReceipt{}, false
+	}
+	return managedCompletionReceipt{
+		IntentRef:       accepted.Intent.IntentRef,
+		OperationRef:    accepted.OperationRef,
+		OperationKind:   accepted.Intent.OperationKind,
+		Source:          accepted.Source,
+		HumanSessionRef: humanSessionRef,
+	}, true
 }
 
 func (app *App) inspectManagedSetupIntent(ctx context.Context, session Session, intentRef string) (managedSetupInspection, error) {
@@ -541,25 +591,35 @@ func readManagedSecretFormPrefix(reader io.Reader) ([]byte, error) {
 }
 
 func validateManagedSecretFormPrefix(prefix []byte, csrfToken, intentRef, source string) bool {
+	gotIntentRef, gotSource, ok := managedSecretFormPrefixIdentity(prefix, csrfToken)
+	return ok &&
+		hmac.Equal([]byte(gotIntentRef), []byte(intentRef)) &&
+		hmac.Equal([]byte(gotSource), []byte(source))
+}
+
+func managedSecretFormPrefixIdentity(prefix []byte, csrfToken string) (string, string, bool) {
 	const csrfPrefix = "csrf_token="
 	const intentSeparator = "&intent_ref="
 	const sourceSeparator = "&source="
 	const secretSuffix = "&secret_value="
 	if !bytes.HasPrefix(prefix, []byte(csrfPrefix)) || !bytes.HasSuffix(prefix, []byte(secretSuffix)) {
-		return false
+		return "", "", false
 	}
 	body := prefix[len(csrfPrefix) : len(prefix)-len(secretSuffix)]
 	csrf, rest, ok := bytes.Cut(body, []byte(intentSeparator))
 	if !ok {
-		return false
+		return "", "", false
 	}
 	encodedIntent, encodedSource, ok := bytes.Cut(rest, []byte(sourceSeparator))
 	if !ok || bytes.Contains(encodedIntent, []byte{'&'}) || bytes.Contains(encodedSource, []byte{'&'}) {
-		return false
+		return "", "", false
 	}
-	return hmac.Equal(csrf, []byte(csrfToken)) &&
-		hmac.Equal(encodedIntent, []byte(intentRef)) &&
-		hmac.Equal(encodedSource, []byte(source))
+	intentRef := string(encodedIntent)
+	source := string(encodedSource)
+	return intentRef, source,
+		hmac.Equal(csrf, []byte(csrfToken)) &&
+			validManagedRef("intent_", intentRef) &&
+			validManagedSource(source)
 }
 
 func decodeManagedFormValueInPlace(raw []byte) ([]byte, error) {
