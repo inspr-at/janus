@@ -45,6 +45,8 @@ const (
 	hostStepUpProofCookie  = "__Host-janus_managed_stepup_proof"
 	managedLoginCookie     = "janus_managed_login_intent"
 	hostManagedLoginCookie = "__Host-janus_managed_login_intent"
+	managedDoneCookie      = "janus_managed_completion"
+	hostManagedDoneCookie  = "__Host-janus_managed_completion"
 	defaultSessionTTL      = 12 * time.Hour
 	loginAttemptTTL        = 10 * time.Minute
 	maxLoginAttempts       = 3
@@ -138,6 +140,13 @@ func (c Config) ManagedLoginCookieName() string {
 		return hostManagedLoginCookie
 	}
 	return managedLoginCookie
+}
+
+func (c Config) ManagedCompletionCookieName() string {
+	if c.SecureCookies() {
+		return hostManagedDoneCookie
+	}
+	return managedDoneCookie
 }
 
 type SecretDescriptor struct {
@@ -675,6 +684,7 @@ func (app *App) routeSpecs() []routeSpec {
 		{pattern: "GET /auth/reset", permission: PermissionHealthRead, handler: app.handleAuthReset},
 		{pattern: "GET /oidc/callback", permission: PermissionHealthRead, handler: app.handleCallback},
 		{pattern: "GET /managed-service/setup", permission: PermissionLifecycleEntry, authenticated: true, handler: app.handleManagedSetup},
+		{pattern: "GET /managed-service/setup/complete/{operationRef}", permission: PermissionLifecycleEntry, authenticated: true, handler: app.handleManagedSetupComplete},
 		{pattern: "POST /managed-service/setup/step-up", permission: PermissionLifecycleEntry, authenticated: true, handler: app.handleManagedSetupStepUp},
 		{pattern: "POST /managed-service/setup/execute", permission: PermissionLifecycleEntry, authenticated: true, handler: app.handleManagedSetupExecute},
 		{pattern: "GET /internal/managed-service-host-envelopes/{hostRef}/{operationRef}", permission: PermissionLifecycleEntry, handler: app.handleManagedHostEnvelope},
@@ -753,6 +763,8 @@ func allowedMethodsForPath(path string) ([]string, bool) {
 	}
 	switch {
 	case strings.HasPrefix(path, "/static/"):
+		return []string{http.MethodGet}, true
+	case managedSetupCompletionPath(path):
 		return []string{http.MethodGet}, true
 	case singleSegmentRunPath(path, "/api/permits/"):
 		return []string{http.MethodPost}, true
@@ -2124,6 +2136,7 @@ func (app *App) handleLogout(w http.ResponseWriter, r *http.Request) {
 	app.clearOIDCLoginAttemptCookie(w)
 	app.clearManagedStepUpCookies(w)
 	app.clearManagedLoginIntentCookies(w)
+	app.clearManagedCompletionCookies(w)
 	http.Redirect(w, r, "/", http.StatusFound)
 }
 
@@ -2474,6 +2487,7 @@ func (app *App) clearAllAuthCookies(w http.ResponseWriter) {
 	app.clearOIDCLoginAttemptCookie(w)
 	app.clearManagedStepUpProofCookies(w)
 	app.clearManagedLoginIntentCookies(w)
+	app.clearManagedCompletionCookies(w)
 }
 
 func (app *App) clearOIDCLoginReturnCookie(w http.ResponseWriter) {

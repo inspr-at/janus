@@ -240,10 +240,10 @@ func TestManagedSetupPageRequiresPasskeyBeforeRenderingValueInput(t *testing.T) 
 		t.Fatalf("expected setup page, got %d body=%s", response.Code, response.Body.String())
 	}
 	body := response.Body.String()
-	if !strings.Contains(body, "Continue with passkey") ||
+	if !strings.Contains(body, "Confirm with passkey") ||
 		!strings.Contains(body, `name="source"`) ||
-		!strings.Contains(body, "Generate a strong value") ||
-		!strings.Contains(body, "Paste a value I already have") ||
+		!strings.Contains(body, "Generate securely") ||
+		!strings.Contains(body, "Use my own value") ||
 		!strings.Contains(body, "Canary service") ||
 		!strings.Contains(body, "Admin password") ||
 		strings.Contains(body, `name="secret_value"`) ||
@@ -263,7 +263,7 @@ func TestManagedSetupPageRequiresPasskeyBeforeRenderingValueInput(t *testing.T) 
 		`autocomplete="off"`,
 		`data-1p-ignore`,
 		`data-bwignore`,
-		"never renders them back",
+		"will not display it again",
 	} {
 		if !strings.Contains(body, expected) {
 			t.Fatalf("stepped-up page should contain %q: %s", expected, body)
@@ -676,8 +676,8 @@ func TestManagedImportConsumesIntentBeforeReadingAndZeroizesValue(t *testing.T) 
 	app.managedSetup = wrapped
 	app.routes().ServeHTTP(response, request)
 	if response.Code != http.StatusSeeOther ||
-		response.Header().Get("Location") != "https://pharos.barta.cm/managed-service/operations/"+managedTestOpRef {
-		t.Fatalf("expected safe Pharos redirect, got %d location=%q body=%s", response.Code, response.Header().Get("Location"), response.Body.String())
+		response.Header().Get("Location") != managedCompletionPrefix+managedTestOpRef {
+		t.Fatalf("expected safe same-origin completion redirect, got %d location=%q body=%s", response.Code, response.Header().Get("Location"), response.Body.String())
 	}
 	if spy.earlyRead || authority.consumeCount != 1 || executor.count != 1 || !executor.valueObserved {
 		t.Fatalf("value boundary order failed: early=%v consume=%d execute=%d observed=%v", spy.earlyRead, authority.consumeCount, executor.count, executor.valueObserved)
@@ -688,7 +688,32 @@ func TestManagedImportConsumesIntentBeforeReadingAndZeroizesValue(t *testing.T) 
 	if got := response.Header().Get("Clear-Site-Data"); got != `"cache", "storage"` {
 		t.Fatalf("completion should clear browser cache/storage, got %q", got)
 	}
+	completionCookie := cookieByName(t, response.Result().Cookies(), hostManagedDoneCookie)
+	completionRequest := httptest.NewRequest(http.MethodGet, managedCompletionPrefix+managedTestOpRef, nil)
+	completionRequest.AddCookie(sessionCookie)
+	completionRequest.AddCookie(completionCookie)
+	completionResponse := httptest.NewRecorder()
+	app.routes().ServeHTTP(completionResponse, completionRequest)
+	if completionResponse.Code != http.StatusOK ||
+		completionResponse.Header().Get("Refresh") != "1; url=https://pharos.barta.cm/managed-service/operations/"+managedTestOpRef ||
+		!strings.Contains(completionResponse.Body.String(), "Secret accepted") ||
+		!strings.Contains(completionResponse.Body.String(), "Opening service status") ||
+		!strings.Contains(completionResponse.Body.String(), "No reveal and no copy-back") ||
+		strings.Contains(completionResponse.Body.String(), `action="/managed-service/setup/execute"`) {
+		t.Fatalf(
+			"same-origin completion handoff is not safe and actionable: status=%d refresh=%q body=%s",
+			completionResponse.Code,
+			completionResponse.Header().Get("Refresh"),
+			completionResponse.Body.String(),
+		)
+	}
+	if csp := completionResponse.Header().Get("Content-Security-Policy"); !strings.Contains(csp, "script-src 'none'") ||
+		!strings.Contains(csp, "form-action 'self';") ||
+		strings.Contains(csp, "pharos.barta.cm") {
+		t.Fatalf("completion handoff weakened CSP: %s", csp)
+	}
 	assertManagedCanaryAbsent(t, app, response, string(canary))
+	assertManagedCanaryAbsent(t, app, completionResponse, string(canary))
 }
 
 type consumeWitnessAuthority struct {
@@ -853,25 +878,161 @@ func TestManagedIncompleteBodyIntentionallyBurnsIntentBeforeValueAdmission(t *te
 	assertManagedCanaryAbsent(t, app, response, "partial")
 }
 
-func TestManagedDuplicateSubmitCannotReplayImport(t *testing.T) {
+func TestManagedDuplicateSubmitResolvesToExistingOperationWithoutReplay(t *testing.T) {
 	app, authority, executor, session, sessionCookie, proofCookie := managedIngressFixture(t, "import")
 	authority.replayAfterOne = true
 	executor.expectedValue = []byte("one-time-value")
 	form := "csrf_token=" + app.csrfToken(session) + "&intent_ref=" + managedTestIntentRef + "&source=import&secret_value=one-time-value"
 
+	var completionCookie *http.Cookie
 	for attempt := 1; attempt <= 2; attempt++ {
 		request := managedRequest(t, app, session, sessionCookie, proofCookie, strings.NewReader(form), int64(len(form)))
+		if completionCookie != nil {
+			request.AddCookie(completionCookie)
+		}
 		response := httptest.NewRecorder()
 		app.routes().ServeHTTP(response, request)
-		if attempt == 1 && response.Code != http.StatusSeeOther {
-			t.Fatalf("first submit should complete, got %d body=%s", response.Code, response.Body.String())
+		if response.Code != http.StatusSeeOther ||
+			response.Header().Get("Location") != managedCompletionPrefix+managedTestOpRef {
+			t.Fatalf("submit %d should resolve to the same completion, got %d location=%q body=%s", attempt, response.Code, response.Header().Get("Location"), response.Body.String())
 		}
-		if attempt == 2 && response.Code != http.StatusConflict {
-			t.Fatalf("duplicate should be a controlled conflict, got %d body=%s", response.Code, response.Body.String())
+		if attempt == 1 {
+			completionCookie = cookieByName(t, response.Result().Cookies(), hostManagedDoneCookie)
+			if !completionCookie.HttpOnly ||
+				!completionCookie.Secure ||
+				completionCookie.SameSite != http.SameSiteStrictMode ||
+				completionCookie.MaxAge != int(managedCompletionTTL.Seconds()) {
+				t.Fatalf("completion receipt cookie is not strictly bounded: %#v", completionCookie)
+			}
+			receiptRequest := httptest.NewRequest(http.MethodGet, "/", nil)
+			receiptRequest.AddCookie(completionCookie)
+			receipt, ok := app.readManagedCompletionReceipt(receiptRequest)
+			if !ok ||
+				receipt.IntentRef != managedTestIntentRef ||
+				receipt.OperationRef != managedTestOpRef ||
+				receipt.Source != "import" ||
+				receipt.OperationKind != "create" ||
+				receipt.HumanSessionRef != managedHumanSessionRef(app.cfg.OIDCIssuer, session.Subject) {
+				t.Fatalf("completion receipt is not exactly bound: receipt=%#v ok=%v", receipt, ok)
+			}
 		}
 	}
-	if authority.consumeCount != 2 || executor.count != 1 {
+	if authority.consumeCount != 1 || executor.count != 1 {
 		t.Fatalf("duplicate crossed transaction boundary: consume=%d execute=%d", authority.consumeCount, executor.count)
+	}
+}
+
+func TestManagedCompletionReceiptRecoversRefreshBackAndLostNavigation(t *testing.T) {
+	app, authority, _, session, sessionCookie, _ := managedIngressFixture(t, "generated")
+	writer := httptest.NewRecorder()
+	app.writeManagedCompletionReceipt(writer, managedCompletionReceipt{
+		IntentRef:       managedTestIntentRef,
+		OperationRef:    managedTestOpRef,
+		OperationKind:   "create",
+		Source:          "generated",
+		HumanSessionRef: managedHumanSessionRef(app.cfg.OIDCIssuer, session.Subject),
+	})
+	completionCookie := cookieByName(t, writer.Result().Cookies(), hostManagedDoneCookie)
+
+	request := httptest.NewRequest(http.MethodGet, "/managed-service/setup?intent="+managedTestIntentRef, nil)
+	request.AddCookie(sessionCookie)
+	request.AddCookie(completionCookie)
+	response := httptest.NewRecorder()
+	app.routes().ServeHTTP(response, request)
+	if response.Code != http.StatusSeeOther ||
+		response.Header().Get("Location") != managedCompletionPrefix+managedTestOpRef ||
+		authority.inspectCount != 0 {
+		t.Fatalf(
+			"completed setup did not recover without re-inspection: status=%d location=%q inspect=%d body=%s",
+			response.Code,
+			response.Header().Get("Location"),
+			authority.inspectCount,
+			response.Body.String(),
+		)
+	}
+
+	for attempt := 1; attempt <= 2; attempt++ {
+		request = httptest.NewRequest(http.MethodGet, managedCompletionPrefix+managedTestOpRef, nil)
+		request.AddCookie(sessionCookie)
+		request.AddCookie(completionCookie)
+		response = httptest.NewRecorder()
+		app.routes().ServeHTTP(response, request)
+		if response.Code != http.StatusOK ||
+			response.Header().Get("Refresh") != "1; url=https://pharos.barta.cm/managed-service/operations/"+managedTestOpRef {
+			t.Fatalf("completion refresh %d did not stay idempotent: status=%d refresh=%q body=%s", attempt, response.Code, response.Header().Get("Refresh"), response.Body.String())
+		}
+	}
+}
+
+func TestManagedCompletionReceiptTamperExpiryWrongUserAndWrongOperationFailClosed(t *testing.T) {
+	app, _, _, session, sessionCookie, _ := managedIngressFixture(t, "generated")
+	now := time.Now().UTC()
+	valid := managedCompletionReceipt{
+		Schema:          managedCompletionDomain,
+		IntentRef:       managedTestIntentRef,
+		OperationRef:    managedTestOpRef,
+		OperationKind:   "create",
+		Source:          "generated",
+		HumanSessionRef: managedHumanSessionRef(app.cfg.OIDCIssuer, session.Subject),
+		CompletedAt:     now.Unix(),
+		ExpiresAt:       now.Add(managedCompletionTTL).Unix(),
+	}
+	writer := httptest.NewRecorder()
+	app.writeManagedSignedCookie(
+		writer,
+		app.cfg.ManagedCompletionCookieName(),
+		managedCompletionDomain,
+		valid,
+		http.SameSiteStrictMode,
+		managedCompletionTTL,
+	)
+	validCookie := cookieByName(t, writer.Result().Cookies(), hostManagedDoneCookie)
+
+	wrongSession := session
+	wrongSession.Subject = "different-managed-user"
+	wrongSessionWriter := httptest.NewRecorder()
+	app.writeSession(wrongSessionWriter, wrongSession)
+	wrongSessionCookie := cookieByName(t, wrongSessionWriter.Result().Cookies(), hostSessionCookie)
+
+	expired := valid
+	expired.CompletedAt = now.Add(-2 * managedCompletionTTL).Unix()
+	expired.ExpiresAt = now.Add(-managedCompletionTTL).Unix()
+	expiredWriter := httptest.NewRecorder()
+	app.writeManagedSignedCookie(
+		expiredWriter,
+		app.cfg.ManagedCompletionCookieName(),
+		managedCompletionDomain,
+		expired,
+		http.SameSiteStrictMode,
+		managedCompletionTTL,
+	)
+
+	tampered := *validCookie
+	tampered.Value += "x"
+	tests := []struct {
+		name      string
+		path      string
+		session   *http.Cookie
+		completed *http.Cookie
+	}{
+		{name: "tampered", path: managedCompletionPrefix + managedTestOpRef, session: sessionCookie, completed: &tampered},
+		{name: "expired", path: managedCompletionPrefix + managedTestOpRef, session: sessionCookie, completed: cookieByName(t, expiredWriter.Result().Cookies(), hostManagedDoneCookie)},
+		{name: "wrong user", path: managedCompletionPrefix + managedTestOpRef, session: wrongSessionCookie, completed: validCookie},
+		{name: "wrong operation", path: managedCompletionPrefix + "op_abcdef0123456789", session: sessionCookie, completed: validCookie},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, test.path, nil)
+			request.AddCookie(test.session)
+			request.AddCookie(test.completed)
+			response := httptest.NewRecorder()
+			app.routes().ServeHTTP(response, request)
+			if response.Code != http.StatusConflict ||
+				!strings.Contains(response.Body.String(), "Open the operation from Pharos") ||
+				response.Header().Get("Refresh") != "" {
+				t.Fatalf("unsafe completion receipt was not denied: status=%d refresh=%q body=%s", response.Code, response.Header().Get("Refresh"), response.Body.String())
+			}
+		})
 	}
 }
 

@@ -41,7 +41,7 @@ async function submitImportedValue(page, canary) {
     }, canary);
 }
 
-test("passwordless import forgets the value across back, refresh, and duplicate submit", async ({
+test("passwordless import shows Check, forgets the value, and recovers navigation", async ({
   page,
 }) => {
   const messages = [];
@@ -62,7 +62,7 @@ test("passwordless import forgets the value across back, refresh, and duplicate 
   );
 
   await page
-    .getByRole("radio", { name: /Paste a value I already have/ })
+    .getByRole("radio", { name: /Use my own value/ })
     .check();
   const authorizationRequest = page.waitForRequest(
     (request) =>
@@ -71,7 +71,7 @@ test("passwordless import forgets the value across back, refresh, and duplicate 
   const callbackResponse = page.waitForResponse(
     (response) => new URL(response.url()).pathname === "/oidc/callback",
   );
-  await page.getByRole("button", { name: "Continue with passkey" }).click();
+  await page.getByRole("button", { name: "Confirm with passkey" }).click();
   expect(new URL((await authorizationRequest).url()).hostname).toBe("localhost");
   const callback = await callbackResponse;
   expect(callback.status()).toBe(200);
@@ -79,7 +79,7 @@ test("passwordless import forgets the value across back, refresh, and duplicate 
     "0; url=/managed-service/setup?intent=intent_0123456789abcdef",
   );
   await expect(
-    page.getByRole("heading", { name: "Enter the value once" }),
+    page.getByRole("heading", { name: "Ready to add" }),
   ).toBeVisible();
 
   const canary = runtimeCanary("import");
@@ -90,10 +90,27 @@ test("passwordless import forgets the value across back, refresh, and duplicate 
     ),
   ).toEqual([]);
 
+  const completionNavigation = page.waitForURL(
+    /\/managed-service\/setup\/complete\/op_[a-z0-9]+$/,
+  );
   await submitImportedValue(page, canary);
+  await completionNavigation;
+  await expect(
+    page.getByRole("heading", { name: "Checking service" }),
+  ).toBeVisible();
+  await expect(page.getByRole("status")).toContainText("Secret accepted");
+  await expect(page.getByText("Opening service status…")).toBeVisible();
+  await expectCanariesAbsent(page, [canary]);
+  const completionAccessibility = await new AxeBuilder({ page }).analyze();
+  expect(
+    completionAccessibility.violations.filter(({ impact }) =>
+      ["serious", "critical"].includes(impact),
+    ),
+  ).toEqual([]);
+
   await expect(
     page.getByRole("heading", { name: "Operation registered" }),
-  ).toBeVisible();
+  ).toBeVisible({ timeout: 5_000 });
   await expectCanariesAbsent(page, [canary]);
   expect((await page.locator("main").ariaSnapshot()).includes(canary)).toBe(
     false,
@@ -109,28 +126,68 @@ test("passwordless import forgets the value across back, refresh, and duplicate 
     authority_kind: "test_fixture",
   });
 
-  await page.goBack();
+  await page.goBack({ waitUntil: "domcontentloaded" });
   await expect(
-    page.getByRole("button", { name: "Continue with passkey" }),
-  ).toBeVisible();
+    page.getByRole("heading", { name: "Operation registered" }),
+  ).toBeVisible({ timeout: 5_000 });
   await expect(page.locator('input[name="secret_value"]')).toHaveCount(0);
   await expectCanariesAbsent(page, [canary]);
   await page.reload();
   await expectCanariesAbsent(page, [canary]);
 
-  await page
-    .getByRole("radio", { name: /Paste a value I already have/ })
-    .check();
-  await page.getByRole("button", { name: "Continue with passkey" }).click();
-  const replayCanary = runtimeCanary("replay");
-  await submitImportedValue(page, replayCanary);
-  await expect(page.getByText("Start again from Pharos")).toBeVisible();
-  await expectCanariesAbsent(page, [canary, replayCanary]);
+  const finalEvidence = await (
+    await page.request.get("http://127.0.0.1:18082/__managed-browser/evidence")
+  ).text();
+  expect(JSON.parse(finalEvidence).executions).toBe(1);
   expect(
-    messages.some((message) =>
-      [canary, replayCanary].some((value) => message.includes(value)),
-    ),
+    messages.some((message) => message.includes(canary)),
   ).toBe(false);
+});
+
+test("compact generated flow works from the keyboard", async ({ page }) => {
+  await page.goto("/__managed-browser/session?kind=create");
+  await expect(
+    page.getByRole("heading", { name: "Add service secret" }),
+  ).toBeVisible();
+  await expect(page.getByRole("radio", { name: /Generate securely/ })).toBeChecked();
+  await expect(
+    page.getByRole("heading", { name: "Managed browser canary" }),
+  ).toBeVisible();
+  await expect(page.getByText("Managed host")).toBeVisible();
+  await expect(
+    page.getByText("Service credential", { exact: true }),
+  ).toBeVisible();
+  await expect(page.getByText("Target locked")).toBeVisible();
+
+  const confirm = page.getByRole("button", { name: "Confirm with passkey" });
+  await confirm.focus();
+  await confirm.press("Enter");
+  await expect(
+    page.getByRole("heading", { name: "Ready to add" }),
+  ).toBeVisible();
+  await expect(page.locator('input[name="secret_value"]')).toHaveCount(1);
+  await expect(
+    page.locator('input[name="secret_value"]'),
+  ).toHaveAttribute("type", "hidden");
+
+  const add = page.getByRole("button", { name: "Add secret" });
+  await add.focus();
+  await add.press("Enter");
+  await expect(
+    page.getByRole("heading", { name: "Checking service" }),
+  ).toBeVisible();
+  await expect(page.getByRole("status")).toContainText("Secret accepted");
+  await expect(
+    page.getByRole("heading", { name: "Operation registered" }),
+  ).toBeVisible({ timeout: 5_000 });
+
+  const evidence = await (
+    await page.request.get("http://127.0.0.1:18082/__managed-browser/evidence")
+  ).json();
+  expect(evidence).toMatchObject({
+    executions: 1,
+    last_value_byte_count: 0,
+  });
 });
 
 test("expired step-up and logout never preserve a value field", async ({
@@ -138,14 +195,14 @@ test("expired step-up and logout never preserve a value field", async ({
 }) => {
   await page.goto("/__managed-browser/expired");
   await expect(
-    page.getByRole("button", { name: "Continue with passkey" }),
+    page.getByRole("button", { name: "Confirm with passkey" }),
   ).toBeVisible();
   await expect(page.locator('input[name="secret_value"]')).toHaveCount(0);
 
   await page
-    .getByRole("radio", { name: /Paste a value I already have/ })
+    .getByRole("radio", { name: /Use my own value/ })
     .check();
-  await page.getByRole("button", { name: "Continue with passkey" }).click();
+  await page.getByRole("button", { name: "Confirm with passkey" }).click();
   await expect(page.locator('input[name="secret_value"]')).toBeVisible();
   await page.getByRole("button", { name: "Sign out" }).click();
   await expect(page.getByText("Continue with Zitadel")).toBeVisible();
@@ -163,18 +220,22 @@ test("reviewed removal stays value-free and explains the recovery boundary", asy
     page.getByRole("heading", { name: "Remove service secret" }),
   ).toBeVisible();
   await expect(page.locator('input[name="secret_value"]')).toHaveCount(0);
-  await expect(page.getByText("The secret is never revealed.")).toBeVisible();
-  await page.getByRole("button", { name: "Continue with passkey" }).click();
+  await expect(page.getByText("Never revealed.")).toBeVisible();
+  await page.getByRole("button", { name: "Confirm with passkey" }).click();
   await expect(
     page.getByRole("heading", { name: "Ready to remove" }),
   ).toBeVisible();
-  await expect(page.getByText("Recovery window: 24 hours")).toBeVisible();
+  await expect(page.getByText("24-hour recovery window")).toBeVisible();
   await expect(page.getByText("Reveal", { exact: true })).toHaveCount(0);
   await expect(page.getByText("Copy", { exact: true })).toHaveCount(0);
   await page
     .getByRole("button", { name: "Remove secret safely" })
     .click();
   await expect(
-    page.getByRole("heading", { name: "Operation registered" }),
+    page.getByRole("heading", { name: "Checking service" }),
   ).toBeVisible();
+  await expect(page.getByRole("status")).toContainText("Removal accepted");
+  await expect(
+    page.getByRole("heading", { name: "Operation registered" }),
+  ).toBeVisible({ timeout: 5_000 });
 });
