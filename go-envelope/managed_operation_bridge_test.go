@@ -358,6 +358,120 @@ func TestManagedBridgeReconciliationIsTerminalAndIdempotent(t *testing.T) {
 	}
 }
 
+func TestManagedBridgeRecoversOnlyTheExactAcceptedOperation(t *testing.T) {
+	root := t.TempDir()
+	store, err := newManagedOperationBridgeStore(filepath.Join(root, "bridge.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := managedBridgeRecord("op_20000001")
+	record.OperationKind = "replace"
+	record.Source = "generated"
+	record.Generation = 2
+	if err := store.putPrepared(record); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.setPhase(record.OperationRef, "registered", 1_800_000_001); err != nil {
+		t.Fatal(err)
+	}
+	bridge := &managedOperationBridge{store: store}
+	accepted := managedAcceptedIntent{
+		Intent: managedSetupIntent{
+			OperationKind:          record.OperationKind,
+			HostRef:                record.HostRef,
+			ServiceRef:             record.ServiceRef,
+			SlotRef:                record.SlotRef,
+			DeclarationFingerprint: record.DeclarationFingerprint,
+		},
+		Source:       record.Source,
+		OperationRef: record.OperationRef,
+		Context: managedDeclarationContext{
+			DeliveryProfileRef: record.DeliveryProfileRef,
+			ReloadProfileRef:   record.ReloadProfileRef,
+			HealthProfileRef:   record.HealthProfileRef,
+		},
+	}
+	if err := bridge.Recover(context.Background(), accepted); err != nil {
+		t.Fatalf("exact accepted operation did not recover: %v", err)
+	}
+	accepted.Source = "import"
+	if err := bridge.Recover(context.Background(), accepted); err == nil {
+		t.Fatal("source-changed operation recovery should fail closed")
+	}
+}
+
+func TestManagedBridgeRecoveryOpensEveryDurableOperationOutcome(t *testing.T) {
+	tests := []struct {
+		name          string
+		operationRef  string
+		operationKind string
+		phase         string
+	}{
+		{name: "registered create", operationRef: "op_30000001", operationKind: "create", phase: "registered"},
+		{name: "completed create", operationRef: "op_30000002", operationKind: "create", phase: "completed"},
+		{name: "rolled back create", operationRef: "op_30000003", operationKind: "create", phase: "rolled_back"},
+		{name: "registered removal", operationRef: "op_30000004", operationKind: "remove", phase: "registered"},
+		{name: "quarantined removal", operationRef: "op_30000005", operationKind: "remove", phase: "quarantined"},
+		{name: "destroyed removal", operationRef: "op_30000006", operationKind: "remove", phase: "destroyed"},
+		{name: "review required removal", operationRef: "op_30000007", operationKind: "remove", phase: "review_required"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store, err := newManagedOperationBridgeStore(filepath.Join(t.TempDir(), "bridge.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			record := managedBridgeRecord(test.operationRef)
+			record.OperationKind = test.operationKind
+			if test.operationKind == "remove" {
+				record.Source = "remove"
+				record.DetachProfileRef = "detach_8a0f4e271c93"
+				record.PurgeNotBeforeUnixSeconds = record.CreatedAtUnixSeconds + 86_400
+			}
+			if err := store.putPrepared(record); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.setPhase(record.OperationRef, "registered", record.CreatedAtUnixSeconds+1); err != nil {
+				t.Fatal(err)
+			}
+			switch test.phase {
+			case "completed", "rolled_back", "quarantined", "review_required":
+				if err := store.setPhase(record.OperationRef, test.phase, record.CreatedAtUnixSeconds+2); err != nil {
+					t.Fatal(err)
+				}
+			case "destroyed":
+				if err := store.setPhase(record.OperationRef, "quarantined", record.CreatedAtUnixSeconds+2); err != nil {
+					t.Fatal(err)
+				}
+				if err := store.setPhase(record.OperationRef, "destroyed", record.CreatedAtUnixSeconds+3); err != nil {
+					t.Fatal(err)
+				}
+			}
+			bridge := &managedOperationBridge{store: store}
+			accepted := managedAcceptedIntent{
+				Intent: managedSetupIntent{
+					OperationKind:          record.OperationKind,
+					HostRef:                record.HostRef,
+					ServiceRef:             record.ServiceRef,
+					SlotRef:                record.SlotRef,
+					DeclarationFingerprint: record.DeclarationFingerprint,
+				},
+				Source:       record.Source,
+				OperationRef: record.OperationRef,
+				Context: managedDeclarationContext{
+					DeliveryProfileRef: record.DeliveryProfileRef,
+					ReloadProfileRef:   record.ReloadProfileRef,
+					HealthProfileRef:   record.HealthProfileRef,
+					DetachProfileRef:   record.DetachProfileRef,
+				},
+			}
+			if err := bridge.Recover(context.Background(), accepted); err != nil {
+				t.Fatalf("durable operation status did not recover: %v", err)
+			}
+		})
+	}
+}
+
 func TestManagedBridgeReplacementRollbackIsBoundAndIdempotent(t *testing.T) {
 	root := t.TempDir()
 	store, err := newManagedOperationBridgeStore(filepath.Join(root, "bridge.json"))

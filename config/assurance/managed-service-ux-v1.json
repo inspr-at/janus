@@ -159,6 +159,16 @@
       "value_returned": false
     },
     {
+      "id": "accepted-operation-cookie-loss-recovery",
+      "family": "workflow-recovery",
+      "stack": "go",
+      "runner": "go",
+      "working_directory": "go-envelope",
+      "target": "./...",
+      "test_name": "TestManagedAcceptedOperationRecoversWithoutCompletionOrStepUpCookie",
+      "value_returned": false
+    },
+    {
       "id": "bridge-terminal-restart-idempotency",
       "family": "workflow-recovery",
       "stack": "go",

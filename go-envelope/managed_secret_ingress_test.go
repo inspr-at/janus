@@ -32,6 +32,7 @@ type fakeManagedIntentAuthority struct {
 	intent         managedSetupIntent
 	inspectCount   int
 	consumeCount   int
+	recoverCount   int
 	inspectErr     error
 	consumeErr     error
 	replayAfterOne bool
@@ -108,8 +109,46 @@ func (fake *fakeManagedIntentAuthority) Consume(_ context.Context, intentRef, hu
 	}, nil
 }
 
+func (fake *fakeManagedIntentAuthority) Recover(_ context.Context, intentRef, humanSessionRef, source string) (managedAcceptedIntent, error) {
+	if fake.consumeCount == 0 {
+		return managedAcceptedIntent{}, managedIntentError("managed_intent_recovery_unavailable")
+	}
+	fake.recoverCount++
+	if intentRef != fake.intent.IntentRef || humanSessionRef != fake.intent.HumanSessionRef {
+		return managedAcceptedIntent{}, managedIntentError("managed_intent_wrong_user")
+	}
+	if fake.intent.OperationKind == "remove" && source != "remove" ||
+		fake.intent.OperationKind != "remove" && !containsManagedSource(fake.intent.AllowedSources, source) {
+		return managedAcceptedIntent{}, managedIntentError("managed_intent_source_denied")
+	}
+	bindingState := "required"
+	detachProfileRef := ""
+	if fake.intent.OperationKind == "remove" {
+		bindingState = "detached"
+		detachProfileRef = "detach_0123456789abcdef"
+	}
+	return managedAcceptedIntent{
+		Intent:       fake.intent,
+		Source:       source,
+		OperationRef: managedTestOpRef,
+		Context: managedDeclarationContext{
+			ServiceLabel:       "Canary service",
+			SlotLabel:          "Admin password",
+			ConsumerKind:       "managed_service",
+			DeliveryKind:       "private_env_file",
+			DeliveryProfileRef: "delivery_2d7a0f63c951",
+			ReloadProfileRef:   "reload_65bc19f3a087",
+			HealthProfileRef:   "health_918d0ce7b4a2",
+			BindingState:       bindingState,
+			DetachProfileRef:   detachProfileRef,
+			AllowedSources:     append([]string(nil), fake.intent.AllowedSources...),
+		},
+	}, nil
+}
+
 type fakeManagedTransactionExecutor struct {
 	count          int
+	recoverCount   int
 	expectedValue  []byte
 	valueObserved  bool
 	retainedBuffer []byte
@@ -128,6 +167,16 @@ func (fake *fakeManagedTransactionExecutor) Execute(_ context.Context, accepted 
 		return managedTransactionResult{}, fake.err
 	}
 	return fake.result, nil
+}
+
+func (fake *fakeManagedTransactionExecutor) Recover(_ context.Context, accepted managedAcceptedIntent) error {
+	if fake.count == 0 ||
+		accepted.OperationRef != fake.result.OperationRef ||
+		accepted.Source != fake.result.Mode {
+		return managedTransactionError("managed_operation_recovery_unavailable")
+	}
+	fake.recoverCount++
+	return nil
 }
 
 type managedReadOrderSpy struct {
@@ -222,7 +271,9 @@ func managedRequest(t *testing.T, app *App, session Session, sessionCookie, proo
 	request.Header.Set("Origin", app.cfg.PublicURL)
 	request.Header.Set("Sec-Fetch-Site", "same-origin")
 	request.AddCookie(sessionCookie)
-	request.AddCookie(proofCookie)
+	if proofCookie != nil {
+		request.AddCookie(proofCookie)
+	}
 	if app.csrfToken(session) == "" {
 		t.Fatal("test session should have a CSRF token")
 	}
@@ -919,6 +970,58 @@ func TestManagedDuplicateSubmitResolvesToExistingOperationWithoutReplay(t *testi
 	}
 	if authority.consumeCount != 1 || executor.count != 1 {
 		t.Fatalf("duplicate crossed transaction boundary: consume=%d execute=%d", authority.consumeCount, executor.count)
+	}
+}
+
+func TestManagedAcceptedOperationRecoversWithoutCompletionOrStepUpCookie(t *testing.T) {
+	app, authority, executor, session, sessionCookie, proofCookie := managedIngressFixture(t, "import")
+	executor.expectedValue = []byte("one-time-value")
+	prefix := "csrf_token=" + app.csrfToken(session) + "&intent_ref=" + managedTestIntentRef + "&source=import&secret_value="
+	form := prefix + "one-time-value"
+
+	first := managedRequest(t, app, session, sessionCookie, proofCookie, strings.NewReader(form), int64(len(form)))
+	firstResponse := httptest.NewRecorder()
+	app.routes().ServeHTTP(firstResponse, first)
+	if firstResponse.Code != http.StatusSeeOther {
+		t.Fatalf("first submission was not accepted: status=%d body=%s", firstResponse.Code, firstResponse.Body.String())
+	}
+
+	consumed := true
+	spy := &managedReadOrderSpy{
+		body:           []byte(form),
+		secretOffset:   len(prefix),
+		intentConsumed: &consumed,
+	}
+	repeated := managedRequest(t, app, session, sessionCookie, nil, spy, int64(len(form)))
+	repeatedResponse := httptest.NewRecorder()
+	app.routes().ServeHTTP(repeatedResponse, repeated)
+	if repeatedResponse.Code != http.StatusSeeOther ||
+		repeatedResponse.Header().Get("Location") != managedCompletionPrefix+managedTestOpRef {
+		t.Fatalf(
+			"accepted operation was not recovered: status=%d location=%q body=%s",
+			repeatedResponse.Code,
+			repeatedResponse.Header().Get("Location"),
+			repeatedResponse.Body.String(),
+		)
+	}
+	if spy.offset != len(prefix) {
+		t.Fatalf("recovery read value bytes: read=%d prefix=%d", spy.offset, len(prefix))
+	}
+	completionCookie := cookieByName(t, repeatedResponse.Result().Cookies(), hostManagedDoneCookie)
+	if completionCookie.MaxAge != int(managedCompletionTTL.Seconds()) {
+		t.Fatalf("recovery did not issue a bounded completion receipt: %#v", completionCookie)
+	}
+	if authority.consumeCount != 1 ||
+		authority.recoverCount != 1 ||
+		executor.count != 1 ||
+		executor.recoverCount != 1 {
+		t.Fatalf(
+			"recovery crossed the transaction boundary: consume=%d recover=%d execute=%d transaction_recover=%d",
+			authority.consumeCount,
+			authority.recoverCount,
+			executor.count,
+			executor.recoverCount,
+		)
 	}
 }
 

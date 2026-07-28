@@ -190,6 +190,83 @@ test("compact generated flow works from the keyboard", async ({ page }) => {
   });
 });
 
+test("accepted operation survives a lost completion and step-up cookie", async ({
+  page,
+}) => {
+  await page.goto("/__managed-browser/session?kind=create");
+  await page.getByRole("button", { name: "Confirm with passkey" }).click();
+  await expect(
+    page.getByRole("heading", { name: "Ready to add" }),
+  ).toBeVisible();
+
+  const executeForm = page.locator(
+    'form[action="/managed-service/setup/execute"]',
+  );
+  const csrf = await executeForm
+    .locator('input[name="csrf_token"]')
+    .inputValue();
+  const intent = await executeForm
+    .locator('input[name="intent_ref"]')
+    .inputValue();
+  const source = await executeForm
+    .locator('input[name="source"]')
+    .inputValue();
+  const formBody = new URLSearchParams([
+    ["csrf_token", csrf],
+    ["intent_ref", intent],
+    ["source", source],
+    ["secret_value", ""],
+  ]).toString();
+  const firstSubmission = await page.request.post(
+    "/managed-service/setup/execute",
+    {
+      data: formBody,
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        Origin: new URL(page.url()).origin,
+        "Sec-Fetch-Site": "same-origin",
+      },
+      maxRedirects: 0,
+    },
+  );
+  expect(firstSubmission.status()).toBe(303);
+  await expect
+    .poll(async () => {
+      const evidence = await page.request.get("/__managed-browser/evidence");
+      return (await evidence.json()).executions;
+    })
+    .toBe(1);
+
+  const context = page.context();
+  await expect
+    .poll(async () =>
+      (await context.cookies()).some(
+        ({ name }) => name === "janus_managed_completion",
+      ),
+    )
+    .toBe(true);
+  await context.clearCookies({ name: "janus_managed_completion" });
+  expect(
+    (await context.cookies()).some(
+      ({ name }) => name === "janus_managed_stepup_proof",
+    ),
+  ).toBe(false);
+
+  await page.getByRole("button", { name: "Add secret" }).click();
+  await expect(
+    page.getByRole("heading", { name: "Checking service" }),
+  ).toBeVisible();
+  await expect(page.getByRole("status")).toContainText("Secret accepted");
+  await expect(
+    page.getByRole("heading", { name: "Operation registered" }),
+  ).toBeVisible({ timeout: 5_000 });
+
+  const evidence = await (
+    await page.request.get("http://127.0.0.1:18082/__managed-browser/evidence")
+  ).json();
+  expect(evidence.executions).toBe(1);
+});
+
 test("expired step-up and logout never preserve a value field", async ({
   page,
 }) => {

@@ -89,6 +89,10 @@ type managedTransactionExecutor interface {
 	Execute(context.Context, managedAcceptedIntent, []byte) (managedTransactionResult, error)
 }
 
+type managedTransactionRecovery interface {
+	Recover(context.Context, managedAcceptedIntent) error
+}
+
 type managedTransactionController interface {
 	Finalize(context.Context, managedOperationBridgeRecord, managedExternalActivationEvidence) (managedTransactionResult, error)
 	FinalizeRemoval(context.Context, managedOperationBridgeRecord, managedExternalRemovalEvidence) (managedTransactionResult, error)

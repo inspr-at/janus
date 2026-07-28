@@ -137,6 +137,37 @@ func (authority *managedBrowserAuthority) Consume(
 	}, nil
 }
 
+func (authority *managedBrowserAuthority) Recover(
+	_ context.Context,
+	intentRef string,
+	humanSessionRef string,
+	source string,
+) (managedAcceptedIntent, error) {
+	authority.mu.Lock()
+	defer authority.mu.Unlock()
+	intent, ok := authority.intents[intentRef]
+	if !ok || !authority.consumed[intentRef] {
+		return managedAcceptedIntent{}, managedIntentError("managed_intent_recovery_unavailable")
+	}
+	if intent.HumanSessionRef != humanSessionRef {
+		return managedAcceptedIntent{}, managedIntentError("managed_intent_wrong_user")
+	}
+	if intent.OperationKind == "remove" && source != "remove" ||
+		intent.OperationKind != "remove" && !containsManagedSource(intent.AllowedSources, source) {
+		return managedAcceptedIntent{}, managedIntentError("managed_intent_source_denied")
+	}
+	operationRef := managedTestOpRef
+	if intent.OperationKind == "remove" {
+		operationRef = managedBrowserRemoveOp
+	}
+	return managedAcceptedIntent{
+		Intent:       intent,
+		Context:      managedBrowserContext(intent),
+		Source:       source,
+		OperationRef: operationRef,
+	}, nil
+}
+
 func managedBrowserContext(intent managedSetupIntent) managedDeclarationContext {
 	context := managedDeclarationContext{
 		ServiceLabel:       "Managed browser canary",
@@ -160,6 +191,8 @@ type managedBrowserExecutor struct {
 	mu                 sync.Mutex
 	executions         int
 	lastValueByteCount int
+	lastOperationRef   string
+	lastSource         string
 }
 
 func (executor *managedBrowserExecutor) Execute(
@@ -175,6 +208,8 @@ func (executor *managedBrowserExecutor) Execute(
 	}
 	executor.executions++
 	executor.lastValueByteCount = len(importedValue)
+	executor.lastOperationRef = accepted.OperationRef
+	executor.lastSource = accepted.Source
 	return managedTransactionResult{
 		OperationRef:  accepted.OperationRef,
 		SecretRef:     managedTestSecretRef,
@@ -184,6 +219,20 @@ func (executor *managedBrowserExecutor) Execute(
 		ReasonCode:    "managed_operation_registered",
 		ValueReturned: false,
 	}, nil
+}
+
+func (executor *managedBrowserExecutor) Recover(
+	_ context.Context,
+	accepted managedAcceptedIntent,
+) error {
+	executor.mu.Lock()
+	defer executor.mu.Unlock()
+	if executor.executions == 0 ||
+		executor.lastOperationRef != accepted.OperationRef ||
+		executor.lastSource != accepted.Source {
+		return managedTransactionError("managed_operation_recovery_unavailable")
+	}
+	return nil
 }
 
 func (executor *managedBrowserExecutor) evidence() (int, int) {
@@ -197,6 +246,8 @@ func (executor *managedBrowserExecutor) reset() {
 	defer executor.mu.Unlock()
 	executor.executions = 0
 	executor.lastValueByteCount = 0
+	executor.lastOperationRef = ""
+	executor.lastSource = ""
 }
 
 type managedBrowserAuthorization struct {

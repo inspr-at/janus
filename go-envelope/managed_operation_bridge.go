@@ -315,6 +315,45 @@ func (bridge *managedOperationBridge) Execute(ctx context.Context, accepted mana
 	return result, nil
 }
 
+func (bridge *managedOperationBridge) Recover(ctx context.Context, accepted managedAcceptedIntent) error {
+	record, ok := bridge.store.get(accepted.OperationRef)
+	if !ok ||
+		record.OperationRef != accepted.OperationRef ||
+		record.OperationKind != accepted.Intent.OperationKind ||
+		record.Source != accepted.Source ||
+		record.HostRef != accepted.Intent.HostRef ||
+		record.ServiceRef != accepted.Intent.ServiceRef ||
+		record.SlotRef != accepted.Intent.SlotRef ||
+		record.DeclarationFingerprint != accepted.Intent.DeclarationFingerprint ||
+		record.DeliveryProfileRef != accepted.Context.DeliveryProfileRef ||
+		record.ReloadProfileRef != accepted.Context.ReloadProfileRef ||
+		record.HealthProfileRef != accepted.Context.HealthProfileRef ||
+		record.DetachProfileRef != accepted.Context.DetachProfileRef ||
+		record.ValueReturned {
+		return managedTransactionError("managed_operation_recovery_unavailable")
+	}
+	if record.Phase == "prepared" {
+		if err := bridge.ensureRegistered(ctx, record.OperationRef); err != nil {
+			return err
+		}
+		record, ok = bridge.store.get(record.OperationRef)
+	}
+	// Recovery proves that this exact accepted operation has a durable status
+	// record; it does not claim that the service is healthy. Terminal rollback,
+	// removal quarantine, and review states must still open the exact Pharos
+	// operation so the user sees the real outcome instead of a stale form.
+	if !ok ||
+		(record.Phase != "registered" &&
+			record.Phase != "completed" &&
+			record.Phase != "quarantined" &&
+			record.Phase != "destroyed" &&
+			record.Phase != "rolled_back" &&
+			record.Phase != "review_required") {
+		return managedTransactionError("managed_operation_recovery_unavailable")
+	}
+	return nil
+}
+
 func (bridge *managedOperationBridge) Run(ctx context.Context) {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()

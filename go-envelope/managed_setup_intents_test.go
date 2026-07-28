@@ -600,7 +600,8 @@ func TestManagedReplayStateSurvivesRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	intent := managedTestIntent(1_784_833_200)
-	if _, err := store.consume(intent, 1_784_833_201); err != nil {
+	operationRef, err := store.consume(intent, 1_784_833_201)
+	if err != nil {
 		t.Fatal(err)
 	}
 	restarted, err := newManagedReplayStore(path)
@@ -609,6 +610,14 @@ func TestManagedReplayStateSurvivesRestart(t *testing.T) {
 	}
 	if _, err := restarted.consume(intent, 1_784_833_202); err == nil || err.Error() != "managed_intent_replayed" {
 		t.Fatalf("replay state did not survive restart: %v", err)
+	}
+	recovered, err := restarted.recover(intent.IntentRef, 1_784_833_202)
+	if err != nil || recovered != operationRef {
+		t.Fatalf("accepted operation did not survive restart: recovered=%q err=%v", recovered, err)
+	}
+	if _, err := restarted.recover(intent.IntentRef, intent.ExpiresAtUnixSeconds); err == nil ||
+		err.Error() != "managed_intent_recovery_unavailable" {
+		t.Fatalf("expired operation recovery should fail closed: %v", err)
 	}
 }
 
