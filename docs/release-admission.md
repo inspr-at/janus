@@ -26,12 +26,19 @@ scripts/admit-engine-release.sh \
   --image ghcr.io/inspr-at/janus/janus-engine \
   --tag "${JANUS_ENGINE_RELEASE_TAG}" \
   --digest sha256:... \
+  --source-manifest source-release.json \
+  --source-bundle source-release.sigstore.json \
+  --scanner-summary rust-trivy-summary.json \
   --output /run/janus/release-admission.json
 ```
 
 The script verifies the exact digest with cosign, verifies GitHub provenance
-and SPDX SBOM attestations against the policy, rejects development tags and
-revoked digests, and writes the receipt atomically with read-only permissions.
+and SPDX SBOM attestations against the policy, verifies the signed-source
+manifest and bundle against the exact workflow identity, requires a
+zero-CRITICAL/zero-HIGH Trivy summary, rejects development tags and revoked
+digests, and writes the receipt atomically with read-only permissions. The
+receipt contains hashes and value-free counts, never attestation or scanner
+payloads.
 The deployment layer must supply the digest independently to the runtime; a
 receipt cannot authorize a different configured digest.
 
@@ -48,6 +55,12 @@ remain published history but are superseded and outside the admissible policy;
 date-only grandfathering is invalid. If GitHub workflow identity changes,
 release signing pauses until the versioned source-signing policy is reviewed;
 otherwise recovery reruns the unchanged tag and commit.
+
+The policy has distinct `stable` (Rust engine) and `envelope-stable` (Go
+envelope) channels. Release workflows also prove that the event commit is the
+tag commit and is reachable from a freshly fetched protected `main` before any
+registry login or release mutation. A side-branch tag or stale local branch
+cannot produce an admissible release.
 
 ## Runtime configuration
 
@@ -90,9 +103,10 @@ tokens, attestation payloads, or secret values.
 
 ## CI and incident response
 
-`scripts/test-release-admission.sh` exercises trusted and rejected fixtures
-with mocked cryptographic commands. Release CI performs real verification and
-publishes the resulting receipt beside the engine release assets.
+`scripts/test-release-admission.sh` exercises trusted and rejected fixtures,
+including forged source bindings and non-zero scanner summaries, with mocked
+cryptographic commands. Release CI performs real verification and publishes
+the resulting receipt beside the corresponding Go or Rust release assets.
 
 To revoke an artifact, add its exact digest to `revoked_digests`, increment the
 policy version, review and deploy the policy, and regenerate admission receipts

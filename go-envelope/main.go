@@ -3467,20 +3467,16 @@ func mustTemplates() *template.Template {
 	  content: "";
 	  position: absolute;
 	  z-index: -2;
-	  inset: clamp(12px, 2vw, 32px);
-	  background: url("/static/janus-login-hero.png") center / cover no-repeat;
+	  inset: 0;
+	  background: url("/static/janus-login-hero.png") center 22% / cover no-repeat;
 	  opacity: .94;
-	  -webkit-mask-image: radial-gradient(ellipse 86% 88% at center, #000 0 64%, rgba(0,0,0,.84) 77%, transparent 100%);
-	  mask-image: radial-gradient(ellipse 86% 88% at center, #000 0 64%, rgba(0,0,0,.84) 77%, transparent 100%);
-	  -webkit-mask-repeat: no-repeat;
-	  mask-repeat: no-repeat;
 	}
 	body.auth-body main::after {
 	  content: "";
 	  position: absolute;
 	  z-index: -1;
 	  inset: 0;
-	  background: linear-gradient(90deg, rgba(248,250,249,.82) 0%, rgba(248,250,249,.38) 38%, rgba(248,250,249,.06) 68%, rgba(248,250,249,.4) 100%);
+	  background: linear-gradient(180deg, rgba(248,250,249,.2) 0%, rgba(248,250,249,.08) 52%, rgba(248,250,249,.78) 100%);
 	  pointer-events: none;
 	}
 	.auth-landing {
@@ -3488,18 +3484,39 @@ func mustTemplates() *template.Template {
 	  min-height: calc(100vh - 119px);
 	  margin: 0 auto;
 	  display: flex;
-	  align-items: center;
-	  padding: 46px 0;
+	  align-items: flex-end;
+	  justify-content: center;
+	  position: relative;
+	  padding: 0 0 clamp(20px, 4vh, 42px);
 	}
+	.auth-rail {
+	  position: absolute;
+	  top: clamp(28px, 6vh, 72px);
+	  width: min(280px, 26vw);
+	  color: var(--muted);
+	  font-size: clamp(12px, 1.1vw, 14px);
+	  line-height: 1.5;
+	  text-shadow: 0 1px 12px rgba(255,255,255,.9);
+	}
+	.auth-rail strong {
+	  display: block;
+	  margin-bottom: 5px;
+	  color: var(--accent);
+	  font-size: clamp(15px, 1.35vw, 18px);
+	  letter-spacing: .02em;
+	}
+	.auth-rail.back { left: 0; text-align: left; }
+	.auth-rail.forward { right: 0; text-align: right; }
+	.auth-rail.forward strong { color: var(--amber); }
 	.auth-card {
-	  width: min(440px, 100%);
+	  width: min(410px, 100%);
 	  display: grid;
 	  gap: 18px;
 	  border: 1px solid rgba(217,224,231,.88);
 	  border-radius: 12px;
 	  background: rgba(255,255,255,.76);
 	  box-shadow: 0 24px 70px rgba(30,55,66,.12);
-	  padding: clamp(24px, 4vw, 38px);
+	  padding: clamp(22px, 3vw, 32px);
 	  backdrop-filter: blur(15px);
 	}
 	.auth-card h1 { color: #0f2744; font-family: Georgia, "Times New Roman", serif; font-weight: 600; }
@@ -4246,8 +4263,9 @@ func mustTemplates() *template.Template {
 	      .audit-event { grid-template-columns: 1fr; }
 	      .audit-proof { grid-template-columns: minmax(0, .3fr) minmax(0, .7fr); }
       .capture-header { grid-template-columns: 1fr; align-items: start; }
-	  body.auth-body main::before { inset: 10px; background-position: 58% center; }
-	  .auth-landing { align-items: flex-end; padding: 28px 0; }
+	  body.auth-body main::before { background-position: 52% 22%; }
+	  .auth-landing { padding-bottom: 28px; }
+	  .auth-rail { width: min(240px, 29vw); }
 	  body.auth-body .overview { padding-top: 28px; }
 	      .assurance-flow { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .trust-rail { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -4297,13 +4315,17 @@ func mustTemplates() *template.Template {
       .toolbar { display: grid; grid-template-columns: 1fr; }
       .toolbar .button { width: 100%; }
 	  body.auth-body main::before {
-	    inset: 0;
-	    background-position: 58% center;
-	    -webkit-mask-image: linear-gradient(180deg, #000 0 64%, transparent 100%);
-	    mask-image: linear-gradient(180deg, #000 0 64%, transparent 100%);
+	    background-position: 52% 18%;
 	  }
 	  body.auth-body main::after { background: linear-gradient(180deg, rgba(248,250,249,.12), rgba(248,250,249,.62) 52%, #f8faf9 84%); }
 	  .auth-landing { width: calc(100% - 24px); min-height: calc(100vh - 119px); padding: 220px 0 18px; }
+	  .auth-rail {
+	    top: 18px;
+	    width: calc(50% - 10px);
+	    font-size: 11px;
+	    line-height: 1.35;
+	  }
+	  .auth-rail strong { margin-bottom: 3px; font-size: 13px; }
 	  .auth-card { padding: 20px; background: rgba(255,255,255,.88); }
 	  .brand-logo { width: 48px; }
       main, .overview, .intro, .status, .panel, .intro-copy, .toolbar, .evidence-workstation, .handoff-path, .handoff-step, .workstation-head {
@@ -4839,6 +4861,14 @@ func mustTemplates() *template.Template {
 	{{ define "login_landing" -}}
 {{ template "base_top" . }}
 <section class="auth-landing" id="command-center">
+  <div class="auth-rail back">
+    <strong>Looks back</strong>
+    Vault &amp; evidence: what exists, who touched it, never the value itself.
+  </div>
+  <div class="auth-rail forward">
+    <strong>Looks forward</strong>
+    Forge issues new credentials only after policy and approval.
+  </div>
   <div class="auth-card">
     <div class="intro-copy">
       <div class="eyebrow">{{ .Mode }} · secure sign-in</div>
@@ -4849,9 +4879,9 @@ func mustTemplates() *template.Template {
       <a class="button primary" href="{{ .StartHref }}">Continue with Zitadel</a>
     </div>
     <div class="auth-trust" aria-label="Login safety boundary">
-      <span><i aria-hidden="true"></i>Janus never asks for or displays a secret value.</span>
-      <span><i aria-hidden="true"></i>Identity values stay out of the access and evidence pages.</span>
-      <span><i aria-hidden="true"></i><code>value_returned=false</code></span>
+      <span><i aria-hidden="true"></i>Janus never asks for or shows a secret value, in either direction.</span>
+      <span><i aria-hidden="true"></i>Identity stays out of access and evidence pages.</span>
+      <span><i aria-hidden="true"></i><small>Verified boundary: <code>value_returned=false</code></small></span>
     </div>
   </div>
 </section>

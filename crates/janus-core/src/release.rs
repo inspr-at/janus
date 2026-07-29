@@ -81,8 +81,10 @@ struct ReleaseChannel {
     name: String,
     image: String,
     tag_prefix: String,
+    tag_pattern: String,
     repository: String,
     signer_workflow: String,
+    source_manifest_workflow: String,
     certificate_identity_prefix: String,
     oidc_issuer: String,
     provenance_predicate_type: String,
@@ -133,8 +135,10 @@ impl ReleaseChannelPolicy {
                 || !safe_field(&channel.name)
                 || !safe_field(&channel.image)
                 || !safe_field(&channel.tag_prefix)
+                || !safe_field(&channel.tag_pattern)
                 || !safe_field(&channel.repository)
                 || !safe_field(&channel.signer_workflow)
+                || !safe_field(&channel.source_manifest_workflow)
                 || !safe_field(&channel.certificate_identity_prefix)
                 || !safe_field(&channel.oidc_issuer)
                 || !safe_field(&channel.provenance_predicate_type)
@@ -169,6 +173,8 @@ pub struct ReleaseAdmissionReceipt {
     signature: SignatureEvidence,
     provenance: ProvenanceEvidence,
     sbom: SbomEvidence,
+    source: SourceEvidence,
+    scanner: ScannerEvidence,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
@@ -205,6 +211,26 @@ struct SbomEvidence {
     predicate_type: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SourceEvidence {
+    verified: bool,
+    commit: String,
+    manifest_sha256: String,
+    bundle_sha256: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScannerEvidence {
+    verified: bool,
+    name: String,
+    policy: String,
+    summary_sha256: String,
+    critical: u64,
+    high: u64,
+}
+
 impl ReleaseAdmissionReceipt {
     /// Parse and structurally validate one JSON admission receipt.
     pub fn parse_json(contents: &str) -> JanusResult<Self> {
@@ -229,10 +255,20 @@ impl ReleaseAdmissionReceipt {
             self.provenance.source_ref.as_str(),
             self.provenance.predicate_type.as_str(),
             self.sbom.predicate_type.as_str(),
+            self.source.commit.as_str(),
+            self.source.manifest_sha256.as_str(),
+            self.source.bundle_sha256.as_str(),
+            self.scanner.name.as_str(),
+            self.scanner.policy.as_str(),
+            self.scanner.summary_sha256.as_str(),
         ];
         if self.schema_version != RECEIPT_SCHEMA_VERSION
             || self.policy_version == 0
             || !valid_digest(&self.artifact.digest)
+            || !full_commit(&self.source.commit)
+            || !valid_digest(&self.source.manifest_sha256)
+            || !valid_digest(&self.source.bundle_sha256)
+            || !valid_digest(&self.scanner.summary_sha256)
             || fields.iter().any(|field| !safe_field(field))
         {
             return Err(JanusError::InvalidIdentifier {
@@ -347,6 +383,17 @@ impl ReleaseAdmission {
         }
         if !receipt.sbom.verified || receipt.sbom.predicate_type != channel.sbom_predicate_type {
             return base.deny("release_sbom_untrusted");
+        }
+        if !receipt.source.verified {
+            return base.deny("release_source_untrusted");
+        }
+        if !receipt.scanner.verified
+            || receipt.scanner.name != "trivy"
+            || receipt.scanner.policy != "candidate_container_critical_high"
+            || receipt.scanner.critical != 0
+            || receipt.scanner.high != 0
+        {
+            return base.deny("release_scanner_untrusted");
         }
         Self {
             decision: ReleaseAdmissionDecision::Trusted,
@@ -494,6 +541,13 @@ fn valid_digest(value: &str) -> bool {
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }
 
+fn full_commit(value: &str) -> bool {
+    value.len() == 40
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+
 fn development_tag(tag: &str) -> bool {
     let tag = tag.to_ascii_lowercase();
     ["-dev", ".dev", "snapshot", "dirty"]
@@ -526,8 +580,10 @@ mod tests {
     "name": "stable",
     "image": "ghcr.io/inspr-at/janus/janus-engine",
     "tag_prefix": "rust-engine-v",
+    "tag_pattern": "rust-engine-v[0-9]+\\.[0-9]+\\.[0-9]+",
     "repository": "inspr-at/janus",
     "signer_workflow": "inspr-at/janus/.github/workflows/rust.yml",
+    "source_manifest_workflow": ".github/workflows/rust.yml",
     "certificate_identity_prefix": "https://github.com/inspr-at/janus/.github/workflows/rust.yml@refs/tags/",
     "oidc_issuer": "https://token.actions.githubusercontent.com",
     "provenance_predicate_type": "https://slsa.dev/provenance/v1",
@@ -572,6 +628,20 @@ mod tests {
             "sbom": {
                 "verified": true,
                 "predicate_type": "https://spdx.dev/Document/v2.3"
+            },
+            "source": {
+                "verified": true,
+                "commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "manifest_sha256": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "bundle_sha256": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+            },
+            "scanner": {
+                "verified": true,
+                "name": "trivy",
+                "policy": "candidate_container_critical_high",
+                "summary_sha256": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+                "critical": 0,
+                "high": 0
             }
         });
         for (pointer, replacement) in overrides {
@@ -623,6 +693,16 @@ mod tests {
                 vec![("/sbom/verified", "false")],
                 false,
                 "release_sbom_untrusted",
+            ),
+            (
+                vec![("/source/verified", "false")],
+                false,
+                "release_source_untrusted",
+            ),
+            (
+                vec![("/scanner/high", "1")],
+                false,
+                "release_scanner_untrusted",
             ),
             (
                 vec![("/artifact/development", "true")],

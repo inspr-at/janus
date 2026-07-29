@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "policy_id": "janus-engine-release-v1",
-  "policy_version": 2,
+  "policy_version": 3,
   "channel": "stable",
   "mode": "enterprise",
   "previous_mode": "enterprise",
@@ -26,5 +26,19 @@
   "sbom": {
     "verified": true,
     "predicate_type": "https://spdx.dev/Document/v2.3"
+  },
+  "source": {
+    "verified": true,
+    "commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "manifest_sha256": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "bundle_sha256": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+  },
+  "scanner": {
+    "verified": true,
+    "name": "trivy",
+    "policy": "candidate_container_critical_high",
+    "summary_sha256": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "critical": 0,
+    "high": 0
   }
 }

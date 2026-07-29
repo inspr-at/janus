@@ -30,6 +30,19 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+      - name: verify protected-main release ancestry
+        if: github.event_name == 'release'
+        working-directory: .
+        env:
+          JANUS_RELEASE_REPOSITORY: ${{ github.repository }}
+          JANUS_RELEASE_TAG: ${{ github.event.release.tag_name }}
+          JANUS_RELEASE_COMMIT: ${{ github.sha }}
+        run: |
+          python3 scripts/check-release-main-ancestry.py \
+            --fetch-main \
+            --repository "${JANUS_RELEASE_REPOSITORY}" \
+            --tag "${JANUS_RELEASE_TAG}" \
+            --commit "${JANUS_RELEASE_COMMIT}"
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.26.5'
@@ -38,9 +51,17 @@ jobs:
         with:
           node-version: 22.23.1
           cache: npm
+      - name: install pinned source scanners
+        working-directory: .
+        run: go install github.com/zricethezav/gitleaks/v8@v8.30.1
+      - name: verify installed source scanner versions
+        working-directory: .
+        run: GITLEAKS_BIN="$(go env GOPATH)/bin/gitleaks" python3 scripts/check-security-gates.py --check-installed-tools --tool gitleaks --tool govulncheck --tool staticcheck
       - run: go build ./...
-      - run: go run honnef.co/go/tools/cmd/staticcheck@v0.7.0 ./...
-      - run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
+      - name: staticcheck
+        run: go run honnef.co/go/tools/cmd/staticcheck@v0.7.0 ./...
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
       - run: go vet ./...
       - run: go test ./...
       - name: managed-service Go assurance
@@ -60,9 +81,7 @@ jobs:
         run: python3 ../scripts/run-minimization-proof.py --stack go
       - name: Gitleaks history and negative fixture
         working-directory: .
-        run: |
-          go install github.com/zricethezav/gitleaks/v8@v8.30.1
-          GITLEAKS_BIN="$(go env GOPATH)/bin/gitleaks" scripts/test-gitleaks.sh
+        run: GITLEAKS_BIN="$(go env GOPATH)/bin/gitleaks" scripts/test-gitleaks.sh
       - name: scanner policy and negative fixtures
         working-directory: .
         env:
@@ -70,12 +89,13 @@ jobs:
         run: |
           python3 scripts/check-security-gates.py --self-test
           scripts/check-source-release.py --self-test --verify-grandfathered
+          python3 scripts/check-release-main-ancestry.py --self-test
       - uses: aquasecurity/setup-trivy@3fb12ec12f41e471780db15c232d5dd185dcb514 # v0.2.6
         with:
           version: v0.72.0
-      - name: verify installed scanner versions
+      - name: verify installed image scanner version
         working-directory: .
-        run: GITLEAKS_BIN="$(go env GOPATH)/bin/gitleaks" python3 scripts/check-security-gates.py --check-installed-tools --tool gitleaks --tool govulncheck --tool staticcheck --tool trivy
+        run: python3 scripts/check-security-gates.py --check-installed-tools --tool trivy
       - name: build and scan local candidate image
         working-directory: .
         run: |
@@ -105,6 +125,18 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+      - name: verify protected-main release ancestry
+        working-directory: .
+        env:
+          JANUS_RELEASE_REPOSITORY: ${{ github.repository }}
+          JANUS_RELEASE_TAG: ${{ github.event.release.tag_name }}
+          JANUS_RELEASE_COMMIT: ${{ github.sha }}
+        run: |
+          python3 scripts/check-release-main-ancestry.py \
+            --fetch-main \
+            --repository "${JANUS_RELEASE_REPOSITORY}" \
+            --tag "${JANUS_RELEASE_TAG}" \
+            --commit "${JANUS_RELEASE_COMMIT}"
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
@@ -190,3 +222,23 @@ jobs:
           sbom-path: sbom.spdx.json
           push-to-registry: true
           create-storage-record: false
+      - name: verify published envelope admission evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          scripts/admit-engine-release.sh \
+            --policy config/release-channels/v1.json \
+            --channel envelope-stable \
+            --mode production \
+            --previous-mode production \
+            --image "${IMAGE}" \
+            --tag "${{ github.event.release.tag_name }}" \
+            --digest "${{ steps.build.outputs.digest }}" \
+            --source-manifest source-release.json \
+            --source-bundle source-release.sigstore.json \
+            --scanner-summary go-trivy-summary.json \
+            --output go-envelope-admission.json
+      - name: upload envelope admission receipt
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.event.release.tag_name }}" go-envelope-admission.json --clobber

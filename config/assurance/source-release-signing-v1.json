@@ -3,14 +3,17 @@
   "owner": "JANUS-324",
   "effective_from": "2026-07-22T14:00:17Z",
   "repository": "inspr-at/janus",
+  "protected_branch": "main",
   "signed_subset": [
     {
       "tag_prefix": "go-envelope-v",
+      "tag_pattern": "go-envelope-v[1-9][0-9]*\\.[0-9]+",
       "workflow": ".github/workflows/go-envelope.yml",
       "image": "ghcr.io/inspr-at/janus/janus-envelope"
     },
     {
       "tag_prefix": "rust-engine-v",
+      "tag_pattern": "rust-engine-v[0-9]+\\.[0-9]+\\.[0-9]+",
       "workflow": ".github/workflows/rust.yml",
       "image": "ghcr.io/inspr-at/janus/janus-engine"
     }

@@ -58,24 +58,27 @@ def validate_workflows() -> None:
     rust = (ROOT / ".github/workflows/rust.yml").read_text()
     go = (ROOT / ".github/workflows/go-envelope.yml").read_text()
     security = (ROOT / ".github/workflows/security.yml").read_text()
+    repository_posture = (
+        ROOT / ".github/workflows/repository-posture.yml"
+    ).read_text()
     local = (ROOT / "scripts/run-security-gates.sh").read_text()
     browser_package = json.loads((ROOT / "package.json").read_text())
+    try:
+        subprocess.run(
+            ["ruby", "scripts/check-workflow-security.rb"],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise GateError("structural workflow security validation failed") from error
     for workflow in (rust, go):
         require("scripts/test-gitleaks.sh" in workflow, "release workflow lacks Gitleaks")
         require("0.72.0" in workflow, "release workflow lacks pinned Trivy")
         require('steps.build.outputs.digest' in workflow, "release workflow does not scan exact digest")
         require("scripts/check-security-gates.py" in workflow, "scanner-policy gate is not wired")
     require("scripts/check-rust-audit.py" in rust and "0.22.2" in rust, "Rust audit gate is not wired")
-    require(
-        'GITLEAKS_BIN="$(go env GOPATH)/bin/gitleaks" python3 scripts/check-security-gates.py --check-installed-tools'
-        in rust,
-        "Rust check CI does not verify its exact scanner invocations",
-    )
-    require(
-        "python3 scripts/check-security-gates.py --check-installed-tools --tool trivy"
-        in rust,
-        "Rust release CI does not verify its fresh Trivy installation",
-    )
     require("staticcheck@v0.7.0" in go, "staticcheck pin is not wired")
     require("govulncheck@v1.6.0" in go, "govulncheck pin is not wired")
     require(
@@ -108,21 +111,6 @@ def validate_workflows() -> None:
         "managed-service browser assurance bypasses its artifact boundary",
     )
     require(
-        'GITLEAKS_BIN="$(go env GOPATH)/bin/gitleaks" python3 scripts/check-security-gates.py --check-installed-tools --tool gitleaks --tool govulncheck --tool staticcheck --tool trivy'
-        in go,
-        "Go check CI does not verify its exact scanner invocations",
-    )
-    require(
-        "python3 scripts/check-security-gates.py --check-installed-tools --tool trivy"
-        in go,
-        "Go release CI does not verify its fresh Trivy installation",
-    )
-    require(
-        'GITLEAKS_BIN="$(go env GOPATH)/bin/gitleaks" python3 scripts/check-security-gates.py --check-installed-tools --tool gitleaks'
-        in security,
-        "Gitleaks CI does not verify the binary it scans with",
-    )
-    require(
         "python3 scripts/check-action-pins.py --self-test" in security,
         "required security CI does not enforce immutable GitHub Action pins",
     )
@@ -135,8 +123,35 @@ def validate_workflows() -> None:
         "required security CI does not test Warden smoke status output",
     )
     require(
+        "python3 scripts/check-browser-qa-hygiene.py --self-test --repository"
+        in security
+        and "python3 scripts/run-attended-browser-qa.py --self-test" in security,
+        "required security CI does not contain attended browser QA",
+    )
+    require(
         "python3 scripts/smoke-warden-mcp.py --self-test" in local,
         "local release-security gate does not test Warden smoke status output",
+    )
+    require(
+        "python3 scripts/check-browser-qa-hygiene.py --self-test --repository"
+        in local
+        and "python3 scripts/run-attended-browser-qa.py --self-test" in local,
+        "local release-security gate does not contain attended browser QA",
+    )
+    require(
+        "python3 scripts/check-github-repository-posture.py --self-test"
+        in repository_posture
+        and "python3 scripts/check-github-repository-posture.py --live"
+        in repository_posture,
+        "scheduled repository-posture assurance is not wired",
+    )
+    require(
+        "python3 scripts/check-github-repository-posture.py --self-test" in local,
+        "local release-security gate does not test repository posture",
+    )
+    require(
+        "ruby scripts/check-workflow-security.rb --self-test" in local,
+        "local release-security gate does not validate workflow structure",
     )
     require("--check-installed-tools" in local, "local scanner-version gate is not wired")
 

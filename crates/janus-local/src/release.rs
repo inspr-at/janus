@@ -193,8 +193,10 @@ mod tests {
     "name": "stable",
     "image": "ghcr.io/inspr-at/janus/janus-engine",
     "tag_prefix": "rust-engine-v",
+    "tag_pattern": "rust-engine-v[0-9]+\\.[0-9]+\\.[0-9]+",
     "repository": "inspr-at/janus",
     "signer_workflow": "inspr-at/janus/.github/workflows/rust.yml",
+    "source_manifest_workflow": ".github/workflows/rust.yml",
     "certificate_identity_prefix": "https://github.com/inspr-at/janus/.github/workflows/rust.yml@refs/tags/",
     "oidc_issuer": "https://token.actions.githubusercontent.com",
     "provenance_predicate_type": "https://slsa.dev/provenance/v1",
@@ -235,6 +237,20 @@ mod tests {
   "sbom": {{
     "verified": true,
     "predicate_type": "https://spdx.dev/Document/v2.3"
+  }},
+  "source": {{
+    "verified": true,
+    "commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "manifest_sha256": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "bundle_sha256": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+  }},
+  "scanner": {{
+    "verified": true,
+    "name": "trivy",
+    "policy": "candidate_container_critical_high",
+    "summary_sha256": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "critical": 0,
+    "high": 0
   }}
 }}"#
         )

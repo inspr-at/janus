@@ -41,6 +41,65 @@ async function submitImportedValue(page, canary) {
     }, canary);
 }
 
+test("login hero keeps the split trust story clear and value-free", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await expect(page.getByRole("heading", { name: "Open Janus" })).toBeVisible();
+  await expect(page.getByText("Looks back", { exact: true })).toBeVisible();
+  await expect(page.getByText("Looks forward", { exact: true })).toBeVisible();
+  await expect(
+    page.getByText(/Vault & evidence: what exists, who touched it/),
+  ).toBeVisible();
+  await expect(
+    page.getByText(/Forge issues new credentials only after policy/),
+  ).toBeVisible();
+  await expect(page.getByText("value_returned=false")).toBeVisible();
+
+  const layout = await page.evaluate(() => {
+    const rectangle = (selector) => {
+      const bounds = document.querySelector(selector).getBoundingClientRect();
+      return {
+        left: bounds.left,
+        top: bounds.top,
+        right: bounds.right,
+        bottom: bounds.bottom,
+      };
+    };
+    const overlaps = (left, right) =>
+      left.left < right.right &&
+      left.right > right.left &&
+      left.top < right.bottom &&
+      left.bottom > right.top;
+    const card = rectangle(".auth-card");
+    const back = rectangle(".auth-rail.back");
+    const forward = rectangle(".auth-rail.forward");
+    const hero = getComputedStyle(document.querySelector("main"), "::before");
+    return {
+      heroInset: hero.inset,
+      heroMask: hero.maskImage,
+      backOverlapsCard: overlaps(back, card),
+      forwardOverlapsCard: overlaps(forward, card),
+      horizontalOverflow:
+        document.documentElement.scrollWidth - window.innerWidth,
+    };
+  });
+  expect(layout).toEqual({
+    heroInset: "0px",
+    heroMask: "none",
+    backOverlapsCard: false,
+    forwardOverlapsCard: false,
+    horizontalOverflow: 0,
+  });
+
+  const accessibility = await new AxeBuilder({ page }).analyze();
+  expect(
+    accessibility.violations.filter(({ impact }) =>
+      ["serious", "critical"].includes(impact),
+    ),
+  ).toEqual([]);
+});
+
 test("passwordless import shows Check, forgets the value, and recovers navigation", async ({
   page,
 }) => {

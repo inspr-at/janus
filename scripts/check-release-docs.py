@@ -39,6 +39,7 @@ def main() -> int:
         admission = (ROOT / "docs/release-admission.md").read_text()
         smoke = (ROOT / "scripts/smoke-published-engine.sh").read_text()
         rust_workflow = (ROOT / ".github/workflows/rust.yml").read_text()
+        go_workflow = (ROOT / ".github/workflows/go-envelope.yml").read_text()
 
         if readme.count(tag) != 3:
             fail(f"README must contain exactly three current release references: {tag}")
@@ -47,6 +48,7 @@ def main() -> int:
         for required in (
             "behavioral assurance script is intentionally not presented as the complete",
             "source/tag/commit/image-digest manifest",
+            "signed-source manifest and bundle hashes",
             "scratch filesystem",
             "scripts/run-security-gates.sh",
             "property replay receipt",
@@ -61,6 +63,21 @@ def main() -> int:
         ):
             if asset not in rust_workflow:
                 fail(f"Rust release workflow does not publish {asset}")
+        for asset in (
+            "source-release.json",
+            "source-release.sigstore.json",
+            "go-trivy-summary.json",
+            "go-envelope-admission.json",
+        ):
+            if asset not in go_workflow:
+                fail(f"Go release workflow does not publish {asset}")
+        for binding in (
+            "--source-manifest",
+            "--source-bundle",
+            "--scanner-summary",
+        ):
+            if binding not in admission:
+                fail(f"release admission docs omit required evidence: {binding}")
         for replay_contract in (
             "name: rust-property-replay",
             "if-no-files-found: ignore",
