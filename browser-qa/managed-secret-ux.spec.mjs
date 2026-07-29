@@ -348,6 +348,46 @@ test("expired step-up and logout never preserve a value field", async ({
   await expect(page.locator('input[name="secret_value"]')).toHaveCount(0);
 });
 
+test("lost step-up proof returns to Confirm without executing", async ({
+  page,
+}) => {
+  await page.goto("/__managed-browser/session?kind=create");
+  await page.getByRole("button", { name: "Confirm with passkey" }).click();
+  await expect(
+    page.getByRole("heading", { name: "Ready to add" }),
+  ).toBeVisible();
+
+  await page
+    .context()
+    .clearCookies({ name: "janus_managed_stepup_proof" });
+  await page.getByRole("button", { name: "Add secret" }).click();
+
+  await expect(
+    page.getByRole("button", { name: "Confirm with passkey" }),
+  ).toBeVisible();
+  await expect(page.locator('input[name="secret_value"]')).toHaveCount(0);
+  await expect(page.getByText("Safe boundary")).toHaveCount(0);
+
+  const evidence = await (
+    await page.request.get("http://127.0.0.1:18082/__managed-browser/evidence")
+  ).json();
+  expect(evidence.executions).toBe(0);
+
+  await page.getByRole("button", { name: "Confirm with passkey" }).click();
+  await expect(
+    page.getByRole("heading", { name: "Ready to add" }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Add secret" }).click();
+  await expect(
+    page.getByRole("heading", { name: "Operation registered" }),
+  ).toBeVisible({ timeout: 5_000 });
+
+  const recovered = await (
+    await page.request.get("http://127.0.0.1:18082/__managed-browser/evidence")
+  ).json();
+  expect(recovered.executions).toBe(1);
+});
+
 test("reviewed removal stays value-free and explains the recovery boundary", async ({
   page,
 }) => {

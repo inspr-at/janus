@@ -517,6 +517,7 @@ func TestPasswordlessAssertionRequiresExactZitadelPasskeyAMR(t *testing.T) {
 	}{
 		{name: "passwordless", authTime: now.Unix(), amr: []string{"user", "mfa"}, want: true},
 		{name: "order independent", authTime: now.Unix(), amr: []string{"mfa", "user"}, want: true},
+		{name: "attended delay", authTime: now.Add(-managedStepUpProofTTL + time.Second).Unix(), amr: []string{"user", "mfa"}, want: true},
 		{name: "password plus u2f", authTime: now.Unix(), amr: []string{"pwd", "user", "mfa"}},
 		{name: "password", authTime: now.Unix(), amr: []string{"pwd"}},
 		{name: "otp", authTime: now.Unix(), amr: []string{"otp", "mfa"}},
@@ -895,6 +896,109 @@ func TestManagedIngressRejectsSourceChangedAfterPasskeyBeforeReadingValue(t *tes
 		t.Fatalf("source swap crossed value boundary: status=%d consume=%d execute=%d offset=%d early=%v", response.Code, authority.consumeCount, executor.count, spy.offset, spy.earlyRead)
 	}
 	assertManagedCanaryAbsent(t, app, response, "JANUS_SOURCE_SWAP_CANARY_358")
+}
+
+func TestManagedIngressRestartsConfirmationWhenProofIsUnavailableBeforeConsumption(t *testing.T) {
+	cases := []struct {
+		name        string
+		proofCookie func(*testing.T, *App, *http.Cookie) *http.Cookie
+	}{
+		{name: "missing", proofCookie: func(_ *testing.T, _ *App, _ *http.Cookie) *http.Cookie {
+			return nil
+		}},
+		{name: "tampered", proofCookie: func(_ *testing.T, _ *App, valid *http.Cookie) *http.Cookie {
+			tampered := *valid
+			tampered.Value += "x"
+			return &tampered
+		}},
+		{name: "expired", proofCookie: func(t *testing.T, app *App, _ *http.Cookie) *http.Cookie {
+			t.Helper()
+			now := time.Now().UTC()
+			writer := httptest.NewRecorder()
+			app.writeManagedStepUpProof(writer, managedStepUpProof{
+				Schema:          managedStepUpProofDomain,
+				IntentRef:       managedTestIntentRef,
+				Source:          "import",
+				HumanSessionRef: managedHumanSessionRef(app.cfg.OIDCIssuer, managedTestSubject),
+				AuthenticatedAt: now.Add(-managedStepUpProofTTL - time.Minute).Unix(),
+				ExpiresAt:       now.Add(-time.Minute).Unix(),
+			})
+			return cookieByName(t, writer.Result().Cookies(), hostStepUpProofCookie)
+		}},
+		{name: "wrong human", proofCookie: func(t *testing.T, app *App, _ *http.Cookie) *http.Cookie {
+			t.Helper()
+			now := time.Now().UTC()
+			writer := httptest.NewRecorder()
+			app.writeManagedStepUpProof(writer, managedStepUpProof{
+				Schema:          managedStepUpProofDomain,
+				IntentRef:       managedTestIntentRef,
+				Source:          "import",
+				HumanSessionRef: managedHumanSessionRef(app.cfg.OIDCIssuer, "different-managed-user"),
+				AuthenticatedAt: now.Unix(),
+				ExpiresAt:       now.Add(managedStepUpProofTTL).Unix(),
+			})
+			return cookieByName(t, writer.Result().Cookies(), hostStepUpProofCookie)
+		}},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			app, authority, executor, session, sessionCookie, validProof := managedIngressFixture(t, "import")
+			prefix := "csrf_token=" + app.csrfToken(session) + "&intent_ref=" + managedTestIntentRef + "&source=import&secret_value="
+			body := []byte(prefix + "JANUS_EXPIRED_PROOF_CANARY_369")
+			consumed := false
+			spy := &managedReadOrderSpy{
+				body:           body,
+				secretOffset:   len(prefix),
+				intentConsumed: &consumed,
+			}
+			request := managedRequest(
+				t,
+				app,
+				session,
+				sessionCookie,
+				test.proofCookie(t, app, validProof),
+				spy,
+				int64(len(body)),
+			)
+			response := httptest.NewRecorder()
+			app.routes().ServeHTTP(response, request)
+			if response.Code != http.StatusSeeOther ||
+				response.Header().Get("Location") != "/managed-service/setup?intent="+managedTestIntentRef ||
+				response.Header().Get("Clear-Site-Data") != `"cache", "storage"` ||
+				authority.consumeCount != 0 ||
+				executor.count != 0 ||
+				spy.earlyRead ||
+				spy.offset != len(prefix) {
+				t.Fatalf(
+					"unavailable proof did not restart safely: status=%d location=%q clear=%q consume=%d execute=%d offset=%d early=%v",
+					response.Code,
+					response.Header().Get("Location"),
+					response.Header().Get("Clear-Site-Data"),
+					authority.consumeCount,
+					executor.count,
+					spy.offset,
+					spy.earlyRead,
+				)
+			}
+			cleared := false
+			for _, cookie := range response.Result().Cookies() {
+				if cookie.Name == hostStepUpProofCookie && cookie.MaxAge < 0 {
+					cleared = true
+				}
+			}
+			if !cleared {
+				t.Fatal("unavailable proof was not cleared")
+			}
+			audit := app.store.RecentAudit(1)
+			if len(audit) != 1 ||
+				audit[0].Outcome != "denied" ||
+				!strings.Contains(audit[0].Reason, "setup restarted") ||
+				test.name == "wrong human" && !strings.Contains(audit[0].Reason, "different human session") {
+				t.Fatalf("confirmation restart audit is not actionable: %#v", audit)
+			}
+			assertManagedCanaryAbsent(t, app, response, "JANUS_EXPIRED_PROOF_CANARY_369")
+		})
+	}
 }
 
 func TestManagedIncompleteBodyIntentionallyBurnsIntentBeforeValueAdmission(t *testing.T) {

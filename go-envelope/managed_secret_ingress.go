@@ -22,7 +22,7 @@ import (
 
 const (
 	managedStepUpFlowTTL       = 5 * time.Minute
-	managedStepUpProofTTL      = 2 * time.Minute
+	managedStepUpProofTTL      = 5 * time.Minute
 	managedCompletionTTL       = 10 * time.Minute
 	managedStepUpClockSkew     = 30 * time.Second
 	managedFormPrefixMaxBytes  = 384
@@ -358,6 +358,22 @@ func (app *App) handleManagedSetupExecute(w http.ResponseWriter, r *http.Request
 
 	proof, ok := app.readManagedStepUpProof(r)
 	if !ok || proof.HumanSessionRef != humanSessionRef {
+		if prefixOK {
+			reason := "passwordless confirmation unavailable; setup restarted"
+			if ok {
+				reason = "passwordless confirmation belongs to a different human session; setup restarted"
+			}
+			app.clearManagedStepUpProofCookies(w)
+			w.Header().Set("Clear-Site-Data", `"cache", "storage"`)
+			app.audit(r, "managed_secret.execute", "denied", session.Subject, reason)
+			http.Redirect(
+				w,
+				r,
+				"/managed-service/setup?intent="+url.QueryEscape(intentRef),
+				http.StatusSeeOther,
+			)
+			return
+		}
 		app.audit(r, "managed_secret.execute", "denied", session.Subject, "fresh passwordless assertion required")
 		app.renderSafeFailure(w, r, http.StatusForbidden, "passwordless_step_up_required", "Confirm with your passkey again before changing this secret.", nil)
 		return
