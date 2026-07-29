@@ -348,6 +348,37 @@ test("expired step-up and logout never preserve a value field", async ({
   await expect(page.locator('input[name="secret_value"]')).toHaveCount(0);
 });
 
+test("expired OIDC state returns to exact Confirm without authority", async ({
+  page,
+}) => {
+  await page.goto("/__managed-browser/expired-oidc");
+  await expect(
+    page.getByRole("heading", { name: "Add service secret" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Confirm with passkey" }),
+  ).toBeVisible();
+  await expect(page.locator('input[name="secret_value"]')).toHaveCount(0);
+  await expect(page.getByText("Safe boundary")).toHaveCount(0);
+  expect(
+    (await page.context().cookies()).some(
+      ({ name }) => name === "janus_managed_stepup_retry",
+    ),
+  ).toBe(false);
+
+  const evidence = await (
+    await page.request.get("http://127.0.0.1:18082/__managed-browser/evidence")
+  ).json();
+  expect(evidence.executions).toBe(0);
+
+  const accessibility = await new AxeBuilder({ page }).analyze();
+  expect(
+    accessibility.violations.filter(({ impact }) =>
+      ["serious", "critical"].includes(impact),
+    ),
+  ).toEqual([]);
+});
+
 test("lost step-up proof returns to Confirm without executing", async ({
   page,
 }) => {

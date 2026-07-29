@@ -43,6 +43,8 @@ const (
 	hostStepUpFlowCookie   = "__Host-janus_managed_stepup_flow"
 	stepUpProofCookie      = "janus_managed_stepup_proof"
 	hostStepUpProofCookie  = "__Host-janus_managed_stepup_proof"
+	stepUpRetryCookie      = "janus_managed_stepup_retry"
+	hostStepUpRetryCookie  = "__Host-janus_managed_stepup_retry"
 	managedLoginCookie     = "janus_managed_login_intent"
 	hostManagedLoginCookie = "__Host-janus_managed_login_intent"
 	managedDoneCookie      = "janus_managed_completion"
@@ -133,6 +135,13 @@ func (c Config) StepUpProofCookieName() string {
 		return hostStepUpProofCookie
 	}
 	return stepUpProofCookie
+}
+
+func (c Config) StepUpRetryCookieName() string {
+	if c.SecureCookies() {
+		return hostStepUpRetryCookie
+	}
+	return stepUpRetryCookie
 }
 
 func (c Config) ManagedLoginCookieName() string {
@@ -1873,6 +1882,8 @@ func (app *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 		stepUpFlowCookie,
 		app.cfg.StepUpProofCookieName(),
 		stepUpProofCookie,
+		app.cfg.StepUpRetryCookieName(),
+		stepUpRetryCookie,
 	); err == nil {
 		app.clearManagedStepUpCookies(w)
 	}
@@ -1966,7 +1977,11 @@ func (app *App) handleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	stepUpFlow, stepUpExpected, stepUpFlowErr := app.readManagedStepUpFlow(r)
+	stepUpRetry, stepUpRetryExpected := app.readManagedStepUpRetry(r)
 	if stepUpFlowErr != nil {
+		if app.recoverManagedStepUpCallback(w, r, stepUpRetry, stepUpRetryExpected, "step-up flow invalid") {
+			return
+		}
 		app.clearOIDCLoginCookies(w)
 		app.clearManagedStepUpProofCookies(w)
 		app.audit(r, "managed_secret.step_up.complete", "denied", "", "step-up flow invalid")
@@ -1974,6 +1989,9 @@ func (app *App) handleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.URL.Query().Get("error") != "" {
+		if app.recoverManagedStepUpCallback(w, r, stepUpRetry, stepUpRetryExpected, "provider did not complete step-up") {
+			return
+		}
 		app.clearOIDCLoginCookies(w)
 		app.audit(r, "auth.login.callback", "denied", "", "provider error")
 		app.renderAuthError(w, r, http.StatusBadRequest, "identity_login_denied", "Zitadel did not complete login. Janus kept the provider details out of the response.")
@@ -1982,6 +2000,9 @@ func (app *App) handleCallback(w http.ResponseWriter, r *http.Request) {
 
 	state, err := firstCookie(r, app.cfg.StateCookieName(), stateCookie)
 	if err != nil || state.Value == "" || state.Value != r.URL.Query().Get("state") {
+		if app.recoverManagedStepUpCallback(w, r, stepUpRetry, stepUpRetryExpected, "step-up state expired or mismatched") {
+			return
+		}
 		app.clearOIDCLoginCookies(w)
 		app.audit(r, "auth.login.callback", "denied", "", "bad state")
 		app.renderAuthError(w, r, http.StatusBadRequest, "login_restart_required", "Login needs a fresh start.")
@@ -1989,6 +2010,9 @@ func (app *App) handleCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	nonce, err := firstCookie(r, app.cfg.NonceCookieName(), nonceCookie)
 	if err != nil || nonce.Value == "" {
+		if app.recoverManagedStepUpCallback(w, r, stepUpRetry, stepUpRetryExpected, "step-up nonce expired") {
+			return
+		}
 		app.clearOIDCLoginCookies(w)
 		app.audit(r, "auth.login.callback", "denied", "", "missing nonce")
 		app.renderAuthError(w, r, http.StatusBadRequest, "login_integrity_check_failed", "Login needs a fresh start.")
@@ -1996,6 +2020,9 @@ func (app *App) handleCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	pkce, err := firstCookie(r, app.cfg.PKCECookieName(), pkceCookie)
 	if err != nil || pkce.Value == "" {
+		if app.recoverManagedStepUpCallback(w, r, stepUpRetry, stepUpRetryExpected, "step-up verifier expired") {
+			return
+		}
 		app.clearOIDCLoginCookies(w)
 		app.audit(r, "auth.login.callback", "denied", "", "missing pkce verifier")
 		app.renderAuthError(w, r, http.StatusBadRequest, "login_integrity_check_failed", "Login needs a fresh start.")
@@ -2118,6 +2145,7 @@ func (app *App) handleCallback(w http.ResponseWriter, r *http.Request) {
 		returnPath = regularReturn
 	}
 	app.clearOIDCLoginCookies(w)
+	app.clearManagedStepUpRetryCookies(w)
 	app.clearManagedLoginIntentCookies(w)
 	app.clearOIDCLoginAttemptCookie(w)
 	app.audit(r, "auth.login.complete", "allowed", session.Subject, "")
@@ -2164,6 +2192,10 @@ func (app *App) renderAuthContinuation(w http.ResponseWriter, r *http.Request, t
 		headline = "Passkey confirmed"
 		message = "Janus accepted the fresh passkey check. Continuing finishes the secure same-site handoff for this secret change."
 		primaryLabel = "Continue to secret change"
+	case "managed_step_up_retry":
+		headline = "Passkey check expired"
+		message = "Nothing changed. Continuing returns to the exact Confirm step so you can approve it again."
+		primaryLabel = "Return to Confirm"
 	}
 	// A completed OIDC callback is a cross-site navigation. Rendering one
 	// same-origin document before the protected target lets Strict session and
@@ -2196,7 +2228,7 @@ func validAuthContinuationTarget(target, kind string) bool {
 	case "login":
 		safe, ok := safeLoginReturnPath(target)
 		return ok && safe == target
-	case "managed_login", "managed_step_up":
+	case "managed_login", "managed_step_up", "managed_step_up_retry":
 		if parsed.Path != "/managed-service/setup" {
 			return false
 		}
@@ -2486,6 +2518,7 @@ func (app *App) clearAllAuthCookies(w http.ResponseWriter) {
 	app.clearOIDCLoginCookies(w)
 	app.clearOIDCLoginAttemptCookie(w)
 	app.clearManagedStepUpProofCookies(w)
+	app.clearManagedStepUpRetryCookies(w)
 	app.clearManagedLoginIntentCookies(w)
 	app.clearManagedCompletionCookies(w)
 }

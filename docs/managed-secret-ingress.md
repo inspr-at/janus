@@ -45,7 +45,7 @@ Janus accepts the callback only when:
 - the signed flow, OIDC state, nonce, PKCE, issuer, audience, token signature,
   subject, and current role mapping are valid;
 - the new subject hashes to the same human-session reference;
-- `auth_time` is no more than two minutes old, allowing only the reviewed clock
+- `auth_time` is no more than five minutes old, allowing only the reviewed clock
   skew; and
 - the ZITADEL `amr` set is exactly `user` plus `mfa`.
 
@@ -57,9 +57,18 @@ the [ZITADEL AMR mapping](https://github.com/zitadel/zitadel/blob/ca6595f8c59299
 
 The resulting proof is signed, HttpOnly, SameSite=Strict, bound to the exact
 intent, selected source, and human-session reference, and expires no later than
-two minutes after the asserted authentication time. Changing Generate to Paste
+five minutes after the asserted authentication time. Changing Generate to Paste
 or Paste to Generate after step-up fails before any value byte is read. Logout
 and clean auth reset clear all flow, proof, and managed-login cookies.
+
+OIDC state, nonce, PKCE, and the authoritative step-up flow still expire after
+five minutes. A separate signed, HttpOnly, SameSite=Lax retry breadcrumb lasts
+at most fifteen minutes and contains only the exact intent reference, a hash of
+the one-time OIDC state, and timestamps. It is not a passkey proof and cannot
+consume an intent or execute a transaction. If the OIDC cookies expire, Janus
+accepts the breadcrumb only for the callback carrying that exact one-time state,
+then consumes it and returns to the exact **Confirm** screen. Unrelated, invalid,
+or expired callbacks fail closed.
 
 Successful login and step-up callbacks render a value-free Janus continuation
 document before entering the protected target. The document continues
