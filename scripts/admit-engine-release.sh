@@ -227,11 +227,13 @@ identity="${identity_prefix}${tag}"
   "${source_manifest}" >/dev/null ||
   fail "release_source_untrusted"
 
-"${jq_bin}" -e '
-  (keys | sort) == (["counts", "passed", "policy", "scanner", "schema_version"] | sort) and
+"${jq_bin}" -e \
+  --arg subject "${image}@${digest}" '
+  (keys | sort) == (["counts", "passed", "policy", "scanner", "schema_version", "subject"] | sort) and
   .schema_version == 1 and
   .scanner == "trivy" and
   .policy == "candidate_container_critical_high" and
+  .subject == $subject and
   .passed == true and
   (.counts | keys | sort) == (["CRITICAL", "HIGH"] | sort) and
   .counts.CRITICAL == 0 and
@@ -333,6 +335,7 @@ trap cleanup EXIT
       verified: true,
       name: "trivy",
       policy: "candidate_container_critical_high",
+      subject: ($image + "@" + $digest),
       summary_sha256: $scanner_summary_sha256,
       critical: 0,
       high: 0

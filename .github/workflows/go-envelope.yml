@@ -101,7 +101,7 @@ jobs:
         run: |
           docker build -t janus-envelope:security go-envelope
           trivy image --scanners vuln --format json --output go-trivy.json janus-envelope:security
-          python3 scripts/check-security-gates.py --trivy-report go-trivy.json --summary go-trivy-summary.json
+          python3 scripts/check-security-gates.py --trivy-report go-trivy.json --summary go-trivy-summary.json --subject janus-envelope:security
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         if: always()
         with:
@@ -170,7 +170,7 @@ jobs:
         working-directory: .
         run: |
           trivy image --scanners vuln --format json --output go-trivy.json "${IMAGE}@${{ steps.build.outputs.digest }}"
-          python3 scripts/check-security-gates.py --trivy-report go-trivy.json --summary go-trivy-summary.json
+          python3 scripts/check-security-gates.py --trivy-report go-trivy.json --summary go-trivy-summary.json --subject "${IMAGE}@${{ steps.build.outputs.digest }}"
       - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3.9.1
       - name: sign and verify released source binding
         working-directory: .

@@ -37,6 +37,7 @@
     "verified": true,
     "name": "trivy",
     "policy": "candidate_container_critical_high",
+    "subject": "ghcr.io/inspr-at/janus/janus-engine@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "summary_sha256": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
     "critical": 0,
     "high": 0

@@ -29,7 +29,10 @@ if [[ -n "${JANUS_SECURITY_IMAGE:-}" ]]; then
   cleanup() { rm -f -- "${report}" "${summary}"; }
   trap cleanup EXIT
   trivy image --scanners vuln --format json --output "${report}" "${JANUS_SECURITY_IMAGE}"
-  python3 scripts/check-security-gates.py --trivy-report "${report}" --summary "${summary}"
+  python3 scripts/check-security-gates.py \
+    --trivy-report "${report}" \
+    --summary "${summary}" \
+    --subject "${image}"
 fi
 
 echo "ok: local release-security parity gates passed"

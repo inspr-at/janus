@@ -229,6 +229,7 @@ struct ScannerEvidence {
     verified: bool,
     name: String,
     policy: String,
+    subject: String,
     summary_sha256: String,
     critical: u64,
     high: u64,
@@ -263,6 +264,7 @@ impl ReleaseAdmissionReceipt {
             self.source.bundle_sha256.as_str(),
             self.scanner.name.as_str(),
             self.scanner.policy.as_str(),
+            self.scanner.subject.as_str(),
             self.scanner.summary_sha256.as_str(),
         ];
         if self.schema_version != RECEIPT_SCHEMA_VERSION
@@ -400,6 +402,8 @@ impl ReleaseAdmission {
         if !receipt.scanner.verified
             || receipt.scanner.name != "trivy"
             || receipt.scanner.policy != "candidate_container_critical_high"
+            || receipt.scanner.subject
+                != format!("{}@{}", receipt.artifact.image, receipt.artifact.digest)
             || receipt.scanner.critical != 0
             || receipt.scanner.high != 0
         {
@@ -674,6 +678,7 @@ mod tests {
                 "verified": true,
                 "name": "trivy",
                 "policy": "candidate_container_critical_high",
+                "subject": "ghcr.io/inspr-at/janus/janus-engine@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                 "summary_sha256": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
                 "critical": 0,
                 "high": 0
@@ -736,6 +741,14 @@ mod tests {
             ),
             (
                 vec![("/scanner/high", "1")],
+                false,
+                "release_scanner_untrusted",
+            ),
+            (
+                vec![(
+                    "/scanner/subject",
+                    r#""ghcr.io/inspr-at/janus/janus-engine@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd""#,
+                )],
                 false,
                 "release_scanner_untrusted",
             ),

@@ -34,6 +34,7 @@ jq -n '
     schema_version: 1,
     scanner: "trivy",
     policy: "candidate_container_critical_high",
+    subject: "ghcr.io/inspr-at/janus/janus-engine@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     counts: {CRITICAL: 0, HIGH: 0},
     passed: true
   }
@@ -69,6 +70,7 @@ jq -e '
   (.source.manifest_sha256 | test("^sha256:[0-9a-f]{64}$")) and
   (.source.bundle_sha256 | test("^sha256:[0-9a-f]{64}$")) and
   .scanner.verified and .scanner.critical == 0 and .scanner.high == 0 and
+  .scanner.subject == "ghcr.io/inspr-at/janus/janus-engine@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" and
   (.scanner.summary_sha256 | test("^sha256:[0-9a-f]{64}$"))
 ' "${work}/trusted.json" >/dev/null
 [[ ! -w "${work}/trusted.json" ]]
@@ -148,5 +150,13 @@ expect_denied release_scanner_untrusted \
   --image "${image}" --tag "${tag}" --digest "${digest}" \
   --source-manifest "${source_manifest}" --source-bundle "${source_bundle}" \
   --scanner-summary "${work}/finding-summary.json"
+
+jq '.subject = "ghcr.io/inspr-at/janus/janus-engine@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"' \
+  "${scanner_summary}" >"${work}/wrong-subject-summary.json"
+expect_denied release_scanner_untrusted \
+  --policy "${policy}" --channel stable --mode enterprise --previous-mode enterprise \
+  --image "${image}" --tag "${tag}" --digest "${digest}" \
+  --source-manifest "${source_manifest}" --source-bundle "${source_bundle}" \
+  --scanner-summary "${work}/wrong-subject-summary.json"
 
 printf 'ok: release admission fixtures passed\n'

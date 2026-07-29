@@ -109,7 +109,7 @@ jobs:
       - name: scan candidate image and emit value-free summary
         run: |
           trivy image --scanners vuln --format json --output rust-trivy.json janus-engine:smoke
-          python3 scripts/check-security-gates.py --trivy-report rust-trivy.json --summary rust-trivy-summary.json
+          python3 scripts/check-security-gates.py --trivy-report rust-trivy.json --summary rust-trivy-summary.json --subject janus-engine:smoke
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         if: always()
         with:
@@ -178,7 +178,7 @@ jobs:
       - name: scan exact published candidate digest
         run: |
           trivy image --scanners vuln --format json --output rust-trivy.json "${IMAGE}@${{ steps.build.outputs.digest }}"
-          python3 scripts/check-security-gates.py --trivy-report rust-trivy.json --summary rust-trivy-summary.json
+          python3 scripts/check-security-gates.py --trivy-report rust-trivy.json --summary rust-trivy-summary.json --subject "${IMAGE}@${{ steps.build.outputs.digest }}"
       - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3.9.1
       - name: sign and verify released source binding
         run: |

@@ -272,7 +272,16 @@ def collect_tool_reports(
     return reports
 
 
-def summarize_trivy(report: dict[str, Any]) -> dict[str, Any]:
+def valid_subject(value: str) -> bool:
+    return (
+        1 <= len(value) <= 300
+        and value == value.strip()
+        and not any(character.isspace() or ord(character) < 0x20 for character in value)
+    )
+
+
+def summarize_trivy(report: dict[str, Any], subject: str) -> dict[str, Any]:
+    require(valid_subject(subject), "Trivy subject is invalid")
     counts = {"CRITICAL": 0, "HIGH": 0}
     for result in report.get("Results") or []:
         for finding in result.get("Vulnerabilities") or []:
@@ -283,6 +292,7 @@ def summarize_trivy(report: dict[str, Any]) -> dict[str, Any]:
         "schema_version": 1,
         "scanner": "trivy",
         "policy": "candidate_container_critical_high",
+        "subject": subject,
         "counts": counts,
         "passed": sum(counts.values()) == 0,
     }
@@ -311,12 +321,21 @@ def self_test(policy: dict[str, Any]) -> None:
             continue
         raise GateError(f"negative result fixture passed: {lane}")
     try:
-        summary = summarize_trivy({"Results": [{"Vulnerabilities": [{"Severity": "HIGH"}]}]})
+        summary = summarize_trivy(
+            {"Results": [{"Vulnerabilities": [{"Severity": "HIGH"}]}]},
+            "janus-engine:fixture",
+        )
         require(summary["passed"], f"candidate image has blocking findings: {summary['counts']}")
     except GateError:
         pass
     else:
         raise GateError("Trivy finding fixture passed")
+    try:
+        summarize_trivy({"Results": []}, "janus-engine:fixture\nforged")
+    except GateError:
+        pass
+    else:
+        raise GateError("Trivy subject fixture passed")
 
     versions = {lane["id"]: lane["version"] for lane in policy["lanes"]}
     reports = {
@@ -361,6 +380,7 @@ def main() -> int:
     parser.add_argument("--tool", action="append", choices=sorted(EXPECTED))
     parser.add_argument("--trivy-report", type=pathlib.Path)
     parser.add_argument("--summary", type=pathlib.Path)
+    parser.add_argument("--subject")
     args = parser.parse_args()
     try:
         policy = json.loads(POLICY.read_text())
@@ -374,10 +394,18 @@ def main() -> int:
         elif args.tool:
             raise GateError("--tool requires --check-installed-tools")
         if args.trivy_report:
-            require(args.summary is not None, "--summary is required with --trivy-report")
-            summary = summarize_trivy(json.loads(args.trivy_report.read_text()))
+            require(
+                args.summary is not None and args.subject is not None,
+                "--summary and --subject are required with --trivy-report",
+            )
+            summary = summarize_trivy(
+                json.loads(args.trivy_report.read_text()),
+                args.subject,
+            )
             args.summary.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
             require(summary["passed"], f"candidate image has blocking findings: {summary['counts']}")
+        elif args.subject is not None:
+            raise GateError("--subject requires --trivy-report")
     except (OSError, ValueError, KeyError, IndexError, GateError) as error:
         print(f"security scanner gate failed: {error}", file=sys.stderr)
         return 1
