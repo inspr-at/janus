@@ -3,7 +3,7 @@ set -euo pipefail
 
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 image="${JANUS_PUBLISHED_ENGINE_IMAGE:-ghcr.io/inspr-at/janus/janus-engine}"
-tag="${JANUS_PUBLISHED_ENGINE_TAG:-rust-engine-v0.1.17}"
+tag="${JANUS_PUBLISHED_ENGINE_TAG:-rust-engine-v0.1.18}"
 platform="${JANUS_PUBLISHED_ENGINE_PLATFORM:-}"
 digest="${JANUS_PUBLISHED_ENGINE_DIGEST:-}"
 digest_source="provided"
@@ -12,7 +12,15 @@ channel="${JANUS_RELEASE_CHANNEL:-stable}"
 mode="${JANUS_PRODUCT_MODE:-enterprise}"
 previous_mode="${JANUS_PREVIOUS_PRODUCT_MODE:-${mode}}"
 receipt="${JANUS_PUBLISHED_ENGINE_ADMISSION_RECEIPT:-}"
+source_manifest="${JANUS_PUBLISHED_ENGINE_SOURCE_MANIFEST:-}"
+source_bundle="${JANUS_PUBLISHED_ENGINE_SOURCE_BUNDLE:-}"
+scanner_summary="${JANUS_PUBLISHED_ENGINE_SCANNER_SUMMARY:-}"
 temporary_dir=""
+
+if [[ -z "${source_manifest}" || -z "${source_bundle}" || -z "${scanner_summary}" ]]; then
+  echo "published release evidence paths are required" >&2
+  exit 1
+fi
 
 if [[ -z "${digest}" ]]; then
   digest_source="resolved"
@@ -49,6 +57,9 @@ trap cleanup EXIT
   --image "${image}" \
   --tag "${tag}" \
   --digest "${digest}" \
+  --source-manifest "${source_manifest}" \
+  --source-bundle "${source_bundle}" \
+  --scanner-summary "${scanner_summary}" \
   --output "${receipt}"
 
 smoke_args=("--image" "${ref}")

@@ -57,9 +57,18 @@ def validate_policy(policy: dict[str, Any]) -> None:
     effective_from = parse_canonical_utc(effective_from_text, "effective_from")
     require(effective_from_text == EFFECTIVE_FROM, "source-signing cutoff changed")
     require(policy.get("repository") == "inspr-at/janus", "repository changed")
+    require(policy.get("protected_branch") == "main", "protected release branch changed")
     subset = policy.get("signed_subset")
     require(isinstance(subset, list) and len(subset) == 2, "released-source subset must be exact")
     require({item.get("tag_prefix") for item in subset} == {"go-envelope-v", "rust-engine-v"}, "released-source tag subset changed")
+    require(
+        {item.get("tag_pattern") for item in subset}
+        == {
+            r"go-envelope-v[1-9][0-9]*\.[0-9]+",
+            r"rust-engine-v[0-9]+\.[0-9]+\.[0-9]+",
+        },
+        "released-source tag grammar changed",
+    )
     require({item.get("workflow") for item in subset} == {".github/workflows/go-envelope.yml", ".github/workflows/rust.yml"}, "workflow subset changed")
     method = policy.get("method", {})
     require(method.get("tool") == "cosign" and method.get("mode") == "keyless_oidc", "source signatures must stay keyless Sigstore")
@@ -154,7 +163,11 @@ def verify_grandfathered_releases(policy: dict[str, Any]) -> None:
 
 
 def matching_rule(policy: dict[str, Any], manifest: dict[str, Any]) -> dict[str, Any]:
-    matches = [item for item in policy["signed_subset"] if manifest["tag"].startswith(item["tag_prefix"])]
+    matches = [
+        item
+        for item in policy["signed_subset"]
+        if re.fullmatch(item["tag_pattern"], manifest["tag"]) is not None
+    ]
     require(len(matches) == 1, "tag is outside the released-source subset")
     return matches[0]
 
@@ -214,7 +227,7 @@ def self_test(policy: dict[str, Any]) -> None:
     manifest = {
         "schema_version": 1,
         "repository": "inspr-at/janus",
-        "tag": "rust-engine-v0.0.0-fixture",
+        "tag": "rust-engine-v0.0.0",
         "commit": "0" * 40,
         "workflow": ".github/workflows/rust.yml",
         "image": "ghcr.io/inspr-at/janus/janus-engine",
@@ -237,6 +250,19 @@ def self_test(policy: dict[str, Any]) -> None:
             pass
         else:
             raise SourcePolicyError("wrong-identity fixture passed")
+    malformed_tag = copy.deepcopy(manifest)
+    malformed_tag["tag"] = "rust-engine-v0.0.0-fixture"
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json") as bundle:
+        bundle.write("{}")
+        bundle.flush()
+        try:
+            validate_manifest(
+                policy, malformed_tag, pathlib.Path(bundle.name), False
+            )
+        except SourcePolicyError:
+            pass
+        else:
+            raise SourcePolicyError("malformed release tag fixture passed")
 
 
 def main() -> int:

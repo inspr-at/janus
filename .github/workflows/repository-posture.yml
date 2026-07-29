@@ -1,0 +1,22 @@
+name: repository-posture
+
+on:
+  schedule:
+    - cron: '17 5 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: read
+
+jobs:
+  repository-posture:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: verify repository posture fixtures
+        run: python3 scripts/check-github-repository-posture.py --self-test
+      - name: verify live repository posture
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/check-github-repository-posture.py --live

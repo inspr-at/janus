@@ -12,10 +12,10 @@ agents - without making raw credentials part of prompts, command arguments,
 logs, or application code.
 
 [![License: AGPL-3.0-only](https://img.shields.io/badge/license-AGPL--3.0--only-1f7a72.svg)](LICENSE)
-[![Rust engine](https://img.shields.io/badge/Rust_engine-v0.1.17-cb7c28.svg)](https://github.com/inspr-at/janus/releases/tag/rust-engine-v0.1.17)
+[![Rust engine](https://img.shields.io/badge/Rust_engine-v0.1.18-cb7c28.svg)](https://github.com/inspr-at/janus/releases/tag/rust-engine-v0.1.18)
 
 [Product site](https://janus.inspr.at) ·
-[Rust engine v0.1.17](https://github.com/inspr-at/janus/releases/tag/rust-engine-v0.1.17) ·
+[Rust engine v0.1.18](https://github.com/inspr-at/janus/releases/tag/rust-engine-v0.1.18) ·
 [INSPR](https://www.inspr.at)
 
 ## What Janus does
@@ -75,7 +75,7 @@ Janus has two layers with different histories:
 
 | Layer | Role | Language | Status |
 |---|---|---|---|
-| **Rust engine** | Secret store contracts, Warden, permits, approved-use execution, rotation, lifecycle, and operator CLI | Rust | Active and released. Current tag: `rust-engine-v0.1.17`. |
+| **Rust engine** | Secret store contracts, Warden, permits, approved-use execution, rotation, lifecycle, and operator CLI | Rust | Active and released. Current tag: `rust-engine-v0.1.18`. |
 | **Go envelope** | Existing governance, audit, evidence, and oversight surface | Go | Shipped, operational, and transitional. New core capability work lands in Rust. |
 
 The Rust engine is no longer a skeleton. Core execution paths ship with unit,
@@ -255,6 +255,9 @@ Gitleaks, staticcheck, govulncheck, immutable-base verification, and Trivy. The
 gate probes the actual local scanner invocations and fails before scanning when
 any binary version differs from the reviewed policy. CI repeats that check on
 every runner that installs a scanner, including fresh release-image runners.
+Workflow assurance parses the YAML structure and rejects missing, disabled,
+non-blocking, misplaced, or comment-only scanner gates. Scanner binaries are
+version-checked before the corresponding scan can consume source or image data.
 Every external GitHub Action, including GitHub-owned Actions, is pinned to a
 full commit SHA with its reviewed release beside it. The required security job
 rejects mutable, shortened, dynamic, or undocumented Action references, and
@@ -290,6 +293,11 @@ tag, commit, and publication timestamp. Earlier Go and Rust releases remain
 published history but are superseded and outside the admissible policy;
 date-only interpretation is rejected.
 Release CI scans, verifies, and smokes the exact digest it publishes.
+Both Go envelope and Rust engine releases must originate at the tagged event
+commit on the fetched protected `main` history. Each channel emits a read-only
+admission receipt that binds the image signature, provenance, SPDX SBOM,
+signed-source manifest and bundle hashes, source commit, and the exact
+zero-CRITICAL/zero-HIGH Trivy summary hash.
 Production and enterprise deployment admission is documented in
 [Trusted release admission](docs/release-admission.md).
 The reviewed offline schema upgrade is documented in the

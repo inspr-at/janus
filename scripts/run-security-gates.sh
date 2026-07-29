@@ -6,6 +6,11 @@ cd "${repo}"
 
 python3 scripts/check-action-pins.py --self-test
 python3 scripts/smoke-warden-mcp.py --self-test
+python3 scripts/check-browser-qa-hygiene.py --self-test --repository
+python3 scripts/run-attended-browser-qa.py --self-test
+python3 scripts/check-release-main-ancestry.py --self-test
+python3 scripts/check-github-repository-posture.py --self-test
+ruby scripts/check-workflow-security.rb --self-test
 python3 scripts/check-security-gates.py --self-test
 python3 scripts/check-security-gates.py --check-installed-tools
 python3 scripts/test-docker-base-pins.py
@@ -24,7 +29,10 @@ if [[ -n "${JANUS_SECURITY_IMAGE:-}" ]]; then
   cleanup() { rm -f -- "${report}" "${summary}"; }
   trap cleanup EXIT
   trivy image --scanners vuln --format json --output "${report}" "${JANUS_SECURITY_IMAGE}"
-  python3 scripts/check-security-gates.py --trivy-report "${report}" --summary "${summary}"
+  python3 scripts/check-security-gates.py \
+    --trivy-report "${report}" \
+    --summary "${summary}" \
+    --subject "${image}"
 fi
 
 echo "ok: local release-security parity gates passed"

@@ -18,6 +18,8 @@ __pycache__/
 
 # Browser QA dependencies and failure artifacts
 /node_modules/
+/.playwright-mcp/
+/.playwright/
 /test-results/
 /playwright-report/
 /browser-qa/test-results/

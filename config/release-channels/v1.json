@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "policy_id": "janus-engine-release-v1",
-  "policy_version": 2,
+  "policy_version": 3,
   "required_modes": [
     "production",
     "enterprise"
@@ -12,9 +12,24 @@
       "name": "stable",
       "image": "ghcr.io/inspr-at/janus/janus-engine",
       "tag_prefix": "rust-engine-v",
+      "tag_pattern": "rust-engine-v[0-9]+\\.[0-9]+\\.[0-9]+",
       "repository": "inspr-at/janus",
       "signer_workflow": "inspr-at/janus/.github/workflows/rust.yml",
+      "source_manifest_workflow": ".github/workflows/rust.yml",
       "certificate_identity_prefix": "https://github.com/inspr-at/janus/.github/workflows/rust.yml@refs/tags/",
+      "oidc_issuer": "https://token.actions.githubusercontent.com",
+      "provenance_predicate_type": "https://slsa.dev/provenance/v1",
+      "sbom_predicate_type": "https://spdx.dev/Document/v2.3"
+    },
+    {
+      "name": "envelope-stable",
+      "image": "ghcr.io/inspr-at/janus/janus-envelope",
+      "tag_prefix": "go-envelope-v",
+      "tag_pattern": "go-envelope-v[1-9][0-9]*\\.[0-9]+",
+      "repository": "inspr-at/janus",
+      "signer_workflow": "inspr-at/janus/.github/workflows/go-envelope.yml",
+      "source_manifest_workflow": ".github/workflows/go-envelope.yml",
+      "certificate_identity_prefix": "https://github.com/inspr-at/janus/.github/workflows/go-envelope.yml@refs/tags/",
       "oidc_issuer": "https://token.actions.githubusercontent.com",
       "provenance_predicate_type": "https://slsa.dev/provenance/v1",
       "sbom_predicate_type": "https://spdx.dev/Document/v2.3"

@@ -15,6 +15,8 @@ use crate::{
 
 const POLICY_SCHEMA_VERSION: u8 = 1;
 const RECEIPT_SCHEMA_VERSION: u8 = 1;
+const GO_TAG_PATTERN: &str = r"go-envelope-v[1-9][0-9]*\.[0-9]+";
+const RUST_TAG_PATTERN: &str = r"rust-engine-v[0-9]+\.[0-9]+\.[0-9]+";
 const MAX_SAFE_FIELD_BYTES: usize = 512;
 
 /// Runtime product mode relevant to release-channel enforcement.
@@ -81,8 +83,10 @@ struct ReleaseChannel {
     name: String,
     image: String,
     tag_prefix: String,
+    tag_pattern: String,
     repository: String,
     signer_workflow: String,
+    source_manifest_workflow: String,
     certificate_identity_prefix: String,
     oidc_issuer: String,
     provenance_predicate_type: String,
@@ -133,12 +137,15 @@ impl ReleaseChannelPolicy {
                 || !safe_field(&channel.name)
                 || !safe_field(&channel.image)
                 || !safe_field(&channel.tag_prefix)
+                || !safe_field(&channel.tag_pattern)
                 || !safe_field(&channel.repository)
                 || !safe_field(&channel.signer_workflow)
+                || !safe_field(&channel.source_manifest_workflow)
                 || !safe_field(&channel.certificate_identity_prefix)
                 || !safe_field(&channel.oidc_issuer)
                 || !safe_field(&channel.provenance_predicate_type)
                 || !safe_field(&channel.sbom_predicate_type)
+                || !valid_tag_contract(&channel.tag_prefix, &channel.tag_pattern)
             {
                 return invalid_policy();
             }
@@ -169,6 +176,8 @@ pub struct ReleaseAdmissionReceipt {
     signature: SignatureEvidence,
     provenance: ProvenanceEvidence,
     sbom: SbomEvidence,
+    source: SourceEvidence,
+    scanner: ScannerEvidence,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
@@ -205,6 +214,27 @@ struct SbomEvidence {
     predicate_type: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SourceEvidence {
+    verified: bool,
+    commit: String,
+    manifest_sha256: String,
+    bundle_sha256: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScannerEvidence {
+    verified: bool,
+    name: String,
+    policy: String,
+    subject: String,
+    summary_sha256: String,
+    critical: u64,
+    high: u64,
+}
+
 impl ReleaseAdmissionReceipt {
     /// Parse and structurally validate one JSON admission receipt.
     pub fn parse_json(contents: &str) -> JanusResult<Self> {
@@ -229,10 +259,21 @@ impl ReleaseAdmissionReceipt {
             self.provenance.source_ref.as_str(),
             self.provenance.predicate_type.as_str(),
             self.sbom.predicate_type.as_str(),
+            self.source.commit.as_str(),
+            self.source.manifest_sha256.as_str(),
+            self.source.bundle_sha256.as_str(),
+            self.scanner.name.as_str(),
+            self.scanner.policy.as_str(),
+            self.scanner.subject.as_str(),
+            self.scanner.summary_sha256.as_str(),
         ];
         if self.schema_version != RECEIPT_SCHEMA_VERSION
             || self.policy_version == 0
             || !valid_digest(&self.artifact.digest)
+            || !full_commit(&self.source.commit)
+            || !valid_digest(&self.source.manifest_sha256)
+            || !valid_digest(&self.source.bundle_sha256)
+            || !valid_digest(&self.scanner.summary_sha256)
             || fields.iter().any(|field| !safe_field(field))
         {
             return Err(JanusError::InvalidIdentifier {
@@ -317,6 +358,13 @@ impl ReleaseAdmission {
         if receipt.artifact.development || development_tag(&receipt.artifact.tag) {
             return base.deny("release_development_artifact");
         }
+        if !valid_release_tag(
+            &channel.tag_prefix,
+            &channel.tag_pattern,
+            &receipt.artifact.tag,
+        ) {
+            return base.deny("release_channel_denied");
+        }
         if configured_digest != Some(receipt.artifact.digest.as_str()) {
             return base.deny("release_digest_mismatch");
         }
@@ -347,6 +395,19 @@ impl ReleaseAdmission {
         }
         if !receipt.sbom.verified || receipt.sbom.predicate_type != channel.sbom_predicate_type {
             return base.deny("release_sbom_untrusted");
+        }
+        if !receipt.source.verified {
+            return base.deny("release_source_untrusted");
+        }
+        if !receipt.scanner.verified
+            || receipt.scanner.name != "trivy"
+            || receipt.scanner.policy != "candidate_container_critical_high"
+            || receipt.scanner.subject
+                != format!("{}@{}", receipt.artifact.image, receipt.artifact.digest)
+            || receipt.scanner.critical != 0
+            || receipt.scanner.high != 0
+        {
+            return base.deny("release_scanner_untrusted");
         }
         Self {
             decision: ReleaseAdmissionDecision::Trusted,
@@ -494,6 +555,38 @@ fn valid_digest(value: &str) -> bool {
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }
 
+fn full_commit(value: &str) -> bool {
+    value.len() == 40
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+
+fn valid_tag_contract(prefix: &str, pattern: &str) -> bool {
+    matches!(
+        (prefix, pattern),
+        ("go-envelope-v", GO_TAG_PATTERN) | ("rust-engine-v", RUST_TAG_PATTERN)
+    )
+}
+
+fn valid_release_tag(prefix: &str, pattern: &str, tag: &str) -> bool {
+    let Some(version) = tag.strip_prefix(prefix) else {
+        return false;
+    };
+    let components = version.split('.').collect::<Vec<_>>();
+    let valid_number =
+        |value: &str| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit());
+    match (prefix, pattern, components.as_slice()) {
+        ("go-envelope-v", GO_TAG_PATTERN, [major, minor]) => {
+            valid_number(major) && !major.starts_with('0') && valid_number(minor)
+        }
+        ("rust-engine-v", RUST_TAG_PATTERN, [major, minor, patch]) => {
+            valid_number(major) && valid_number(minor) && valid_number(patch)
+        }
+        _ => false,
+    }
+}
+
 fn development_tag(tag: &str) -> bool {
     let tag = tag.to_ascii_lowercase();
     ["-dev", ".dev", "snapshot", "dirty"]
@@ -526,8 +619,10 @@ mod tests {
     "name": "stable",
     "image": "ghcr.io/inspr-at/janus/janus-engine",
     "tag_prefix": "rust-engine-v",
+    "tag_pattern": "rust-engine-v[0-9]+\\.[0-9]+\\.[0-9]+",
     "repository": "inspr-at/janus",
     "signer_workflow": "inspr-at/janus/.github/workflows/rust.yml",
+    "source_manifest_workflow": ".github/workflows/rust.yml",
     "certificate_identity_prefix": "https://github.com/inspr-at/janus/.github/workflows/rust.yml@refs/tags/",
     "oidc_issuer": "https://token.actions.githubusercontent.com",
     "provenance_predicate_type": "https://slsa.dev/provenance/v1",
@@ -572,6 +667,21 @@ mod tests {
             "sbom": {
                 "verified": true,
                 "predicate_type": "https://spdx.dev/Document/v2.3"
+            },
+            "source": {
+                "verified": true,
+                "commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "manifest_sha256": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "bundle_sha256": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+            },
+            "scanner": {
+                "verified": true,
+                "name": "trivy",
+                "policy": "candidate_container_critical_high",
+                "subject": "ghcr.io/inspr-at/janus/janus-engine@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "summary_sha256": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+                "critical": 0,
+                "high": 0
             }
         });
         for (pointer, replacement) in overrides {
@@ -625,9 +735,32 @@ mod tests {
                 "release_sbom_untrusted",
             ),
             (
+                vec![("/source/verified", "false")],
+                false,
+                "release_source_untrusted",
+            ),
+            (
+                vec![("/scanner/high", "1")],
+                false,
+                "release_scanner_untrusted",
+            ),
+            (
+                vec![(
+                    "/scanner/subject",
+                    r#""ghcr.io/inspr-at/janus/janus-engine@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd""#,
+                )],
+                false,
+                "release_scanner_untrusted",
+            ),
+            (
                 vec![("/artifact/development", "true")],
                 false,
                 "release_development_artifact",
+            ),
+            (
+                vec![("/artifact/tag", r#""rust-engine-v0.1.6-preview""#)],
+                false,
+                "release_channel_denied",
             ),
             (
                 vec![("/artifact/tag", r#""rust-engine-v0.1.6-dev""#)],
@@ -744,6 +877,11 @@ mod tests {
             r#""required_modes": ["enterprise", "enterprise"]"#,
         );
         assert!(ReleaseChannelPolicy::parse_json(&duplicate).is_err());
+        let unbounded_pattern = policy_json(false).replace(
+            r#""tag_pattern": "rust-engine-v[0-9]+\\.[0-9]+\\.[0-9]+""#,
+            r#""tag_pattern": "rust-engine-v.*""#,
+        );
+        assert!(ReleaseChannelPolicy::parse_json(&unbounded_pattern).is_err());
         let uppercase_digest = receipt_json(&[(
             "/artifact/digest",
             r#""sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA""#,

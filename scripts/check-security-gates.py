@@ -58,24 +58,27 @@ def validate_workflows() -> None:
     rust = (ROOT / ".github/workflows/rust.yml").read_text()
     go = (ROOT / ".github/workflows/go-envelope.yml").read_text()
     security = (ROOT / ".github/workflows/security.yml").read_text()
+    repository_posture = (
+        ROOT / ".github/workflows/repository-posture.yml"
+    ).read_text()
     local = (ROOT / "scripts/run-security-gates.sh").read_text()
     browser_package = json.loads((ROOT / "package.json").read_text())
+    try:
+        subprocess.run(
+            ["ruby", "scripts/check-workflow-security.rb"],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise GateError("structural workflow security validation failed") from error
     for workflow in (rust, go):
         require("scripts/test-gitleaks.sh" in workflow, "release workflow lacks Gitleaks")
         require("0.72.0" in workflow, "release workflow lacks pinned Trivy")
         require('steps.build.outputs.digest' in workflow, "release workflow does not scan exact digest")
         require("scripts/check-security-gates.py" in workflow, "scanner-policy gate is not wired")
     require("scripts/check-rust-audit.py" in rust and "0.22.2" in rust, "Rust audit gate is not wired")
-    require(
-        'GITLEAKS_BIN="$(go env GOPATH)/bin/gitleaks" python3 scripts/check-security-gates.py --check-installed-tools'
-        in rust,
-        "Rust check CI does not verify its exact scanner invocations",
-    )
-    require(
-        "python3 scripts/check-security-gates.py --check-installed-tools --tool trivy"
-        in rust,
-        "Rust release CI does not verify its fresh Trivy installation",
-    )
     require("staticcheck@v0.7.0" in go, "staticcheck pin is not wired")
     require("govulncheck@v1.6.0" in go, "govulncheck pin is not wired")
     require(
@@ -108,21 +111,6 @@ def validate_workflows() -> None:
         "managed-service browser assurance bypasses its artifact boundary",
     )
     require(
-        'GITLEAKS_BIN="$(go env GOPATH)/bin/gitleaks" python3 scripts/check-security-gates.py --check-installed-tools --tool gitleaks --tool govulncheck --tool staticcheck --tool trivy'
-        in go,
-        "Go check CI does not verify its exact scanner invocations",
-    )
-    require(
-        "python3 scripts/check-security-gates.py --check-installed-tools --tool trivy"
-        in go,
-        "Go release CI does not verify its fresh Trivy installation",
-    )
-    require(
-        'GITLEAKS_BIN="$(go env GOPATH)/bin/gitleaks" python3 scripts/check-security-gates.py --check-installed-tools --tool gitleaks'
-        in security,
-        "Gitleaks CI does not verify the binary it scans with",
-    )
-    require(
         "python3 scripts/check-action-pins.py --self-test" in security,
         "required security CI does not enforce immutable GitHub Action pins",
     )
@@ -135,8 +123,35 @@ def validate_workflows() -> None:
         "required security CI does not test Warden smoke status output",
     )
     require(
+        "python3 scripts/check-browser-qa-hygiene.py --self-test --repository"
+        in security
+        and "python3 scripts/run-attended-browser-qa.py --self-test" in security,
+        "required security CI does not contain attended browser QA",
+    )
+    require(
         "python3 scripts/smoke-warden-mcp.py --self-test" in local,
         "local release-security gate does not test Warden smoke status output",
+    )
+    require(
+        "python3 scripts/check-browser-qa-hygiene.py --self-test --repository"
+        in local
+        and "python3 scripts/run-attended-browser-qa.py --self-test" in local,
+        "local release-security gate does not contain attended browser QA",
+    )
+    require(
+        "python3 scripts/check-github-repository-posture.py --self-test"
+        in repository_posture
+        and "python3 scripts/check-github-repository-posture.py --live"
+        in repository_posture,
+        "scheduled repository-posture assurance is not wired",
+    )
+    require(
+        "python3 scripts/check-github-repository-posture.py --self-test" in local,
+        "local release-security gate does not test repository posture",
+    )
+    require(
+        "ruby scripts/check-workflow-security.rb --self-test" in local,
+        "local release-security gate does not validate workflow structure",
     )
     require("--check-installed-tools" in local, "local scanner-version gate is not wired")
 
@@ -257,7 +272,16 @@ def collect_tool_reports(
     return reports
 
 
-def summarize_trivy(report: dict[str, Any]) -> dict[str, Any]:
+def valid_subject(value: str) -> bool:
+    return (
+        1 <= len(value) <= 300
+        and value == value.strip()
+        and not any(character.isspace() or ord(character) < 0x20 for character in value)
+    )
+
+
+def summarize_trivy(report: dict[str, Any], subject: str) -> dict[str, Any]:
+    require(valid_subject(subject), "Trivy subject is invalid")
     counts = {"CRITICAL": 0, "HIGH": 0}
     for result in report.get("Results") or []:
         for finding in result.get("Vulnerabilities") or []:
@@ -268,6 +292,7 @@ def summarize_trivy(report: dict[str, Any]) -> dict[str, Any]:
         "schema_version": 1,
         "scanner": "trivy",
         "policy": "candidate_container_critical_high",
+        "subject": subject,
         "counts": counts,
         "passed": sum(counts.values()) == 0,
     }
@@ -296,12 +321,21 @@ def self_test(policy: dict[str, Any]) -> None:
             continue
         raise GateError(f"negative result fixture passed: {lane}")
     try:
-        summary = summarize_trivy({"Results": [{"Vulnerabilities": [{"Severity": "HIGH"}]}]})
+        summary = summarize_trivy(
+            {"Results": [{"Vulnerabilities": [{"Severity": "HIGH"}]}]},
+            "janus-engine:fixture",
+        )
         require(summary["passed"], f"candidate image has blocking findings: {summary['counts']}")
     except GateError:
         pass
     else:
         raise GateError("Trivy finding fixture passed")
+    try:
+        summarize_trivy({"Results": []}, "janus-engine:fixture\nforged")
+    except GateError:
+        pass
+    else:
+        raise GateError("Trivy subject fixture passed")
 
     versions = {lane["id"]: lane["version"] for lane in policy["lanes"]}
     reports = {
@@ -346,6 +380,7 @@ def main() -> int:
     parser.add_argument("--tool", action="append", choices=sorted(EXPECTED))
     parser.add_argument("--trivy-report", type=pathlib.Path)
     parser.add_argument("--summary", type=pathlib.Path)
+    parser.add_argument("--subject")
     args = parser.parse_args()
     try:
         policy = json.loads(POLICY.read_text())
@@ -359,10 +394,18 @@ def main() -> int:
         elif args.tool:
             raise GateError("--tool requires --check-installed-tools")
         if args.trivy_report:
-            require(args.summary is not None, "--summary is required with --trivy-report")
-            summary = summarize_trivy(json.loads(args.trivy_report.read_text()))
+            require(
+                args.summary is not None and args.subject is not None,
+                "--summary and --subject are required with --trivy-report",
+            )
+            summary = summarize_trivy(
+                json.loads(args.trivy_report.read_text()),
+                args.subject,
+            )
             args.summary.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
             require(summary["passed"], f"candidate image has blocking findings: {summary['counts']}")
+        elif args.subject is not None:
+            raise GateError("--subject requires --trivy-report")
     except (OSError, ValueError, KeyError, IndexError, GateError) as error:
         print(f"security scanner gate failed: {error}", file=sys.stderr)
         return 1

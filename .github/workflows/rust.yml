@@ -41,6 +41,18 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+      - name: verify protected-main release ancestry
+        if: github.event_name == 'release'
+        env:
+          JANUS_RELEASE_REPOSITORY: ${{ github.repository }}
+          JANUS_RELEASE_TAG: ${{ github.event.release.tag_name }}
+          JANUS_RELEASE_COMMIT: ${{ github.sha }}
+        run: |
+          python3 scripts/check-release-main-ancestry.py \
+            --fetch-main \
+            --repository "${JANUS_RELEASE_REPOSITORY}" \
+            --tag "${JANUS_RELEASE_TAG}" \
+            --commit "${JANUS_RELEASE_COMMIT}"
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.26.5'
@@ -56,6 +68,8 @@ jobs:
         run: |
           cargo install cargo-audit --version 0.22.2 --locked
           go install github.com/zricethezav/gitleaks/v8@v8.30.1
+      - name: verify installed dependency scanner versions
+        run: GITLEAKS_BIN="$(go env GOPATH)/bin/gitleaks" python3 scripts/check-security-gates.py --check-installed-tools --tool cargo-audit --tool gitleaks
       - name: release security policy and negative fixtures
         env:
           GH_TOKEN: ${{ github.token }}
@@ -63,6 +77,7 @@ jobs:
           python3 scripts/check-release-docs.py
           python3 scripts/check-security-gates.py --self-test
           scripts/check-source-release.py --self-test --verify-grandfathered
+          python3 scripts/check-release-main-ancestry.py --self-test
           scripts/check-rust-audit.py --self-test
           GITLEAKS_BIN="$(go env GOPATH)/bin/gitleaks" scripts/test-gitleaks.sh
       - name: format
@@ -87,14 +102,14 @@ jobs:
       - uses: aquasecurity/setup-trivy@3fb12ec12f41e471780db15c232d5dd185dcb514 # v0.2.6
         with:
           version: v0.72.0
-      - name: verify installed scanner versions
-        run: GITLEAKS_BIN="$(go env GOPATH)/bin/gitleaks" python3 scripts/check-security-gates.py --check-installed-tools
+      - name: verify installed image scanner version
+        run: python3 scripts/check-security-gates.py --check-installed-tools --tool trivy
       - name: build and smoke exact local candidate image
         run: scripts/smoke-engine-container.sh
       - name: scan candidate image and emit value-free summary
         run: |
           trivy image --scanners vuln --format json --output rust-trivy.json janus-engine:smoke
-          python3 scripts/check-security-gates.py --trivy-report rust-trivy.json --summary rust-trivy-summary.json
+          python3 scripts/check-security-gates.py --trivy-report rust-trivy.json --summary rust-trivy-summary.json --subject janus-engine:smoke
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         if: always()
         with:
@@ -119,6 +134,17 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+      - name: verify protected-main release ancestry
+        env:
+          JANUS_RELEASE_REPOSITORY: ${{ github.repository }}
+          JANUS_RELEASE_TAG: ${{ github.event.release.tag_name }}
+          JANUS_RELEASE_COMMIT: ${{ github.sha }}
+        run: |
+          python3 scripts/check-release-main-ancestry.py \
+            --fetch-main \
+            --repository "${JANUS_RELEASE_REPOSITORY}" \
+            --tag "${JANUS_RELEASE_TAG}" \
+            --commit "${JANUS_RELEASE_COMMIT}"
       - name: verify release tag matches workspace version
         run: scripts/check-engine-release-tag.sh "${{ github.event.release.tag_name }}"
       - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
@@ -152,7 +178,7 @@ jobs:
       - name: scan exact published candidate digest
         run: |
           trivy image --scanners vuln --format json --output rust-trivy.json "${IMAGE}@${{ steps.build.outputs.digest }}"
-          python3 scripts/check-security-gates.py --trivy-report rust-trivy.json --summary rust-trivy-summary.json
+          python3 scripts/check-security-gates.py --trivy-report rust-trivy.json --summary rust-trivy-summary.json --subject "${IMAGE}@${{ steps.build.outputs.digest }}"
       - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3.9.1
       - name: sign and verify released source binding
         run: |
@@ -215,6 +241,9 @@ jobs:
           JANUS_PRODUCT_MODE: enterprise
           JANUS_PREVIOUS_PRODUCT_MODE: enterprise
           JANUS_PUBLISHED_ENGINE_ADMISSION_RECEIPT: rust-engine-admission.json
+          JANUS_PUBLISHED_ENGINE_SOURCE_MANIFEST: source-release.json
+          JANUS_PUBLISHED_ENGINE_SOURCE_BUNDLE: source-release.sigstore.json
+          JANUS_PUBLISHED_ENGINE_SCANNER_SUMMARY: rust-trivy-summary.json
         run: scripts/smoke-published-engine.sh
       - name: upload admission receipt
         env:
