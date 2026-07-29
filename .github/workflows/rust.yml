@@ -76,6 +76,7 @@ jobs:
         run: |
           python3 scripts/check-release-docs.py
           python3 scripts/check-security-gates.py --self-test
+          python3 scripts/check-release-mode-receipts.py --self-test
           scripts/check-source-release.py --self-test --verify-grandfathered
           python3 scripts/check-release-main-ancestry.py --self-test
           scripts/check-rust-audit.py --self-test
@@ -230,7 +231,7 @@ jobs:
           sbom-path: rust-engine-sbom.spdx.json
           push-to-registry: true
           create-storage-record: false
-      - name: verify published engine digest
+      - name: verify published engine digest and mode receipts
         env:
           GH_TOKEN: ${{ github.token }}
           JANUS_PUBLISHED_ENGINE_IMAGE: ${{ env.IMAGE }}
@@ -238,14 +239,34 @@ jobs:
           JANUS_PUBLISHED_ENGINE_DIGEST: ${{ steps.build.outputs.digest }}
           JANUS_RELEASE_CHANNEL_POLICY: config/release-channels/v1.json
           JANUS_RELEASE_CHANNEL: stable
-          JANUS_PRODUCT_MODE: enterprise
-          JANUS_PREVIOUS_PRODUCT_MODE: enterprise
+          JANUS_PRODUCT_MODE: production
+          JANUS_PREVIOUS_PRODUCT_MODE: production
           JANUS_PUBLISHED_ENGINE_ADMISSION_RECEIPT: rust-engine-admission.json
           JANUS_PUBLISHED_ENGINE_SOURCE_MANIFEST: source-release.json
           JANUS_PUBLISHED_ENGINE_SOURCE_BUNDLE: source-release.sigstore.json
           JANUS_PUBLISHED_ENGINE_SCANNER_SUMMARY: rust-trivy-summary.json
-        run: scripts/smoke-published-engine.sh
-      - name: upload admission receipt
+        run: |
+          scripts/smoke-published-engine.sh
+          scripts/admit-engine-release.sh \
+            --policy "${JANUS_RELEASE_CHANNEL_POLICY}" \
+            --channel "${JANUS_RELEASE_CHANNEL}" \
+            --mode enterprise \
+            --previous-mode enterprise \
+            --image "${JANUS_PUBLISHED_ENGINE_IMAGE}" \
+            --tag "${JANUS_PUBLISHED_ENGINE_TAG}" \
+            --digest "${JANUS_PUBLISHED_ENGINE_DIGEST}" \
+            --source-manifest "${JANUS_PUBLISHED_ENGINE_SOURCE_MANIFEST}" \
+            --source-bundle "${JANUS_PUBLISHED_ENGINE_SOURCE_BUNDLE}" \
+            --scanner-summary "${JANUS_PUBLISHED_ENGINE_SCANNER_SUMMARY}" \
+            --output rust-engine-admission-enterprise.json
+          python3 scripts/check-release-mode-receipts.py \
+            --production rust-engine-admission.json \
+            --enterprise rust-engine-admission-enterprise.json
+      - name: upload mode-specific admission receipts
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${{ github.event.release.tag_name }}" rust-engine-admission.json --clobber
+        run: |
+          gh release upload "${{ github.event.release.tag_name }}" \
+            rust-engine-admission.json \
+            rust-engine-admission-enterprise.json \
+            --clobber

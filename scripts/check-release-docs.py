@@ -59,6 +59,8 @@ def main() -> int:
             "source-release.json",
             "source-release.sigstore.json",
             "rust-trivy-summary.json",
+            "rust-engine-admission.json",
+            "rust-engine-admission-enterprise.json",
             "janus-property-replay.json",
         ):
             if asset not in rust_workflow:
@@ -78,6 +80,8 @@ def main() -> int:
         ):
             if binding not in admission:
                 fail(f"release admission docs omit required evidence: {binding}")
+        if "Deploy exactly the receipt matching `JANUS_PRODUCT_MODE`" not in admission:
+            fail("release admission docs omit the runtime-mode receipt boundary")
         for replay_contract in (
             "name: rust-property-replay",
             "if-no-files-found: ignore",

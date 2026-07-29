@@ -9,6 +9,7 @@ python3 scripts/smoke-warden-mcp.py --self-test
 python3 scripts/check-browser-qa-hygiene.py --self-test --repository
 python3 scripts/run-attended-browser-qa.py --self-test
 python3 scripts/check-release-main-ancestry.py --self-test
+python3 scripts/check-release-mode-receipts.py --self-test
 python3 scripts/check-github-repository-posture.py --self-test
 ruby scripts/check-workflow-security.rb --self-test
 python3 scripts/check-security-gates.py --self-test

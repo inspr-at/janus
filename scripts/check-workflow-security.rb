@@ -56,6 +56,15 @@ def command!(step, fragment)
   )
 end
 
+def environment!(step, name, expected)
+  environment = step["env"]
+  require_gate(environment.is_a?(Hash), "workflow_environment_missing:#{name}")
+  require_gate(
+    environment[name] == expected,
+    "workflow_environment_mismatch:#{name}"
+  )
+end
+
 def before!(job, first_name, second_name)
   names = job.fetch("steps").map { |step| step.is_a?(Hash) ? step["name"] : nil }
   first = names.index(first_name)
@@ -103,8 +112,35 @@ def validate(workflows)
   active_step!(rust_image, "verify installed release scanner version")
   rust_published_scan = active_step!(rust_image, "scan exact published candidate digest")
   command!(rust_published_scan, '--subject "${IMAGE}@${{ steps.build.outputs.digest }}"')
+  rust_mode_receipts =
+    active_step!(rust_image, "verify published engine digest and mode receipts")
+  environment!(rust_mode_receipts, "JANUS_PRODUCT_MODE", "production")
+  environment!(rust_mode_receipts, "JANUS_PREVIOUS_PRODUCT_MODE", "production")
+  environment!(
+    rust_mode_receipts,
+    "JANUS_PUBLISHED_ENGINE_ADMISSION_RECEIPT",
+    "rust-engine-admission.json"
+  )
+  command!(rust_mode_receipts, "scripts/smoke-published-engine.sh")
+  command!(rust_mode_receipts, "--mode enterprise")
+  command!(rust_mode_receipts, "--previous-mode enterprise")
+  command!(rust_mode_receipts, "--output rust-engine-admission-enterprise.json")
+  command!(rust_mode_receipts, "scripts/check-release-mode-receipts.py")
+  rust_upload = active_step!(rust_image, "upload mode-specific admission receipts")
+  command!(rust_upload, "rust-engine-admission.json")
+  command!(rust_upload, "rust-engine-admission-enterprise.json")
   before!(rust_image, "verify protected-main release ancestry", "scan exact published candidate digest")
   before!(rust_image, "verify installed release scanner version", "scan exact published candidate digest")
+  before!(
+    rust_image,
+    "scan exact published candidate digest",
+    "verify published engine digest and mode receipts"
+  )
+  before!(
+    rust_image,
+    "verify published engine digest and mode receipts",
+    "upload mode-specific admission receipts"
+  )
 
   gitleaks = job!(workflows.fetch(:security), "gitleaks")
   gitleaks_verify = active_step!(gitleaks, "verify installed scanner version")
@@ -157,6 +193,20 @@ def self_test(workflows)
   scan_index = steps.index { |item| item["name"] == "scan history and prove the negative fixture" }
   steps[verify_index], steps[scan_index] = steps[scan_index], steps[verify_index]
   expect_denied(reordered, "reordered") {}
+
+  wrong_production_mode = deep_copy(workflows)
+  step!(
+    job!(wrong_production_mode[:rust], "image"),
+    "verify published engine digest and mode receipts"
+  )["env"]["JANUS_PRODUCT_MODE"] = "enterprise"
+  expect_denied(wrong_production_mode, "wrong_production_mode") {}
+
+  missing_enterprise_receipt = deep_copy(workflows)
+  step!(
+    job!(missing_enterprise_receipt[:rust], "image"),
+    "upload mode-specific admission receipts"
+  )["run"] = 'gh release upload "$TAG" rust-engine-admission.json --clobber'
+  expect_denied(missing_enterprise_receipt, "missing_enterprise_receipt") {}
 end
 
 workflows = {
