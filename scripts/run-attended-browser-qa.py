@@ -28,6 +28,9 @@ MAC_CHROME = pathlib.Path(
 )
 NIX_CHROME = re.compile(r"/nix/store/[0-9a-z]{32}-[^/]+/bin/(?:chromium|google-chrome)")
 BUILD = re.compile(r"[0-9a-f]{7,40}")
+SESSION_ID = re.compile(r"browser_[0-9a-f]{16}")
+UTC_TIMESTAMP = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
+OUTCOMES = {"closed", "browser_failed", "timeout", "interrupted"}
 RECEIPT_KEYS = {
     "schema_version",
     "session_id",
@@ -111,6 +114,7 @@ def validate_build(value: str) -> str:
 
 
 def ensure_private_directory(path: pathlib.Path) -> None:
+    require(not path.is_symlink(), "attended_browser_directory_denied")
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
     path.chmod(0o700)
     require(not path.is_symlink(), "attended_browser_directory_denied")
@@ -143,6 +147,24 @@ def write_receipt(directory: pathlib.Path, receipt: dict[str, object]) -> None:
     require(set(receipt) == RECEIPT_KEYS, "attended_browser_receipt_fields")
     require(receipt.get("schema_version") == 1, "attended_browser_receipt_invalid")
     require(receipt.get("value_returned") is False, "attended_browser_receipt_invalid")
+    require(
+        isinstance(receipt.get("session_id"), str)
+        and SESSION_ID.fullmatch(receipt["session_id"]) is not None,
+        "attended_browser_receipt_invalid",
+    )
+    require(
+        isinstance(receipt.get("started_at"), str)
+        and UTC_TIMESTAMP.fullmatch(receipt["started_at"]) is not None
+        and isinstance(receipt.get("finished_at"), str)
+        and UTC_TIMESTAMP.fullmatch(receipt["finished_at"]) is not None,
+        "attended_browser_receipt_invalid",
+    )
+    require(receipt.get("outcome") in OUTCOMES, "attended_browser_receipt_invalid")
+    require(
+        isinstance(receipt.get("build"), str)
+        and validate_build(receipt["build"]) == receipt["build"],
+        "attended_browser_receipt_invalid",
+    )
     ensure_private_directory(directory)
     receipt_path = directory / f"{receipt['session_id']}.json"
     require(
@@ -295,6 +317,9 @@ def run_session(
     except KeyboardInterrupt:
         outcome = "interrupted"
         raise SessionError("attended_browser_interrupted")
+    except OSError as error:
+        outcome = "browser_failed"
+        raise SessionError("attended_browser_failed") from error
     finally:
         if process is not None:
             terminate_owned(process)
