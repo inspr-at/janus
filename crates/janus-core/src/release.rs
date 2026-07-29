@@ -15,6 +15,8 @@ use crate::{
 
 const POLICY_SCHEMA_VERSION: u8 = 1;
 const RECEIPT_SCHEMA_VERSION: u8 = 1;
+const GO_TAG_PATTERN: &str = r"go-envelope-v[1-9][0-9]*\.[0-9]+";
+const RUST_TAG_PATTERN: &str = r"rust-engine-v[0-9]+\.[0-9]+\.[0-9]+";
 const MAX_SAFE_FIELD_BYTES: usize = 512;
 
 /// Runtime product mode relevant to release-channel enforcement.
@@ -143,6 +145,7 @@ impl ReleaseChannelPolicy {
                 || !safe_field(&channel.oidc_issuer)
                 || !safe_field(&channel.provenance_predicate_type)
                 || !safe_field(&channel.sbom_predicate_type)
+                || !valid_tag_contract(&channel.tag_prefix, &channel.tag_pattern)
             {
                 return invalid_policy();
             }
@@ -353,6 +356,13 @@ impl ReleaseAdmission {
         if receipt.artifact.development || development_tag(&receipt.artifact.tag) {
             return base.deny("release_development_artifact");
         }
+        if !valid_release_tag(
+            &channel.tag_prefix,
+            &channel.tag_pattern,
+            &receipt.artifact.tag,
+        ) {
+            return base.deny("release_channel_denied");
+        }
         if configured_digest != Some(receipt.artifact.digest.as_str()) {
             return base.deny("release_digest_mismatch");
         }
@@ -548,6 +558,31 @@ fn full_commit(value: &str) -> bool {
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }
 
+fn valid_tag_contract(prefix: &str, pattern: &str) -> bool {
+    matches!(
+        (prefix, pattern),
+        ("go-envelope-v", GO_TAG_PATTERN) | ("rust-engine-v", RUST_TAG_PATTERN)
+    )
+}
+
+fn valid_release_tag(prefix: &str, pattern: &str, tag: &str) -> bool {
+    let Some(version) = tag.strip_prefix(prefix) else {
+        return false;
+    };
+    let components = version.split('.').collect::<Vec<_>>();
+    let valid_number =
+        |value: &str| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit());
+    match (prefix, pattern, components.as_slice()) {
+        ("go-envelope-v", GO_TAG_PATTERN, [major, minor]) => {
+            valid_number(major) && !major.starts_with('0') && valid_number(minor)
+        }
+        ("rust-engine-v", RUST_TAG_PATTERN, [major, minor, patch]) => {
+            valid_number(major) && valid_number(minor) && valid_number(patch)
+        }
+        _ => false,
+    }
+}
+
 fn development_tag(tag: &str) -> bool {
     let tag = tag.to_ascii_lowercase();
     ["-dev", ".dev", "snapshot", "dirty"]
@@ -710,6 +745,11 @@ mod tests {
                 "release_development_artifact",
             ),
             (
+                vec![("/artifact/tag", r#""rust-engine-v0.1.6-preview""#)],
+                false,
+                "release_channel_denied",
+            ),
+            (
                 vec![("/artifact/tag", r#""rust-engine-v0.1.6-dev""#)],
                 false,
                 "release_development_artifact",
@@ -824,6 +864,11 @@ mod tests {
             r#""required_modes": ["enterprise", "enterprise"]"#,
         );
         assert!(ReleaseChannelPolicy::parse_json(&duplicate).is_err());
+        let unbounded_pattern = policy_json(false).replace(
+            r#""tag_pattern": "rust-engine-v[0-9]+\\.[0-9]+\\.[0-9]+""#,
+            r#""tag_pattern": "rust-engine-v.*""#,
+        );
+        assert!(ReleaseChannelPolicy::parse_json(&unbounded_pattern).is_err());
         let uppercase_digest = receipt_json(&[(
             "/artifact/digest",
             r#""sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA""#,
