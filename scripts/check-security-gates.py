@@ -79,6 +79,10 @@ def validate_workflows() -> None:
         require('steps.build.outputs.digest' in workflow, "release workflow does not scan exact digest")
         require("scripts/check-security-gates.py" in workflow, "scanner-policy gate is not wired")
     require("scripts/check-rust-audit.py" in rust and "0.22.2" in rust, "Rust audit gate is not wired")
+    require(
+        "python3 scripts/check-release-mode-receipts.py --self-test" in rust,
+        "Rust release CI does not test mode-specific receipts",
+    )
     require("staticcheck@v0.7.0" in go, "staticcheck pin is not wired")
     require("govulncheck@v1.6.0" in go, "govulncheck pin is not wired")
     require(
@@ -117,6 +121,10 @@ def validate_workflows() -> None:
     require(
         "python3 scripts/check-action-pins.py --self-test" in local,
         "local release-security gate does not enforce immutable GitHub Action pins",
+    )
+    require(
+        "python3 scripts/check-release-mode-receipts.py --self-test" in local,
+        "local release-security gate does not test mode-specific receipts",
     )
     require(
         "python3 scripts/smoke-warden-mcp.py --self-test" in security,

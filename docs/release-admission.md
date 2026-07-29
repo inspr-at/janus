@@ -17,7 +17,7 @@ repository changes and increment `policy_version` when their meaning changes.
 Admission runs outside the image being admitted:
 
 ```bash
-JANUS_ENGINE_RELEASE_TAG="rust-engine-v0.1.18" # replace with the reviewed release
+JANUS_ENGINE_RELEASE_TAG="rust-engine-v0.1.19" # replace with the reviewed release
 scripts/admit-engine-release.sh \
   --policy config/release-channels/v1.json \
   --channel stable \
@@ -41,6 +41,15 @@ receipt contains hashes and value-free counts, never attestation or scanner
 payloads.
 The deployment layer must supply the digest independently to the runtime; a
 receipt cannot authorize a different configured digest.
+
+Each Rust release attaches two independently admitted receipts for the same
+artifact and evidence. `rust-engine-admission.json` is the production receipt;
+`rust-engine-admission-enterprise.json` is the enterprise receipt. They differ
+only in `mode` and `previous_mode`, and release CI rejects any other drift
+before upload. Deploy exactly the receipt matching `JANUS_PRODUCT_MODE`.
+Relabelling an enterprise receipt for production is invalid; recovery reruns
+admission against the unchanged signed assets and exact digest for the required
+mode.
 
 The release also carries `source-release.json` and
 `source-release.sigstore.json`. The first deterministically binds the released
