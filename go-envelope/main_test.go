@@ -1401,7 +1401,9 @@ func TestAuthContinuationTargetIsExactAndSameOrigin(t *testing.T) {
 		{target: "/auth/smoke", kind: "login", want: true},
 		{target: "/managed-service/setup?intent=intent_0123456789abcdef", kind: "managed_login", want: true},
 		{target: "/managed-service/setup?intent=intent_0123456789abcdef", kind: "managed_step_up", want: true},
+		{target: "/managed-service/setup?intent=intent_0123456789abcdef", kind: "managed_step_up_retry", want: true},
 		{target: "/managed-service/setup?intent=intent_0123456789abcdef&next=/", kind: "managed_step_up", want: false},
+		{target: "/managed-service/setup?intent=intent_0123456789abcdef&next=/", kind: "managed_step_up_retry", want: false},
 		{target: "/managed-service/setup?intent=invalid", kind: "managed_step_up", want: false},
 		{target: "https://evil.example.test/", kind: "login", want: false},
 		{target: "//evil.example.test/", kind: "login", want: false},
@@ -1484,7 +1486,7 @@ func TestAuthResetClearsAllJanusCookiesAndRendersValueFreeRecovery(t *testing.T)
 
 	req := httptest.NewRequest(http.MethodGet, "/auth/reset", nil)
 	req.Header.Set("X-Request-Id", "auth-reset-123")
-	for _, name := range []string{hostSessionCookie, sessionCookie, hostStateCookie, stateCookie, hostNonceCookie, nonceCookie, hostPKCECookie, pkceCookie, hostReturnCookie, returnCookie, hostAttemptCookie, attemptCookie, hostStepUpFlowCookie, stepUpFlowCookie, hostStepUpProofCookie, stepUpProofCookie, hostManagedLoginCookie, managedLoginCookie, hostManagedDoneCookie, managedDoneCookie} {
+	for _, name := range []string{hostSessionCookie, sessionCookie, hostStateCookie, stateCookie, hostNonceCookie, nonceCookie, hostPKCECookie, pkceCookie, hostReturnCookie, returnCookie, hostAttemptCookie, attemptCookie, hostStepUpFlowCookie, stepUpFlowCookie, hostStepUpProofCookie, stepUpProofCookie, hostStepUpRetryCookie, stepUpRetryCookie, hostManagedLoginCookie, managedLoginCookie, hostManagedDoneCookie, managedDoneCookie} {
 		req.AddCookie(&http.Cookie{Name: name, Value: name + "-secret-cookie-secret"})
 	}
 	out := httptest.NewRecorder()
@@ -1512,7 +1514,7 @@ func TestAuthResetClearsAllJanusCookiesAndRendersValueFreeRecovery(t *testing.T)
 			t.Fatalf("auth reset clearing cookie should not carry a value: %#v", cookie)
 		}
 	}
-	for _, name := range []string{hostSessionCookie, sessionCookie, hostStateCookie, stateCookie, hostNonceCookie, nonceCookie, hostPKCECookie, pkceCookie, hostReturnCookie, returnCookie, hostAttemptCookie, attemptCookie, hostStepUpFlowCookie, stepUpFlowCookie, hostStepUpProofCookie, stepUpProofCookie, hostManagedLoginCookie, managedLoginCookie, hostManagedDoneCookie, managedDoneCookie} {
+	for _, name := range []string{hostSessionCookie, sessionCookie, hostStateCookie, stateCookie, hostNonceCookie, nonceCookie, hostPKCECookie, pkceCookie, hostReturnCookie, returnCookie, hostAttemptCookie, attemptCookie, hostStepUpFlowCookie, stepUpFlowCookie, hostStepUpProofCookie, stepUpProofCookie, hostStepUpRetryCookie, stepUpRetryCookie, hostManagedLoginCookie, managedLoginCookie, hostManagedDoneCookie, managedDoneCookie} {
 		if !cleared[name] {
 			t.Fatalf("expected auth reset to clear %s; cleared=%#v cookies=%#v", name, cleared, out.Result().Cookies())
 		}

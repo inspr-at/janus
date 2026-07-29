@@ -465,8 +465,11 @@ func TestManagedStepUpStartsFreshPasswordlessOIDCFlow(t *testing.T) {
 	}
 	cookies := response.Result().Cookies()
 	flowCookie := cookieByName(t, cookies, hostStepUpFlowCookie)
+	retryCookie := cookieByName(t, cookies, hostStepUpRetryCookie)
 	stateCookie := cookieByName(t, cookies, hostStateCookie)
 	if !flowCookie.HttpOnly || !flowCookie.Secure || flowCookie.SameSite != http.SameSiteLaxMode ||
+		!retryCookie.HttpOnly || !retryCookie.Secure || retryCookie.SameSite != http.SameSiteLaxMode ||
+		retryCookie.MaxAge != int(managedStepUpRetryTTL/time.Second) ||
 		stateCookie.Value == "" || authority.inspectCount != 1 {
 		t.Fatalf("step-up cookies or intent inspection are invalid: cookies=%#v inspect=%d", cookies, authority.inspectCount)
 	}
@@ -479,6 +482,202 @@ func TestManagedStepUpStartsFreshPasswordlessOIDCFlow(t *testing.T) {
 		flow.StateHash != managedStateHash(stateCookie.Value) ||
 		flow.HumanSessionRef != authority.intent.HumanSessionRef {
 		t.Fatalf("signed step-up flow is not bound: flow=%#v present=%v err=%v", flow, present, err)
+	}
+	callback.AddCookie(retryCookie)
+	retry, ok := app.readManagedStepUpRetry(callback)
+	if !ok ||
+		retry.IntentRef != managedTestIntentRef ||
+		retry.StateHash != managedStateHash(stateCookie.Value) {
+		t.Fatalf("step-up retry breadcrumb is not exactly bound: retry=%#v ok=%v", retry, ok)
+	}
+}
+
+func TestManagedStepUpExpiredOIDCStateReturnsToExactConfirm(t *testing.T) {
+	cases := []struct {
+		name    string
+		target  string
+		cookies []*http.Cookie
+	}{
+		{
+			name:   "provider cancellation",
+			target: "/oidc/callback?error=access_denied&state=expired",
+		},
+		{
+			name:   "state cookie expired",
+			target: "/oidc/callback?state=expired&code=unused",
+		},
+		{
+			name:   "nonce cookie expired",
+			target: "/oidc/callback?state=expired&code=unused",
+			cookies: []*http.Cookie{
+				{Name: hostStateCookie, Value: "expired"},
+			},
+		},
+		{
+			name:   "pkce cookie expired",
+			target: "/oidc/callback?state=expired&code=unused",
+			cookies: []*http.Cookie{
+				{Name: hostStateCookie, Value: "expired"},
+				{Name: hostNonceCookie, Value: "nonce"},
+			},
+		},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			app, _, executor, _, _, _ := managedIngressFixture(t, "generated")
+			app.verifier = &oidc.IDTokenVerifier{}
+			now := time.Now().UTC()
+			writer := httptest.NewRecorder()
+			app.writeManagedStepUpRetry(writer, managedStepUpRetry{
+				Schema:    managedStepUpRetryDomain,
+				IntentRef: managedTestIntentRef,
+				StateHash: managedStateHash("expired"),
+				IssuedAt:  now.Add(-7 * time.Minute).Unix(),
+				ExpiresAt: now.Add(8 * time.Minute).Unix(),
+			})
+			retryCookie := cookieByName(t, writer.Result().Cookies(), hostStepUpRetryCookie)
+			request := httptest.NewRequest(http.MethodGet, test.target, nil)
+			request.Header.Set("X-Request-Id", "managed-step-up-expired-state")
+			request.AddCookie(retryCookie)
+			for _, cookie := range test.cookies {
+				request.AddCookie(cookie)
+			}
+			response := httptest.NewRecorder()
+			app.routes().ServeHTTP(response, request)
+
+			wantTarget := "/managed-service/setup?intent=" + managedTestIntentRef
+			if response.Code != http.StatusOK ||
+				response.Header().Get("Refresh") != "0; url="+wantTarget ||
+				!strings.Contains(response.Body.String(), `href="`+wantTarget+`"`) ||
+				!strings.Contains(response.Body.String(), "Passkey check expired") ||
+				!strings.Contains(response.Body.String(), "Nothing changed.") ||
+				!strings.Contains(response.Body.String(), "value_returned=false") {
+				t.Fatalf(
+					"expired OIDC state did not recover to exact Confirm: status=%d refresh=%q body=%s",
+					response.Code,
+					response.Header().Get("Refresh"),
+					response.Body.String(),
+				)
+			}
+			if executor.count != 0 {
+				t.Fatalf("OIDC recovery must not execute a transaction: count=%d", executor.count)
+			}
+			retryCleared := false
+			for _, cookie := range response.Result().Cookies() {
+				if cookie.Name == hostSessionCookie && cookie.Value != "" ||
+					cookie.Name == hostStepUpProofCookie ||
+					cookie.Name == hostAttemptCookie {
+					t.Fatalf("OIDC recovery must not mint or revoke unrelated authority: %#v", cookie)
+				}
+				if cookie.Name == hostStepUpRetryCookie && cookie.MaxAge < 0 && cookie.Value == "" {
+					retryCleared = true
+				}
+			}
+			if !retryCleared {
+				t.Fatalf("OIDC recovery should consume its retry breadcrumb: %#v", response.Result().Cookies())
+			}
+			audit := app.store.RecentAudit(1)
+			if len(audit) != 1 ||
+				audit[0].Action != "managed_secret.step_up.recover" ||
+				audit[0].Outcome != "denied" {
+				t.Fatalf("expired recovery should remain a denied auth outcome: %#v", audit)
+			}
+		})
+	}
+}
+
+func TestManagedStepUpInvalidRetryCannotRecoverCallback(t *testing.T) {
+	app, _, executor, _, _, _ := managedIngressFixture(t, "generated")
+	app.verifier = &oidc.IDTokenVerifier{}
+	request := httptest.NewRequest(http.MethodGet, "/oidc/callback?state=expired&code=unused", nil)
+	request.AddCookie(&http.Cookie{Name: hostStepUpRetryCookie, Value: "tampered"})
+	response := httptest.NewRecorder()
+	app.routes().ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest ||
+		!strings.Contains(response.Body.String(), "login_restart_required") ||
+		strings.Contains(response.Body.String(), "Return to Confirm") ||
+		executor.count != 0 {
+		t.Fatalf("invalid retry breadcrumb must fail closed: status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestManagedStepUpRetryCannotCaptureUnrelatedLoginFailure(t *testing.T) {
+	app, _, executor, _, _, _ := managedIngressFixture(t, "generated")
+	app.verifier = &oidc.IDTokenVerifier{}
+	now := time.Now().UTC()
+	writer := httptest.NewRecorder()
+	app.writeManagedStepUpRetry(writer, managedStepUpRetry{
+		Schema:    managedStepUpRetryDomain,
+		IntentRef: managedTestIntentRef,
+		StateHash: managedStateHash("managed-state"),
+		IssuedAt:  now.Unix(),
+		ExpiresAt: now.Add(managedStepUpRetryTTL).Unix(),
+	})
+	request := httptest.NewRequest(http.MethodGet, "/oidc/callback?state=ordinary-login-state&code=unused", nil)
+	request.AddCookie(cookieByName(t, writer.Result().Cookies(), hostStepUpRetryCookie))
+	response := httptest.NewRecorder()
+	app.routes().ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest ||
+		!strings.Contains(response.Body.String(), "login_restart_required") ||
+		strings.Contains(response.Body.String(), "Return to Confirm") ||
+		executor.count != 0 {
+		t.Fatalf("unrelated callback must remain an ordinary denied login: status=%d body=%s", response.Code, response.Body.String())
+	}
+	audit := app.store.RecentAudit(1)
+	if len(audit) != 1 ||
+		audit[0].Action != "auth.login.callback" ||
+		audit[0].Outcome != "denied" ||
+		audit[0].Reason != "bad state" {
+		t.Fatalf("unrelated callback audit was misclassified: %#v", audit)
+	}
+}
+
+func TestManagedStepUpRetryRejectsInvalidPayloads(t *testing.T) {
+	app, _, _, _, _, _ := managedIngressFixture(t, "generated")
+	now := time.Now().UTC()
+	valid := managedStepUpRetry{
+		Schema:    managedStepUpRetryDomain,
+		IntentRef: managedTestIntentRef,
+		StateHash: managedStateHash("managed-state"),
+		IssuedAt:  now.Unix(),
+		ExpiresAt: now.Add(managedStepUpRetryTTL).Unix(),
+	}
+	cases := []struct {
+		name   string
+		mutate func(*managedStepUpRetry)
+	}{
+		{name: "wrong schema", mutate: func(retry *managedStepUpRetry) {
+			retry.Schema = "other"
+		}},
+		{name: "malformed intent", mutate: func(retry *managedStepUpRetry) {
+			retry.IntentRef = "intent_../other"
+		}},
+		{name: "malformed state hash", mutate: func(retry *managedStepUpRetry) {
+			retry.StateHash = "not-a-hash"
+		}},
+		{name: "issued in future", mutate: func(retry *managedStepUpRetry) {
+			retry.IssuedAt = now.Add(managedStepUpClockSkew + time.Second).Unix()
+		}},
+		{name: "expired", mutate: func(retry *managedStepUpRetry) {
+			retry.IssuedAt = now.Add(-managedStepUpRetryTTL - time.Minute).Unix()
+			retry.ExpiresAt = now.Add(-time.Minute).Unix()
+		}},
+		{name: "ttl over ceiling", mutate: func(retry *managedStepUpRetry) {
+			retry.ExpiresAt = now.Add(managedStepUpRetryTTL + time.Second).Unix()
+		}},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			retry := valid
+			test.mutate(&retry)
+			writer := httptest.NewRecorder()
+			app.writeManagedStepUpRetry(writer, retry)
+			request := httptest.NewRequest(http.MethodGet, "/oidc/callback", nil)
+			request.AddCookie(cookieByName(t, writer.Result().Cookies(), hostStepUpRetryCookie))
+			if got, ok := app.readManagedStepUpRetry(request); ok {
+				t.Fatalf("invalid retry payload was accepted: %#v", got)
+			}
+		})
 	}
 }
 
@@ -568,6 +767,15 @@ func TestManagedStepUpCompletionBindsSubjectStateRoleAndFreshAssertion(t *testin
 	if !proofCookie.HttpOnly || !proofCookie.Secure || proofCookie.SameSite != http.SameSiteStrictMode {
 		t.Fatalf("step-up proof cookie must be host-prefixed, secure, httponly, strict: %#v", proofCookie)
 	}
+	retryCleared := false
+	for _, cookie := range response.Result().Cookies() {
+		if cookie.Name == hostStepUpRetryCookie && cookie.MaxAge < 0 && cookie.Value == "" {
+			retryCleared = true
+		}
+	}
+	if !retryCleared {
+		t.Fatalf("successful step-up should clear the retry breadcrumb: %#v", response.Result().Cookies())
+	}
 
 	response = httptest.NewRecorder()
 	if app.completeManagedStepUpCallback(response, request, session, flow, state, now.Unix(), []string{"pwd", "user", "mfa"}) {
@@ -576,10 +784,17 @@ func TestManagedStepUpCompletionBindsSubjectStateRoleAndFreshAssertion(t *testin
 	if response.Code != http.StatusForbidden {
 		t.Fatalf("invalid assertion should fail closed, got %d", response.Code)
 	}
+	retryCleared = false
 	for _, cookie := range response.Result().Cookies() {
 		if cookie.Name == hostStepUpProofCookie && cookie.Value != "" {
 			t.Fatalf("denied step-up must not mint proof: %#v", cookie)
 		}
+		if cookie.Name == hostStepUpRetryCookie && cookie.MaxAge < 0 && cookie.Value == "" {
+			retryCleared = true
+		}
+	}
+	if !retryCleared {
+		t.Fatalf("denied step-up should clear the retry breadcrumb: %#v", response.Result().Cookies())
 	}
 
 	deniedSession := session

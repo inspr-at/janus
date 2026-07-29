@@ -1193,6 +1193,7 @@ form.managed-action-form .managed-source-choice {
   background: var(--teal-soft);
   box-shadow: 0 0 0 1px var(--teal);
 }
+.managed-source-choice:has(input:checked) small { color: var(--ink); }
 .managed-source-choice:has(input:focus-visible) {
   outline: 3px solid color-mix(in srgb, var(--teal) 35%, transparent);
   outline-offset: 2px;

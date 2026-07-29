@@ -23,11 +23,13 @@ import (
 const (
 	managedStepUpFlowTTL       = 5 * time.Minute
 	managedStepUpProofTTL      = 5 * time.Minute
+	managedStepUpRetryTTL      = 15 * time.Minute
 	managedCompletionTTL       = 10 * time.Minute
 	managedStepUpClockSkew     = 30 * time.Second
 	managedFormPrefixMaxBytes  = 384
 	managedStepUpFlowDomain    = "inspr.janus.managed-step-up-flow.v1"
 	managedStepUpProofDomain   = "inspr.janus.managed-step-up-proof.v1"
+	managedStepUpRetryDomain   = "inspr.janus.managed-step-up-retry.v1"
 	managedLoginIntentDomain   = "inspr.janus.managed-login-intent.v1"
 	managedCompletionDomain    = "inspr.janus.managed-completion.v1"
 	managedSecretFormMediaType = "application/x-www-form-urlencoded"
@@ -51,6 +53,14 @@ type managedStepUpProof struct {
 	HumanSessionRef string `json:"human_session_ref"`
 	AuthenticatedAt int64  `json:"authenticated_at"`
 	ExpiresAt       int64  `json:"expires_at"`
+}
+
+type managedStepUpRetry struct {
+	Schema    string `json:"schema"`
+	IntentRef string `json:"intent_ref"`
+	StateHash string `json:"state_hash"`
+	IssuedAt  int64  `json:"issued_at"`
+	ExpiresAt int64  `json:"expires_at"`
 }
 
 type managedLoginIntent struct {
@@ -276,6 +286,13 @@ func (app *App) handleManagedSetupStepUp(w http.ResponseWriter, r *http.Request)
 	}
 	app.clearManagedStepUpProofCookies(w)
 	app.writeManagedStepUpFlow(w, flow)
+	app.writeManagedStepUpRetry(w, managedStepUpRetry{
+		Schema:    managedStepUpRetryDomain,
+		IntentRef: intentRef,
+		StateHash: flow.StateHash,
+		IssuedAt:  now.Unix(),
+		ExpiresAt: now.Add(managedStepUpRetryTTL).Unix(),
+	})
 	app.writeOIDCEphemeralCookie(w, app.cfg.StateCookieName(), state)
 	app.writeOIDCEphemeralCookie(w, app.cfg.NonceCookieName(), nonce)
 	app.writeOIDCEphemeralCookie(w, app.cfg.PKCECookieName(), verifier)
@@ -752,6 +769,10 @@ func (app *App) writeManagedStepUpProof(w http.ResponseWriter, proof managedStep
 	app.writeManagedSignedCookie(w, app.cfg.StepUpProofCookieName(), managedStepUpProofDomain, proof, http.SameSiteStrictMode, managedStepUpProofTTL)
 }
 
+func (app *App) writeManagedStepUpRetry(w http.ResponseWriter, retry managedStepUpRetry) {
+	app.writeManagedSignedCookie(w, app.cfg.StepUpRetryCookieName(), managedStepUpRetryDomain, retry, http.SameSiteLaxMode, managedStepUpRetryTTL)
+}
+
 func (app *App) writeManagedLoginIntent(w http.ResponseWriter, intentRef string) {
 	if !validManagedRef("intent_", intentRef) {
 		return
@@ -839,6 +860,22 @@ func (app *App) readManagedStepUpProof(r *http.Request) (managedStepUpProof, boo
 	return proof, true
 }
 
+func (app *App) readManagedStepUpRetry(r *http.Request) (managedStepUpRetry, bool) {
+	cookie, err := firstCookie(r, app.cfg.StepUpRetryCookieName(), stepUpRetryCookie)
+	if err != nil {
+		return managedStepUpRetry{}, false
+	}
+	var retry managedStepUpRetry
+	if !app.decodeManagedSignedCookie(cookie.Value, managedStepUpRetryDomain, &retry) ||
+		retry.Schema != managedStepUpRetryDomain ||
+		!validManagedRef("intent_", retry.IntentRef) ||
+		!isLowerHexString(retry.StateHash, sha256.Size*2) ||
+		!validManagedStepUpTimes(retry.IssuedAt, retry.ExpiresAt, managedStepUpRetryTTL, time.Now().UTC()) {
+		return managedStepUpRetry{}, false
+	}
+	return retry, true
+}
+
 func (app *App) readManagedLoginIntent(r *http.Request) (string, bool) {
 	cookie, err := firstCookie(r, app.cfg.ManagedLoginCookieName(), managedLoginCookie)
 	if err != nil {
@@ -919,6 +956,30 @@ func validManagedPasswordlessAssertion(authTime int64, amr []string, now time.Ti
 	return seen["user"] && seen["mfa"]
 }
 
+func (app *App) recoverManagedStepUpCallback(
+	w http.ResponseWriter,
+	r *http.Request,
+	retry managedStepUpRetry,
+	ok bool,
+	reason string,
+) bool {
+	callbackState := r.URL.Query().Get("state")
+	if !ok || callbackState == "" || retry.StateHash != managedStateHash(callbackState) {
+		return false
+	}
+	app.clearOIDCLoginCookies(w)
+	app.clearManagedStepUpRetryCookies(w)
+	app.clearManagedLoginIntentCookies(w)
+	app.audit(r, "managed_secret.step_up.recover", "denied", "", reason)
+	app.renderAuthContinuation(
+		w,
+		r,
+		"/managed-service/setup?intent="+url.QueryEscape(retry.IntentRef),
+		"managed_step_up_retry",
+	)
+	return true
+}
+
 func (app *App) completeManagedStepUpCallback(
 	w http.ResponseWriter,
 	r *http.Request,
@@ -936,6 +997,7 @@ func (app *App) completeManagedStepUpCallback(
 		!SessionHasPermission(session, PermissionLifecycleEntry) {
 		app.clearOIDCLoginCookies(w)
 		app.clearManagedStepUpProofCookies(w)
+		app.clearManagedStepUpRetryCookies(w)
 		app.audit(r, "managed_secret.step_up.complete", "denied", session.Subject, "passwordless assertion denied")
 		app.renderAuthError(w, r, http.StatusForbidden, "passwordless_step_up_failed", "A fresh passwordless passkey confirmation is required for this secret change.")
 		return false
@@ -951,6 +1013,7 @@ func (app *App) completeManagedStepUpCallback(
 	app.writeSession(w, session)
 	app.writeManagedStepUpProof(w, proof)
 	app.clearOIDCLoginCookies(w)
+	app.clearManagedStepUpRetryCookies(w)
 	app.clearOIDCLoginAttemptCookie(w)
 	app.clearManagedLoginIntentCookies(w)
 	app.audit(r, "managed_secret.step_up.complete", "allowed", session.Subject, "fresh passwordless assertion accepted")
@@ -977,9 +1040,17 @@ func (app *App) clearManagedStepUpProofCookies(w http.ResponseWriter) {
 	}
 }
 
+func (app *App) clearManagedStepUpRetryCookies(w http.ResponseWriter) {
+	app.clearCookie(w, app.cfg.StepUpRetryCookieName())
+	if app.cfg.StepUpRetryCookieName() != stepUpRetryCookie {
+		app.clearCookie(w, stepUpRetryCookie)
+	}
+}
+
 func (app *App) clearManagedStepUpCookies(w http.ResponseWriter) {
 	app.clearManagedStepUpFlowCookies(w)
 	app.clearManagedStepUpProofCookies(w)
+	app.clearManagedStepUpRetryCookies(w)
 }
 
 func (app *App) clearManagedLoginIntentCookies(w http.ResponseWriter) {

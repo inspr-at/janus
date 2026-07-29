@@ -325,6 +325,8 @@ func (harness *managedBrowserHarness) ServeHTTP(response http.ResponseWriter, re
 		harness.session(response, request)
 	case "/__managed-browser/expired":
 		harness.expired(response, request)
+	case "/__managed-browser/expired-oidc":
+		harness.expiredOIDC(response, request)
 	case "/__managed-browser/authorize":
 		harness.authorize(response, request)
 	case "/__managed-browser/token":
@@ -377,6 +379,30 @@ func (harness *managedBrowserHarness) expired(response http.ResponseWriter, requ
 		response,
 		request,
 		"/managed-service/setup?intent="+url.QueryEscape(managedTestIntentRef),
+		http.StatusFound,
+	)
+}
+
+func (harness *managedBrowserHarness) expiredOIDC(response http.ResponseWriter, request *http.Request) {
+	if !harness.authority.reset(managedTestIntentRef) {
+		http.Error(response, "fixture unavailable", http.StatusBadRequest)
+		return
+	}
+	harness.executor.reset()
+	harness.writeSession(response)
+	now := time.Now().UTC()
+	harness.app.writeManagedStepUpRetry(response, managedStepUpRetry{
+		Schema:    managedStepUpRetryDomain,
+		IntentRef: managedTestIntentRef,
+		StateHash: managedStateHash("expired"),
+		IssuedAt:  now.Add(-7 * time.Minute).Unix(),
+		ExpiresAt: now.Add(8 * time.Minute).Unix(),
+	})
+	response.Header().Set("Cache-Control", "no-store")
+	http.Redirect(
+		response,
+		request,
+		"/oidc/callback?state=expired&code=unused",
 		http.StatusFound,
 	)
 }
