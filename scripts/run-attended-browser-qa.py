@@ -30,7 +30,8 @@ NIX_CHROME = re.compile(r"/nix/store/[0-9a-z]{32}-[^/]+/bin/(?:chromium|google-c
 BUILD = re.compile(r"[0-9a-f]{7,40}")
 SESSION_ID = re.compile(r"browser_[0-9a-f]{16}")
 UTC_TIMESTAMP = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
-OUTCOMES = {"closed", "browser_failed", "timeout", "interrupted"}
+EXISTING_PROFILE_DIRECTORY = re.compile(r"Profile [1-9][0-9]{0,2}")
+OUTCOMES = {"closed", "browser_failed", "timeout", "interrupted", "opened"}
 RECEIPT_KEYS = {
     "schema_version",
     "session_id",
@@ -106,6 +107,25 @@ def validate_profile(value: str) -> pathlib.Path:
     for lock in ("SingletonCookie", "SingletonLock", "SingletonSocket"):
         require(not (resolved / lock).exists(), "attended_browser_profile_in_use")
     return resolved
+
+
+def validate_existing_profile_directory(value: str) -> str:
+    require(
+        EXISTING_PROFILE_DIRECTORY.fullmatch(value) is not None,
+        "attended_browser_existing_profile_denied",
+    )
+    return value
+
+
+def select_profile_mode(
+    isolated_profile: str | None,
+    existing_profile_directory: str | None,
+) -> str:
+    require(
+        bool(isolated_profile) != bool(existing_profile_directory),
+        "attended_browser_profile_mode_denied",
+    )
+    return "isolated" if isolated_profile else "existing"
 
 
 def validate_build(value: str) -> str:
@@ -217,6 +237,40 @@ def self_test() -> None:
             continue
         raise SessionError("attended_browser_profile_fixture")
 
+    require(
+        validate_existing_profile_directory("Profile 2") == "Profile 2",
+        "attended_browser_existing_profile_fixture",
+    )
+    for denied in (
+        "",
+        "Default",
+        "Profile 0",
+        "Profile 01",
+        "Profile 2/Default",
+        "../Profile 2",
+        "Markus-Debug",
+        "Profile 2\n--remote-debugging-port=9222",
+    ):
+        try:
+            validate_existing_profile_directory(denied)
+        except SessionError:
+            continue
+        raise SessionError("attended_browser_existing_profile_fixture")
+    for isolated, existing in (
+        (None, None),
+        ("/tmp/Janus QA Browser", "Profile 2"),
+    ):
+        try:
+            select_profile_mode(isolated, existing)
+        except SessionError:
+            continue
+        raise SessionError("attended_browser_profile_mode_fixture")
+    require(
+        select_profile_mode("/tmp/Janus QA Browser", None) == "isolated"
+        and select_profile_mode(None, "Profile 2") == "existing",
+        "attended_browser_profile_mode_fixture",
+    )
+
     for denied in ("", "main", "ABCDEF1", "abcdef", "abcdefg/unsafe"):
         try:
             validate_build(denied)
@@ -250,6 +304,14 @@ def self_test() -> None:
         write_receipt(root, receipt)
         stored = json.loads((root / "browser_0123456789abcdef.json").read_text())
         require(stored == receipt, "attended_browser_receipt_fixture")
+        opened = dict(receipt)
+        opened["session_id"] = "browser_abcdef0123456789"
+        opened["outcome"] = "opened"
+        write_receipt(root, opened)
+        stored_opened = json.loads(
+            (root / "browser_abcdef0123456789.json").read_text()
+        )
+        require(stored_opened == opened, "attended_browser_receipt_fixture")
 
 
 def run_session(
@@ -345,11 +407,61 @@ def run_session(
         )
 
 
+def open_existing_profile(
+    chrome: pathlib.Path,
+    profile_directory: str,
+    origin: str,
+    build: str,
+) -> None:
+    require(sys.platform == "darwin", "attended_browser_existing_profile_unsupported")
+    require(chrome == MAC_CHROME, "attended_browser_existing_profile_unsupported")
+    profile_directory = validate_existing_profile_directory(profile_directory)
+    session_id = f"browser_{uuid.uuid4().hex[:16]}"
+    started = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0)
+    try:
+        subprocess.run(
+            [
+                "/usr/bin/open",
+                "-a",
+                "Google Chrome",
+                "--args",
+                f"--profile-directory={profile_directory}",
+                "--new-window",
+                origin,
+            ],
+            check=True,
+            timeout=15,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise SessionError("attended_browser_existing_profile_failed") from error
+    finished = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0)
+    write_receipt(
+        receipt_root(),
+        {
+            "schema_version": 1,
+            "session_id": session_id,
+            "started_at": started.isoformat().replace("+00:00", "Z"),
+            "finished_at": finished.isoformat().replace("+00:00", "Z"),
+            "outcome": "opened",
+            "build": build,
+            "value_returned": False,
+        },
+    )
+    print(
+        "attended_browser_qa="
+        f"opened session_id={session_id} value_returned=false"
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--chrome", default=str(MAC_CHROME))
     parser.add_argument("--profile-dir")
+    parser.add_argument("--existing-profile-directory")
     parser.add_argument("--origin", choices=sorted(ALLOWED_ORIGINS))
     parser.add_argument("--build")
     parser.add_argument("--timeout-seconds", type=int, default=3600)
@@ -358,20 +470,34 @@ def main() -> int:
         if args.self_test:
             self_test()
         else:
+            mode = select_profile_mode(
+                args.profile_dir,
+                args.existing_profile_directory,
+            )
             require(
-                bool(args.profile_dir)
-                and bool(args.origin)
+                bool(args.origin)
                 and bool(args.build)
                 and 1 <= args.timeout_seconds <= 14400,
                 "attended_browser_invalid_arguments",
             )
-            run_session(
-                validate_chrome(args.chrome),
-                validate_profile(args.profile_dir),
-                validate_origin(args.origin),
-                validate_build(args.build),
-                args.timeout_seconds,
-            )
+            chrome = validate_chrome(args.chrome)
+            origin = validate_origin(args.origin)
+            build = validate_build(args.build)
+            if mode == "isolated":
+                run_session(
+                    chrome,
+                    validate_profile(args.profile_dir),
+                    origin,
+                    build,
+                    args.timeout_seconds,
+                )
+            else:
+                open_existing_profile(
+                    chrome,
+                    args.existing_profile_directory,
+                    origin,
+                    build,
+                )
     except (OSError, SessionError) as error:
         print(
             f"attended_browser_qa=blocked reason={error} value_returned=false",
