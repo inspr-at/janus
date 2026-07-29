@@ -66,7 +66,12 @@ def require_closed_receipt(receipt: dict[str, Any]) -> None:
     for field, keys in NESTED_KEYS.items():
         value = receipt.get(field)
         require(isinstance(value, dict) and set(value) == keys, f"{field}_shape")
-    require(receipt.get("schema_version") == 1, "schema_version")
+    require(
+        isinstance(receipt.get("schema_version"), int)
+        and not isinstance(receipt["schema_version"], bool)
+        and receipt["schema_version"] == 1,
+        "schema_version",
+    )
     require(
         isinstance(receipt.get("policy_id"), str) and bool(receipt["policy_id"]),
         "policy_id",
@@ -128,7 +133,13 @@ def require_closed_receipt(receipt: dict[str, Any]) -> None:
         and SHA256.fullmatch(scanner["summary_sha256"]) is not None,
         "scanner_summary",
     )
-    require(scanner["critical"] == 0 and scanner["high"] == 0, "scanner_findings")
+    for field in ("critical", "high"):
+        require(
+            isinstance(scanner[field], int)
+            and not isinstance(scanner[field], bool)
+            and scanner[field] == 0,
+            "scanner_findings",
+        )
 
 
 def validate_pair(
@@ -229,6 +240,11 @@ def self_test() -> None:
             lambda value: value["scanner"].__setitem__("subject", "mismatch"),
         ),
         ("scanner_findings", lambda value: value["scanner"].__setitem__("high", 1)),
+        (
+            "boolean_scanner_count",
+            lambda value: value["scanner"].__setitem__("high", False),
+        ),
+        ("boolean_schema", lambda value: value.__setitem__("schema_version", True)),
         ("unexpected_field", lambda value: value.__setitem__("unexpected", True)),
     )
     for name, mutate in mutations:
