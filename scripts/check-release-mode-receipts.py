@@ -184,7 +184,7 @@ def fixture(mode: str) -> dict[str, Any]:
         "previous_mode": mode,
         "artifact": {
             "image": "ghcr.io/inspr-at/janus/janus-engine",
-            "tag": "rust-engine-v0.1.19",
+            "tag": "rust-engine-v0.1.20",
             "digest": digest,
             "development": False,
         },
@@ -197,7 +197,7 @@ def fixture(mode: str) -> dict[str, Any]:
             "verified": True,
             "repository": "inspr-at/janus",
             "signer_workflow": "inspr-at/janus/.github/workflows/rust.yml",
-            "source_ref": "refs/tags/rust-engine-v0.1.19",
+            "source_ref": "refs/tags/rust-engine-v0.1.20",
             "predicate_type": "https://slsa.dev/provenance/v1",
         },
         "sbom": {

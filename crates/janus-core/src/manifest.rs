@@ -1,6 +1,6 @@
 //! Manifest-derived allowlist catalog.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::path::Path;
 
@@ -63,6 +63,17 @@ pub fn load_secretspec_manifest_catalog(
     parse_secretspec_manifest_catalog(&content, profile, scope, metadata)
 }
 
+/// Load every valid secret name declared by any reviewed Secretspec profile.
+pub fn load_secretspec_manifest_secret_names(
+    path: impl AsRef<Path>,
+) -> JanusResult<BTreeSet<SecretName>> {
+    let content = fs::read_to_string(path).map_err(|err| JanusError::StoreUnavailable {
+        detail: format!("secretspec manifest could not be read: {}", err.kind()),
+    })?;
+    let parsed = parse_secretspec_manifest(&content)?;
+    secretspec_manifest_secret_names(&parsed)
+}
+
 fn parse_secretspec_manifest_catalog(
     content: &str,
     profile: &str,
@@ -74,19 +85,8 @@ fn parse_secretspec_manifest_catalog(
             detail: "secretspec profile is invalid".to_string(),
         });
     }
-    let parsed: SecretspecManifestToml =
-        toml::from_str(content).map_err(|_| JanusError::InvalidManifest {
-            detail: "secretspec manifest schema is invalid".to_string(),
-        })?;
-    if parsed.project.name.is_empty()
-        || parsed.project.name.trim() != parsed.project.name
-        || parsed.project.revision.is_empty()
-        || parsed.project.revision.trim() != parsed.project.revision
-    {
-        return Err(JanusError::InvalidManifest {
-            detail: "secretspec project identity is invalid".to_string(),
-        });
-    }
+    let parsed = parse_secretspec_manifest(content)?;
+    let manifest_names = secretspec_manifest_secret_names(&parsed)?;
     let profile = parsed
         .profiles
         .get(profile)
@@ -125,9 +125,37 @@ fn parse_secretspec_manifest_catalog(
         });
     }
     if let Some(metadata) = metadata {
-        metadata.apply_to_entries(&mut entries)?;
+        metadata.apply_to_entries_with_manifest_names(&mut entries, &manifest_names)?;
     }
     Ok((project, ManifestCatalog::new(entries)?))
+}
+
+fn parse_secretspec_manifest(content: &str) -> JanusResult<SecretspecManifestToml> {
+    let parsed: SecretspecManifestToml =
+        toml::from_str(content).map_err(|_| JanusError::InvalidManifest {
+            detail: "secretspec manifest schema is invalid".to_string(),
+        })?;
+    if parsed.project.name.is_empty()
+        || parsed.project.name.trim() != parsed.project.name
+        || parsed.project.revision.is_empty()
+        || parsed.project.revision.trim() != parsed.project.revision
+    {
+        return Err(JanusError::InvalidManifest {
+            detail: "secretspec project identity is invalid".to_string(),
+        });
+    }
+    Ok(parsed)
+}
+
+fn secretspec_manifest_secret_names(
+    manifest: &SecretspecManifestToml,
+) -> JanusResult<BTreeSet<SecretName>> {
+    manifest
+        .profiles
+        .values()
+        .flat_map(|profile| profile.secrets.keys())
+        .map(|name| SecretName::new(name.clone()))
+        .collect()
 }
 
 /// Manifest allowlist with stable name-to-ref mapping.
@@ -280,5 +308,68 @@ mod tests {
                 .unwrap_err();
             assert!(matches!(err, JanusError::InvalidManifest { .. }));
         }
+    }
+
+    #[test]
+    fn overlay_is_validated_globally_but_applied_only_to_selected_profile() {
+        let scope = crate::test_scope("dev");
+        let overlay = SecretMetadataOverlay::parse_toml(
+            r#"
+            [[secrets]]
+            name = "PRODUCTION_ONLY"
+            lifecycle = "disabled"
+            "#,
+        )
+        .unwrap();
+        let (_, catalog) = parse_secretspec_manifest_catalog(
+            r#"
+            [project]
+            name = "janus"
+            revision = "1.0"
+
+            [profiles.default]
+            DEFAULT_ONLY = { description = "Default fixture" }
+
+            [profiles.production]
+            PRODUCTION_ONLY = { description = "Production fixture" }
+            "#,
+            "default",
+            &scope,
+            Some(&overlay),
+        )
+        .unwrap();
+
+        assert_eq!(catalog.entries().len(), 1);
+        assert_eq!(catalog.entries()[0].name.as_str(), "DEFAULT_ONLY");
+        assert_eq!(catalog.entries()[0].lifecycle, SecretLifecycle::Active);
+    }
+
+    #[test]
+    fn overlay_name_absent_from_every_profile_is_rejected() {
+        let scope = crate::test_scope("dev");
+        let overlay = SecretMetadataOverlay::parse_toml(
+            r#"
+            [[secrets]]
+            name = "REMOVED"
+            lifecycle = "destroyed"
+            "#,
+        )
+        .unwrap();
+        let error = parse_secretspec_manifest_catalog(
+            r#"
+            [project]
+            name = "janus"
+            revision = "1.0"
+
+            [profiles.default]
+            CANARY = { description = "Canary" }
+            "#,
+            "default",
+            &scope,
+            Some(&overlay),
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, JanusError::InvalidManifest { .. }));
     }
 }

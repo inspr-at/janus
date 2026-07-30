@@ -72,6 +72,7 @@ assert_wrong_plane "use to migration" "${use_bin}" migrate status --manifest "${
 assert_wrong_plane "use to scope transfer" "${use_bin}" scope-transfer status --manifest "${canary}"
 assert_wrong_plane "use to Pharos retire" "${use_bin}" pharos-beacon retire "${canary}"
 assert_wrong_plane "use to Pharos reconcile" "${use_bin}" pharos-beacon reconcile "${canary}"
+assert_wrong_plane "use to Pharos metadata detach" "${use_bin}" pharos-beacon detach-metadata "${canary}"
 
 # Every permit-consuming command family is denied by the admin process.
 assert_wrong_plane "admin to run preflight" "${admin_bin}" run preflight "${canary}"
@@ -84,7 +85,7 @@ assert_wrong_plane "legacy to use" "${legacy_bin}" run "${canary}"
 assert_wrong_plane "legacy to admin" "${legacy_bin}" approve list
 
 audit_count="$(grep -c '"action":"runtime.plane"' "${JANUS_RUNTIME_AUDIT_FILE}")"
-[ "${audit_count}" = "22" ] || fail "runtime-plane audit did not record every denial"
+[ "${audit_count}" = "23" ] || fail "runtime-plane audit did not record every denial"
 if grep -F "${canary}" "${JANUS_RUNTIME_AUDIT_FILE}" >/dev/null 2>&1; then
   fail "runtime-plane audit contained caller input"
 fi

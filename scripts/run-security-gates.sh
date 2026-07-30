@@ -33,7 +33,7 @@ if [[ -n "${JANUS_SECURITY_IMAGE:-}" ]]; then
   python3 scripts/check-security-gates.py \
     --trivy-report "${report}" \
     --summary "${summary}" \
-    --subject "${image}"
+    --subject "${JANUS_SECURITY_IMAGE}"
 fi
 
 echo "ok: local release-security parity gates passed"

@@ -155,6 +155,35 @@ Expected final row:
 janusd-admin lifecycle destroy-reconcile secret_ref=sec_example status=ok reason_code=destroy_tombstone_reconcile_ok action_required=false action=none metadata_lifecycle=destroyed tombstone=present value_returned=false provider_deleted=false
 ```
 
+6. For a completed Pharos beacon retirement, remove the secret declaration and
+detach its destroyed overlay row.
+
+First land the reviewed Secretspec change that removes the retired secret name
+from every profile. Keep the Pharos retirement intent, state record, profile
+binding, and tombstone as durable evidence. Then run:
+
+```bash
+janusd-admin pharos-beacon detach-metadata \
+  --host "$HOST" \
+  --disposition "$DISPOSITION" \
+  --intent-file "$RETIREMENT_INTENT_FILE" \
+  --metadata-file "$METADATA_FILE" \
+  --profile-manifest "$PROFILE_MANIFEST" \
+  --state-dir "$RETIREMENT_STATE_DIR"
+```
+
+Expected shape:
+
+```text
+janusd-admin pharos-beacon detach-metadata host=ares state=complete reason_code=pharos_beacon_metadata_detached metadata_detached=true value_returned=false provider_deleted=false
+```
+
+Replay is safe and reports `metadata_detached=false`. Janus refuses to detach
+when the retirement is incomplete, the exact tombstone is missing, the secret
+still appears in any manifest profile, the metadata row is not explicitly
+`destroyed`, or any other overlay row is stale. Unrelated profile metadata is
+preserved.
+
 ## Reconcile results
 
 | Status | Reason code | Action |
@@ -176,6 +205,12 @@ over drift by deleting evidence just to make the report quiet.
 - `destroy-record` requires current metadata lifecycle `pending_delete`.
 - `destroy-finalize` requires both a tombstone and current metadata lifecycle
   `pending_delete`, unless metadata is already finalized as `destroyed`.
+- Shared metadata overlays are validated against all reviewed Secretspec
+  profiles, while only the selected profile's patches are applied at runtime.
+- Remove a retired manifest declaration only after retirement reaches
+  `complete`; then use `pharos-beacon detach-metadata` to remove the exact
+  destroyed overlay row. Reversing this order intentionally blocks runtime
+  loading until the evidence-gated detach succeeds.
 - If a command fails while writing metadata, inspect the metadata overlay before
   rerunning; Janus writes the overlay atomically, so the file should be either
   old or new rather than partially written.

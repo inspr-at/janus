@@ -12,10 +12,10 @@ agents - without making raw credentials part of prompts, command arguments,
 logs, or application code.
 
 [![License: AGPL-3.0-only](https://img.shields.io/badge/license-AGPL--3.0--only-1f7a72.svg)](LICENSE)
-[![Rust engine](https://img.shields.io/badge/Rust_engine-v0.1.19-cb7c28.svg)](https://github.com/inspr-at/janus/releases/tag/rust-engine-v0.1.19)
+[![Rust engine](https://img.shields.io/badge/Rust_engine-v0.1.20-cb7c28.svg)](https://github.com/inspr-at/janus/releases/tag/rust-engine-v0.1.20)
 
 [Product site](https://janus.inspr.at) ·
-[Rust engine v0.1.19](https://github.com/inspr-at/janus/releases/tag/rust-engine-v0.1.19) ·
+[Rust engine v0.1.20](https://github.com/inspr-at/janus/releases/tag/rust-engine-v0.1.20) ·
 [INSPR](https://www.inspr.at)
 
 ## What Janus does
@@ -75,7 +75,7 @@ Janus has two layers with different histories:
 
 | Layer | Role | Language | Status |
 |---|---|---|---|
-| **Rust engine** | Secret store contracts, Warden, permits, approved-use execution, rotation, lifecycle, and operator CLI | Rust | Active and released. Current tag: `rust-engine-v0.1.19`. |
+| **Rust engine** | Secret store contracts, Warden, permits, approved-use execution, rotation, lifecycle, and operator CLI | Rust | Active and released. Current tag: `rust-engine-v0.1.20`. |
 | **Go envelope** | Existing governance, audit, evidence, and oversight surface | Go | Shipped, operational, and transitional. New core capability work lands in Rust. |
 
 The Rust engine is no longer a skeleton. Core execution paths ship with unit,
@@ -439,6 +439,25 @@ janusd-admin pharos-beacon retire \
 Use `janusd-admin pharos-beacon reconcile` with the same host, disposition, intent,
 metadata, profile-manifest, and state-directory controls to inspect interrupted
 or drifted retirements without reading secret material.
+
+After reconcile reports `state=complete`, remove the retired secret from every
+Secretspec profile in a reviewed manifest change. Then detach only its destroyed
+metadata row:
+
+```bash
+janusd-admin pharos-beacon detach-metadata \
+  --host ares \
+  --disposition destroyed \
+  --intent-file /etc/janus/pharos-retirement.toml \
+  --metadata-file /etc/janus/metadata.toml \
+  --profile-manifest /etc/janus/approved-use.toml \
+  --state-dir /var/lib/janus/pharos-retirements
+```
+
+Detachment fails closed unless the exact retirement is complete, its tombstone
+exists, the lifecycle patch is explicitly `destroyed`, and the secret is absent
+from every manifest profile. It preserves unrelated profile metadata and never
+deletes provider material.
 
 Pharos beacon-token profiles use the
 `pharos-beacon-token-generation-v2` hash-sidecar format. Janus writes a
