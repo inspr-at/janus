@@ -200,10 +200,13 @@ Reason codes use a closed lowercase vocabulary.
 The setup intent names an allowlisted return target, not a callback URL. It
 binds the exact action and complete reviewed source policy as well as host,
 service, slot, human session, issuer, audience, nonce, declaration fingerprint,
-and a maximum five-minute lifetime. Create and replace require one or more
-canonical allowed sources; remove forbids them. The exact create/replace source
-is selected in Janus, bound to fresh passwordless proof, and then copied into
-the operation.
+and a maximum fifteen-minute lifetime. This opaque outer window leaves bounded
+room for page review plus one complete five-minute passwordless step-up; it
+does not extend or replace the five-minute passwordless proof. Janus rejects
+signed intents above that maximum. Create and replace require one or more
+canonical allowed sources; remove forbids them. The exact create/replace
+source is selected in Janus, bound to fresh passwordless proof, and then copied
+into the operation.
 
 An operation binds the exact setup intent, declaration fingerprint, secret ref,
 source mode, and delivery generation in addition to its host, service, and slot

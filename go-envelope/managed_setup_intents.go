@@ -35,7 +35,6 @@ const (
 	managedIntentContractVersion    = 1
 	managedManifestCurrentVersion   = 2
 	managedManifestPreviousVersion  = 1
-	managedIntentMaxTTLSeconds      = int64(300)
 	managedIntentClockSkewSeconds   = int64(30)
 	managedIntentMaxEnvelopeBytes   = int64(64 * 1024)
 	managedManifestMaxBytes         = int64(64 * 1024)
@@ -46,6 +45,10 @@ const (
 	managedSetupExpectedIssuerRef   = "sys_pharos_control_plane_v1"
 	managedSetupExpectedAudienceRef = "sys_janus_secret_custody_v1"
 )
+
+// The opaque outer intent must outlive one complete five-minute step-up.
+// Pharos issues exactly this lifetime; Janus rejects anything longer.
+const managedIntentMaxTTLSeconds = int64(15 * time.Minute / time.Second)
 
 type managedSignedIntent struct {
 	Schema             string `json:"schema"`
