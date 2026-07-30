@@ -160,6 +160,35 @@ func TestManagedIntentInspectionIsValueFreeAndDoesNotConsumeReplayBudget(t *test
 	}
 }
 
+func TestManagedIntentLifetimeCoversAttendedStepUpWithoutBroadeningProof(t *testing.T) {
+	now := int64(1_784_833_200)
+	if got, want := managedIntentMaxTTLSeconds, int64((15*time.Minute)/time.Second); got != want {
+		t.Fatalf("managed intent lifetime = %d seconds, want %d", got, want)
+	}
+	if managedIntentMaxTTLSeconds <= int64(managedStepUpFlowTTL/time.Second) {
+		t.Fatal("outer managed intent must outlive one complete passwordless step-up")
+	}
+
+	intent := managedTestIntent(now)
+	envelope, key := signManagedTestIntent(t, 7, "key_primary0001", intent)
+	consumer := managedTestConsumer(
+		t,
+		envelope,
+		managedIntentKeyring{"key_primary0001": key},
+		now+int64((5*time.Minute)/time.Second)+1,
+	)
+	if _, err := consumer.Inspect(context.Background(), intent.IntentRef, intent.HumanSessionRef); err != nil {
+		t.Fatalf("intent should remain valid beyond the former five-minute boundary: %v", err)
+	}
+
+	overlong := intent
+	overlong.ExpiresAtUnixSeconds++
+	overlongEnvelope, _ := signManagedTestIntent(t, 7, "key_primary0001", overlong)
+	if _, err := verifyManagedSetupIntent(overlongEnvelope, managedIntentKeyring{"key_primary0001": key}); err == nil || err.Error() != "managed_intent_payload_invalid" {
+		t.Fatalf("intent above the reviewed maximum should be rejected, got %v", err)
+	}
+}
+
 func TestManagedIntentRejectsSourceOutsideSignedDeclarationBeforeReplayConsume(t *testing.T) {
 	now := int64(1_784_833_200)
 	intent := managedTestIntent(now)
@@ -306,11 +335,15 @@ func TestManagedIntentRejectsControlPlaneVersionAndUnknownKey(t *testing.T) {
 }
 
 func TestManagedIntentCrossLanguageFixtureValues(t *testing.T) {
+	fixture := managedTestIntent(1_784_833_200)
+	// Keep the serialization fixture stable and valid under the current
+	// maximum; the lifetime policy itself is tested separately above.
+	fixture.ExpiresAtUnixSeconds = fixture.IssuedAtUnixSeconds + 300
 	envelope, publicKey := signManagedTestIntent(
 		t,
 		9,
 		"key_rotating0001",
-		managedTestIntent(1_784_833_200),
+		fixture,
 	)
 	if got := base64.RawURLEncoding.EncodeToString(publicKey); got != "_RckOFqgx1tk-3jNYC-h2ZH96_drE8WO1wLqyDXp9hg" {
 		t.Fatalf("public key drifted: %s", got)

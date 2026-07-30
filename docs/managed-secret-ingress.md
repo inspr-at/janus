@@ -26,6 +26,12 @@ The setup intent is kept across an ordinary login in a short-lived signed,
 HttpOnly, SameSite=Lax cookie. It contains only the opaque intent reference and
 timestamps. The normal login flow clears a stale setup cookie.
 
+Pharos gives the signed outer setup intent a maximum fifteen-minute lifetime.
+Janus independently rejects any longer lifetime. This allows bounded page
+review plus a complete five-minute passwordless step-up without making the
+step-up proof reusable: that proof still expires after five minutes, and intent
+consumption remains the single-use authority before any value byte is read.
+
 All managed setup responses are `no-store, no-transform` with identity content
 encoding. The global Janus boundary also supplies a no-script, no-third-party
 CSP, framing isolation, and same-origin resource policy. Managed form pages use
