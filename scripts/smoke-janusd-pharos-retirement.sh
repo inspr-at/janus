@@ -85,11 +85,18 @@ revision = "1.0"
 
 [profiles.default]
 PHAROS_BEACON_ARES_TOKEN = { description = "Disposable Pharos retirement fixture", required = true }
+RETAINED = { description = "Unrelated retained fixture", required = false }
 EOF
 
 cat >"${metadata}" <<'EOF'
 [defaults]
 owner = "infra"
+classification = "normal"
+lifecycle = "active"
+
+[[secrets]]
+name = "RETAINED"
+owner = "platform"
 classification = "normal"
 lifecycle = "active"
 EOF
@@ -212,6 +219,13 @@ before="$(${janusd_admin_bin} pharos-beacon reconcile "${retirement_args[@]}" 2>
 printf '%s\n' "${before}" | grep -F 'state=action_required' >/dev/null ||
 	fail "initial reconcile did not require retirement"
 
+if premature_detach="$(${janusd_admin_bin} pharos-beacon detach-metadata "${retirement_args[@]}" 2>&1)"; then
+	fail "metadata detached before retirement evidence existed"
+fi
+printf '%s\n' "${premature_detach}" |
+	grep -F 'reason_code=pharos_beacon_retirement_state_missing' >/dev/null ||
+	fail "premature metadata detach did not fail closed"
+
 retired="$(${janusd_admin_bin} pharos-beacon retire "${retirement_args[@]}" 2>&1)" ||
 	fail "retirement failed"
 printf '%s\n' "${retired}" | grep -F 'state=complete' >/dev/null ||
@@ -252,10 +266,64 @@ fi
 printf '%s\n' "${denied}" | grep -F 'denied_lifecycle_destroyed' >/dev/null ||
 	fail "approved use did not fail on destroyed lifecycle"
 
-for output in "${before}" "${retired}" "${replayed}" "${after}" "${denied}"; do
+tombstone="${tombstone_dir}/${secret_ref}.json"
+tombstone_hold="${runtime}/tombstone.hold"
+mv "${tombstone}" "${tombstone_hold}"
+if missing_tombstone_detach="$(${janusd_admin_bin} pharos-beacon detach-metadata "${retirement_args[@]}" 2>&1)"; then
+	fail "metadata detached without the exact tombstone"
+fi
+mv "${tombstone_hold}" "${tombstone}"
+printf '%s\n' "${missing_tombstone_detach}" |
+	grep -F 'reason_code=pharos_beacon_metadata_detach_tombstone_missing' >/dev/null ||
+	fail "missing-tombstone metadata detach did not fail closed"
+
+if declared_detach="$(${janusd_admin_bin} pharos-beacon detach-metadata "${retirement_args[@]}" 2>&1)"; then
+	fail "metadata detached while the destroyed secret was still declared"
+fi
+printf '%s\n' "${declared_detach}" |
+	grep -F 'reason_code=pharos_beacon_metadata_detach_secret_still_declared' >/dev/null ||
+	fail "declared metadata detach did not fail closed"
+
+cat >"${manifest}" <<'EOF'
+[project]
+name = "janus"
+revision = "1.1"
+
+[profiles.default]
+RETAINED = { description = "Unrelated retained fixture", required = false }
+EOF
+chmod 600 "${manifest}"
+
+detached="$(${janusd_admin_bin} pharos-beacon detach-metadata "${retirement_args[@]}" 2>&1)" ||
+	fail "completed retirement metadata detach failed"
+printf '%s\n' "${detached}" | grep -F 'metadata_detached=true' >/dev/null ||
+	fail "completed retirement did not detach destroyed metadata"
+grep -F 'name = "PHAROS_BEACON_ARES_TOKEN"' "${metadata}" >/dev/null &&
+	fail "destroyed metadata entry remained after detach"
+grep -F 'name = "RETAINED"' "${metadata}" >/dev/null ||
+	fail "unrelated metadata entry was removed"
+grep -F 'owner = "platform"' "${metadata}" >/dev/null ||
+	fail "unrelated metadata fields changed"
+
+detached_replay="$(${janusd_admin_bin} pharos-beacon detach-metadata "${retirement_args[@]}" 2>&1)" ||
+	fail "metadata detach replay failed"
+printf '%s\n' "${detached_replay}" | grep -F 'metadata_detached=false' >/dev/null ||
+	fail "metadata detach replay was not idempotent"
+
+for output in \
+	"${before}" \
+	"${retired}" \
+	"${replayed}" \
+	"${after}" \
+	"${denied}" \
+	"${premature_detach}" \
+	"${missing_tombstone_detach}" \
+	"${declared_detach}" \
+	"${detached}" \
+	"${detached_replay}"; do
 	case "${output}" in
 	*"${fixture_value}"*) fail "fixture value leaked into command output" ;;
 	esac
 done
 
-printf 'ok: janusd-admin Pharos retirement smoke passed value_returned=false provider_deleted=false\n'
+printf 'ok: janusd-admin Pharos retirement and metadata detach smoke passed value_returned=false provider_deleted=false\n'

@@ -166,6 +166,7 @@ impl Permission {
             RuntimeAction::Retention => Self::RetentionManage,
             RuntimeAction::PharosRetire => Self::PharosRetire,
             RuntimeAction::PharosReconcile => Self::PharosReconcile,
+            RuntimeAction::PharosDetachMetadata => Self::PharosRetire,
             RuntimeAction::RoleBindingIssue => Self::RoleBindingIssue,
             RuntimeAction::RoleBindingList => Self::RoleBindingRead,
             RuntimeAction::RoleBindingRevoke => Self::RoleBindingRevoke,

@@ -73,7 +73,9 @@ pub use managed_service::{
     MANAGED_SERVICE_OPERATION_SCHEMA, MANAGED_SERVICE_SETUP_INTENT_SCHEMA,
     MAX_MANAGED_SERVICE_CONTRACT_BYTES, MAX_SETUP_INTENT_TTL_SECS,
 };
-pub use manifest::{load_secretspec_manifest_catalog, ManifestCatalog};
+pub use manifest::{
+    load_secretspec_manifest_catalog, load_secretspec_manifest_secret_names, ManifestCatalog,
+};
 pub use metadata::{SecretMetadataOverlay, SecretMetadataPatch};
 pub use migration::{MigrationCompatibility, MigrationManifest, MigrationPhase, MigrationRisk};
 pub use minimization::{

@@ -99,6 +99,8 @@ pub enum RuntimeAction {
     PharosRetire,
     /// Pharos retirement reconciliation.
     PharosReconcile,
+    /// Pharos destroyed-metadata detachment after retirement evidence is complete.
+    PharosDetachMetadata,
     /// Durable role binding creation.
     RoleBindingIssue,
     /// Durable role binding inventory.
@@ -125,7 +127,7 @@ pub enum RuntimeAction {
 
 impl RuntimeAction {
     /// Every known action, used by release-blocking completeness tests.
-    pub const ALL: [Self; 41] = [
+    pub const ALL: [Self; 42] = [
         Self::WardenListSecrets,
         Self::WardenDescribeSecret,
         Self::WardenRequestUse,
@@ -156,6 +158,7 @@ impl RuntimeAction {
         Self::Retention,
         Self::PharosRetire,
         Self::PharosReconcile,
+        Self::PharosDetachMetadata,
         Self::RoleBindingIssue,
         Self::RoleBindingList,
         Self::RoleBindingRevoke,
@@ -202,6 +205,7 @@ impl RuntimeAction {
             | Self::Retention
             | Self::PharosRetire
             | Self::PharosReconcile
+            | Self::PharosDetachMetadata
             | Self::RoleBindingIssue
             | Self::RoleBindingList
             | Self::RoleBindingRevoke
@@ -249,6 +253,7 @@ impl RuntimeAction {
             Self::Retention => "admin.retention",
             Self::PharosRetire => "admin.pharos_retire",
             Self::PharosReconcile => "admin.pharos_reconcile",
+            Self::PharosDetachMetadata => "admin.pharos_detach_metadata",
             Self::RoleBindingIssue => "admin.role_binding_issue",
             Self::RoleBindingList => "admin.role_binding_list",
             Self::RoleBindingRevoke => "admin.role_binding_revoke",
@@ -495,6 +500,7 @@ pub const fn runtime_endpoint_policy(action: RuntimeAction) -> RuntimeEndpointPo
         | RuntimeAction::Retention
         | RuntimeAction::PharosRetire
         | RuntimeAction::PharosReconcile
+        | RuntimeAction::PharosDetachMetadata
         | RuntimeAction::RoleBindingIssue
         | RuntimeAction::RoleBindingList
         | RuntimeAction::RoleBindingRevoke
@@ -511,7 +517,7 @@ pub const fn runtime_endpoint_policy(action: RuntimeAction) -> RuntimeEndpointPo
 
 /// Closed endpoint-policy catalog. Adding an action requires extending both
 /// [`RuntimeAction::ALL`] and this release-reviewed matrix.
-pub const RUNTIME_ENDPOINT_POLICIES: [RuntimeEndpointPolicy; 41] = [
+pub const RUNTIME_ENDPOINT_POLICIES: [RuntimeEndpointPolicy; 42] = [
     runtime_endpoint_policy(RuntimeAction::WardenListSecrets),
     runtime_endpoint_policy(RuntimeAction::WardenDescribeSecret),
     runtime_endpoint_policy(RuntimeAction::WardenRequestUse),
@@ -542,6 +548,7 @@ pub const RUNTIME_ENDPOINT_POLICIES: [RuntimeEndpointPolicy; 41] = [
     runtime_endpoint_policy(RuntimeAction::Retention),
     runtime_endpoint_policy(RuntimeAction::PharosRetire),
     runtime_endpoint_policy(RuntimeAction::PharosReconcile),
+    runtime_endpoint_policy(RuntimeAction::PharosDetachMetadata),
     runtime_endpoint_policy(RuntimeAction::RoleBindingIssue),
     runtime_endpoint_policy(RuntimeAction::RoleBindingList),
     runtime_endpoint_policy(RuntimeAction::RoleBindingRevoke),
@@ -650,7 +657,7 @@ mod tests {
 
     #[test]
     fn every_action_has_exactly_one_operational_plane() {
-        assert_eq!(RuntimeAction::ALL.len(), 41);
+        assert_eq!(RuntimeAction::ALL.len(), 42);
         assert_eq!(
             RuntimeAction::ALL
                 .iter()
@@ -663,7 +670,7 @@ mod tests {
                 .iter()
                 .filter(|action| action.required_plane() == RuntimePlane::Admin)
                 .count(),
-            33
+            34
         );
         assert!(RuntimeAction::ALL
             .iter()

@@ -440,6 +440,25 @@ Use `janusd-admin pharos-beacon reconcile` with the same host, disposition, inte
 metadata, profile-manifest, and state-directory controls to inspect interrupted
 or drifted retirements without reading secret material.
 
+After reconcile reports `state=complete`, remove the retired secret from every
+Secretspec profile in a reviewed manifest change. Then detach only its destroyed
+metadata row:
+
+```bash
+janusd-admin pharos-beacon detach-metadata \
+  --host ares \
+  --disposition destroyed \
+  --intent-file /etc/janus/pharos-retirement.toml \
+  --metadata-file /etc/janus/metadata.toml \
+  --profile-manifest /etc/janus/approved-use.toml \
+  --state-dir /var/lib/janus/pharos-retirements
+```
+
+Detachment fails closed unless the exact retirement is complete, its tombstone
+exists, the lifecycle patch is explicitly `destroyed`, and the secret is absent
+from every manifest profile. It preserves unrelated profile metadata and never
+deletes provider material.
+
 Pharos beacon-token profiles use the
 `pharos-beacon-token-generation-v2` hash-sidecar format. Janus writes a
 per-host value-free entry, updates the immutable generation under an exclusive

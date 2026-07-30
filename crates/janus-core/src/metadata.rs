@@ -107,6 +107,26 @@ impl SecretMetadataOverlay {
         self.secrets.entry(name).or_default().lifecycle = Some(lifecycle);
     }
 
+    /// Remove one explicit destroyed lifecycle patch after durable retirement evidence exists.
+    ///
+    /// Callers must separately prove that the secret is no longer declared and that the
+    /// corresponding destroy tombstone is durable. A non-destroyed entry is never detached.
+    pub fn detach_destroyed_secret(&mut self, name: &SecretName) -> JanusResult<bool> {
+        let Some(patch) = self.secrets.get(name) else {
+            return Ok(false);
+        };
+        if patch.lifecycle != Some(SecretLifecycle::Destroyed) {
+            return Err(JanusError::InvalidManifest {
+                detail: format!(
+                    "metadata entry is not explicitly destroyed {}",
+                    name.as_str()
+                ),
+            });
+        }
+        self.secrets.remove(name);
+        Ok(true)
+    }
+
     /// Serialize this overlay to canonical TOML.
     pub fn to_toml_string(&self) -> JanusResult<String> {
         let output = SecretMetadataOverlayTomlOut {
@@ -137,18 +157,37 @@ impl SecretMetadataOverlay {
             .iter()
             .map(|entry| entry.name.clone())
             .collect::<BTreeSet<_>>();
-        for name in self.secrets.keys() {
-            if !names.contains(name) {
-                return Err(JanusError::InvalidManifest {
-                    detail: format!("metadata entry has no manifest secret {}", name.as_str()),
-                });
-            }
-        }
+        self.apply_to_entries_with_manifest_names(entries, &names)
+    }
+
+    /// Apply this overlay to selected-profile entries after validating it against every
+    /// reviewed manifest profile.
+    pub fn apply_to_entries_with_manifest_names(
+        &self,
+        entries: &mut [SecretMeta],
+        manifest_names: &BTreeSet<SecretName>,
+    ) -> JanusResult<()> {
+        self.validate_manifest_names(manifest_names)?;
 
         for entry in entries {
             self.defaults.apply_to(entry);
             if let Some(patch) = self.secrets.get(&entry.name) {
                 patch.apply_to(entry);
+            }
+        }
+        Ok(())
+    }
+
+    /// Reject overlay entries that are absent from every reviewed manifest profile.
+    pub fn validate_manifest_names(
+        &self,
+        manifest_names: &BTreeSet<SecretName>,
+    ) -> JanusResult<()> {
+        for name in self.secrets.keys() {
+            if !manifest_names.contains(name) {
+                return Err(JanusError::InvalidManifest {
+                    detail: format!("metadata entry has no manifest secret {}", name.as_str()),
+                });
             }
         }
         Ok(())
@@ -376,5 +415,66 @@ mod tests {
         assert_eq!(entries[1].owner.as_ref().unwrap().as_str(), "infra");
         assert_eq!(entries[1].classification, Some(SecretClass::Normal));
         assert_eq!(entries[1].lifecycle, SecretLifecycle::PendingDelete);
+    }
+
+    #[test]
+    fn scoped_application_accepts_other_profile_entries_without_applying_them() {
+        let overlay = SecretMetadataOverlay::parse_toml(
+            r#"
+            [defaults]
+            owner = "infra"
+
+            [[secrets]]
+            name = "OTHER_PROFILE"
+            lifecycle = "disabled"
+            "#,
+        )
+        .unwrap();
+        let mut entries = vec![meta("SELECTED")];
+        let manifest_names = [
+            SecretName::new("SELECTED").unwrap(),
+            SecretName::new("OTHER_PROFILE").unwrap(),
+        ]
+        .into_iter()
+        .collect();
+
+        overlay
+            .apply_to_entries_with_manifest_names(&mut entries, &manifest_names)
+            .unwrap();
+
+        assert_eq!(entries[0].name.as_str(), "SELECTED");
+        assert_eq!(entries[0].lifecycle, SecretLifecycle::Active);
+        assert_eq!(entries[0].owner.as_ref().unwrap().as_str(), "infra");
+    }
+
+    #[test]
+    fn destroyed_entry_detach_is_exact_and_idempotent() {
+        let name = SecretName::new("CANARY").unwrap();
+        let mut overlay = SecretMetadataOverlay::parse_toml(
+            r#"
+            [[secrets]]
+            name = "CANARY"
+            owner = "security"
+            lifecycle = "destroyed"
+            "#,
+        )
+        .unwrap();
+
+        assert!(overlay.detach_destroyed_secret(&name).unwrap());
+        assert!(!overlay.detach_destroyed_secret(&name).unwrap());
+        assert!(!overlay.to_toml_string().unwrap().contains("CANARY"));
+
+        let mut active = SecretMetadataOverlay::parse_toml(
+            r#"
+            [[secrets]]
+            name = "CANARY"
+            lifecycle = "active"
+            "#,
+        )
+        .unwrap();
+        assert!(matches!(
+            active.detach_destroyed_secret(&name),
+            Err(JanusError::InvalidManifest { .. })
+        ));
     }
 }

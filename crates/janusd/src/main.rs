@@ -37,18 +37,18 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use janus_core::{
-    authorize_runtime_action, ApprovalGrant, AuditAction, AuditEvent, AuditOutcome, AuditSink,
-    AuditWrite, BlastRadius, BreakGlassActivation, BreakGlassActivationId, BreakGlassAttempt,
-    BreakGlassCompletion, BreakGlassCompletionOutcome, ClassPermitPolicy, ConsumerDescriptor,
-    ConsumerKind, ConsumerRef, ConsumerRegistry, DelegationId, DelegationPolicy, Destination,
-    EgressMode, Environment, ExecutorRef, JanusError, LifecycleTransitionPolicy, NamespaceId,
-    OwnerRef, Permission, Principal, PrincipalChain, PrincipalId, PrincipalKind, ProfileId,
-    ProfilePolicy, Purpose, ReloadMethod, RotationOutcome, RuntimeAction, RuntimePlane,
-    RuntimeTransport, SafeLabel, ScopePathV1, ScopeRef, SecretAgeEvidence, SecretBroker,
-    SecretDescriptor, SecretLifecycle, SecretMeta, SecretMetadataOverlay, SecretName, SecretRef,
-    SecretStore, SecretTombstoneRequest, Severity, StaleSecretPolicy, StaleSecretReportRow,
-    StaleSecretReporter, TombstonePolicy, TrustLevel, UsePermit, UseProfile, UseRequest,
-    ValidationProbe, WorkloadId,
+    authorize_runtime_action, load_secretspec_manifest_secret_names, ApprovalGrant, AuditAction,
+    AuditEvent, AuditOutcome, AuditSink, AuditWrite, BlastRadius, BreakGlassActivation,
+    BreakGlassActivationId, BreakGlassAttempt, BreakGlassCompletion, BreakGlassCompletionOutcome,
+    ClassPermitPolicy, ConsumerDescriptor, ConsumerKind, ConsumerRef, ConsumerRegistry,
+    DelegationId, DelegationPolicy, Destination, EgressMode, Environment, ExecutorRef, JanusError,
+    LifecycleTransitionPolicy, NamespaceId, OwnerRef, Permission, Principal, PrincipalChain,
+    PrincipalId, PrincipalKind, ProfileId, ProfilePolicy, Purpose, ReloadMethod, RotationOutcome,
+    RuntimeAction, RuntimePlane, RuntimeTransport, SafeLabel, ScopePathV1, ScopeRef,
+    SecretAgeEvidence, SecretBroker, SecretDescriptor, SecretLifecycle, SecretMetadataOverlay,
+    SecretName, SecretRef, SecretStore, SecretTombstoneRequest, Severity, StaleSecretPolicy,
+    StaleSecretReportRow, StaleSecretReporter, TombstonePolicy, TrustLevel, UsePermit, UseProfile,
+    UseRequest, ValidationProbe, WorkloadId,
 };
 use janus_executor::{
     ApprovedUseExecutor, EnvFileHashSidecarFormat, EnvFileHashSidecarSpec, EnvFilePlan,
@@ -243,6 +243,9 @@ impl Command {
             Self::LifecycleDestroyReconcile(_) => RuntimeAction::LifecycleDestroyReconcile,
             Self::PharosBeacon(PharosBeaconCommand::Retire(_)) => RuntimeAction::PharosRetire,
             Self::PharosBeacon(PharosBeaconCommand::Reconcile(_)) => RuntimeAction::PharosReconcile,
+            Self::PharosBeacon(PharosBeaconCommand::DetachMetadata(_)) => {
+                RuntimeAction::PharosDetachMetadata
+            }
         }
     }
 }
@@ -251,6 +254,7 @@ impl Command {
 enum PharosBeaconCommand {
     Retire(PharosRetirementRequest),
     Reconcile(PharosRetirementRequest),
+    DetachMetadata(PharosRetirementRequest),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1155,11 +1159,18 @@ async fn run_lifecycle_transition(config: LifecycleTransitionConfig) -> Result<(
     let metadata_file =
         lifecycle_metadata_file_path(config.metadata_file.as_deref(), METADATA_ENV_KEYS)?;
     let store = load_age_store_from_env_with_metadata_path(Some(&metadata_file))?;
+    let manifest_names = runtime_secretspec_manifest_secret_names()?;
     let principal = lifecycle_principal_from_env()?;
     let mut audit = AuditWrite::accepting();
-    let outcome =
-        apply_lifecycle_transition_with(&config, &metadata_file, store, &principal, &mut audit)
-            .await?;
+    let outcome = apply_lifecycle_transition_with(
+        &config,
+        &metadata_file,
+        &manifest_names,
+        store,
+        &principal,
+        &mut audit,
+    )
+    .await?;
     emit_lifecycle_transition_outcome(&outcome);
     Ok(())
 }
@@ -1205,12 +1216,14 @@ async fn run_lifecycle_destroy_finalize(config: LifecycleDestroyFinalizeConfig) 
     let metadata_file =
         lifecycle_metadata_file_path(config.metadata_file.as_deref(), METADATA_ENV_KEYS)?;
     let store = load_age_store_from_env_with_metadata_path(Some(&metadata_file))?;
+    let manifest_names = runtime_secretspec_manifest_secret_names()?;
     let principal = lifecycle_principal_from_env()?;
     let registry = FileTombstoneRegistry::new(lifecycle_tombstone_registry_dir());
     let mut audit = AuditWrite::accepting();
     let outcome = finalize_lifecycle_destroy_with(
         &config,
         &metadata_file,
+        &manifest_names,
         store,
         &registry,
         &principal,
@@ -1236,6 +1249,9 @@ async fn run_pharos_beacon(command: PharosBeaconCommand) -> Result<()> {
     let result = match command {
         PharosBeaconCommand::Retire(request) => run_pharos_beacon_retire(&request).await,
         PharosBeaconCommand::Reconcile(request) => run_pharos_beacon_reconcile(&request).await,
+        PharosBeaconCommand::DetachMetadata(request) => {
+            run_pharos_beacon_detach_metadata(&request).await
+        }
     };
     if let Err(failure) = result {
         emit_pharos_beacon_failure(failure);
@@ -1271,6 +1287,101 @@ async fn run_pharos_beacon_reconcile(
         binding.outputs().inspect()?,
     );
     emit_pharos_beacon_outcome("reconcile", &outcome);
+    Ok(())
+}
+
+async fn run_pharos_beacon_detach_metadata(
+    request: &PharosRetirementRequest,
+) -> Result<(), PharosRetirementFailure> {
+    let binding = load_pharos_retirement_binding(request)?;
+    let registry = FilePharosRetirementRegistry::new(&request.state_dir);
+    let record = registry
+        .load(&binding)?
+        .ok_or_else(|| PharosRetirementFailure::new("pharos_beacon_retirement_state_missing"))?;
+    if record.phase() != pharos_retirement::PharosRetirementPhase::Complete {
+        return Err(PharosRetirementFailure::new(
+            "pharos_beacon_metadata_detach_retirement_incomplete",
+        ));
+    }
+
+    let secret_ref = JanusPharosRetirementBackend::secret_ref(&binding)?;
+    let tombstones = FileTombstoneRegistry::new(lifecycle_tombstone_registry_dir());
+    let tombstone = SharedTombstoneRegistry::get(&tombstones, &secret_ref).map_err(|_| {
+        PharosRetirementFailure::new("pharos_beacon_metadata_detach_tombstone_missing")
+    })?;
+    let name = SecretName::new(binding.expected_secret_name())
+        .map_err(|_| PharosRetirementFailure::new("pharos_beacon_retirement_profile_mismatch"))?;
+    let mut manifest_names = runtime_secretspec_manifest_secret_names().map_err(|_| {
+        PharosRetirementFailure::new("pharos_beacon_retirement_manifest_unavailable")
+    })?;
+    if manifest_names.contains(&name) {
+        return Err(PharosRetirementFailure::new(
+            "pharos_beacon_metadata_detach_secret_still_declared",
+        ));
+    }
+
+    let mut overlay =
+        SecretMetadataOverlay::load_toml_file(&request.metadata_file).map_err(|_| {
+            PharosRetirementFailure::new("pharos_beacon_retirement_metadata_unavailable")
+        })?;
+    let detached = overlay.detach_destroyed_secret(&name).map_err(|_| {
+        PharosRetirementFailure::new("pharos_beacon_metadata_detach_lifecycle_mismatch")
+    })?;
+
+    manifest_names = runtime_secretspec_manifest_secret_names().map_err(|_| {
+        PharosRetirementFailure::new("pharos_beacon_retirement_manifest_unavailable")
+    })?;
+    if manifest_names.contains(&name) {
+        return Err(PharosRetirementFailure::new(
+            "pharos_beacon_metadata_detach_secret_still_declared",
+        ));
+    }
+    overlay
+        .validate_manifest_names(&manifest_names)
+        .map_err(|_| {
+            PharosRetirementFailure::new("pharos_beacon_metadata_detach_overlay_invalid")
+        })?;
+
+    let principal = lifecycle_principal_from_env()
+        .map_err(|_| PharosRetirementFailure::new("pharos_beacon_retirement_principal_invalid"))?;
+    let mut audit = AuditWrite::accepting();
+    let reason_code = if detached {
+        "pharos_beacon_metadata_detached"
+    } else {
+        "pharos_beacon_metadata_already_detached"
+    };
+    audit
+        .record(
+            AuditEvent::new(
+                AuditAction::SecretLifecycle,
+                AuditOutcome::Allowed,
+                reason_code,
+                Severity::Critical,
+                Some(secret_ref),
+                &principal,
+            )
+            .with_evidence(tombstone.reason),
+        )
+        .map_err(|_| PharosRetirementFailure::new("pharos_beacon_metadata_detach_audit_failed"))?;
+
+    if detached {
+        write_metadata_overlay_atomic(
+            &request.metadata_file,
+            &overlay.to_toml_string().map_err(|_| {
+                PharosRetirementFailure::new("pharos_beacon_retirement_metadata_unavailable")
+            })?,
+        )
+        .map_err(|_| {
+            PharosRetirementFailure::new("pharos_beacon_retirement_metadata_unavailable")
+        })?;
+    }
+
+    println!(
+        "janusd-admin pharos-beacon detach-metadata host={} state=complete reason_code={} metadata_detached={} value_returned=false provider_deleted=false",
+        binding.host(),
+        reason_code,
+        detached
+    );
     Ok(())
 }
 
@@ -1375,10 +1486,14 @@ impl PharosRetirementLifecycle for JanusPharosRetirementBackend {
         let store = load_age_store_from_env_with_metadata_path(Some(&self.metadata_file)).map_err(
             |_| PharosRetirementFailure::new("pharos_beacon_retirement_metadata_unavailable"),
         )?;
+        let manifest_names = runtime_secretspec_manifest_secret_names().map_err(|_| {
+            PharosRetirementFailure::new("pharos_beacon_retirement_manifest_unavailable")
+        })?;
         let mut audit = AuditWrite::accepting();
         apply_lifecycle_transition_with(
             &config,
             &self.metadata_file,
+            &manifest_names,
             store,
             &self.principal,
             &mut audit,
@@ -1435,10 +1550,14 @@ impl PharosRetirementLifecycle for JanusPharosRetirementBackend {
         let store = load_age_store_from_env_with_metadata_path(Some(&self.metadata_file)).map_err(
             |_| PharosRetirementFailure::new("pharos_beacon_retirement_metadata_unavailable"),
         )?;
+        let manifest_names = runtime_secretspec_manifest_secret_names().map_err(|_| {
+            PharosRetirementFailure::new("pharos_beacon_retirement_manifest_unavailable")
+        })?;
         let mut audit = AuditWrite::accepting();
         finalize_lifecycle_destroy_with(
             &config,
             &self.metadata_file,
+            &manifest_names,
             store,
             &self.tombstones,
             &self.principal,
@@ -1679,6 +1798,7 @@ where
 async fn finalize_lifecycle_destroy_with<S, R, A>(
     config: &LifecycleDestroyFinalizeConfig,
     metadata_file: &Path,
+    manifest_names: &BTreeSet<SecretName>,
     store: S,
     registry: &R,
     principal: &PrincipalChain,
@@ -1759,12 +1879,8 @@ where
     let mut overlay = SecretMetadataOverlay::load_toml_file(metadata_file)
         .with_context(|| "failed to load lifecycle metadata overlay")?;
     overlay.set_secret_lifecycle(descriptor.name.clone(), SecretLifecycle::Destroyed);
-    let mut metadata_entries = descriptors
-        .iter()
-        .map(secret_meta_from_descriptor)
-        .collect::<Vec<_>>();
     overlay
-        .apply_to_entries(&mut metadata_entries)
+        .validate_manifest_names(manifest_names)
         .context("lifecycle metadata overlay no longer matches manifest")?;
     write_metadata_overlay_atomic(metadata_file, &overlay.to_toml_string()?)?;
 
@@ -1782,6 +1898,7 @@ where
 async fn apply_lifecycle_transition_with<S, A>(
     config: &LifecycleTransitionConfig,
     metadata_file: &Path,
+    manifest_names: &BTreeSet<SecretName>,
     store: S,
     principal: &PrincipalChain,
     audit: &mut A,
@@ -1811,12 +1928,8 @@ where
     let mut overlay = SecretMetadataOverlay::load_toml_file(metadata_file)
         .with_context(|| "failed to load lifecycle metadata overlay")?;
     overlay.set_secret_lifecycle(descriptor.name.clone(), transition.to());
-    let mut metadata_entries = descriptors
-        .iter()
-        .map(secret_meta_from_descriptor)
-        .collect::<Vec<_>>();
     overlay
-        .apply_to_entries(&mut metadata_entries)
+        .validate_manifest_names(manifest_names)
         .context("lifecycle metadata overlay no longer matches manifest")?;
     write_metadata_overlay_atomic(metadata_file, &overlay.to_toml_string()?)?;
 
@@ -1827,21 +1940,6 @@ where
         reason_code: "lifecycle_transition_ok",
         value_returned: false,
     })
-}
-
-fn secret_meta_from_descriptor(descriptor: &SecretDescriptor) -> SecretMeta {
-    SecretMeta {
-        secret_ref: descriptor.secret_ref.clone(),
-        name: descriptor.name.clone(),
-        label: descriptor.label.clone(),
-        scope: descriptor.scope.clone(),
-        owner: descriptor.owner.clone(),
-        classification: descriptor.classification,
-        lifecycle: descriptor.lifecycle,
-        required: descriptor.required,
-        trust_level: descriptor.trust_level,
-        allowed_uses: descriptor.allowed_uses.clone(),
-    }
 }
 
 fn emit_lifecycle_transition_outcome(outcome: &LifecycleTransitionCliOutcome) {
@@ -3368,6 +3466,9 @@ fn classify_runtime_action(args: &[String]) -> Result<RuntimeAction> {
         [pharos, reconcile, ..] if pharos == "pharos-beacon" && reconcile == "reconcile" => {
             RuntimeAction::PharosReconcile
         }
+        [pharos, detach, ..] if pharos == "pharos-beacon" && detach == "detach-metadata" => {
+            RuntimeAction::PharosDetachMetadata
+        }
         _ => anyhow::bail!(
             "unsupported Janus runtime command; run `janusd-use --help` or `janusd-admin --help`"
         ),
@@ -3577,6 +3678,11 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command> {
         [pharos, reconcile, rest @ ..] if pharos == "pharos-beacon" && reconcile == "reconcile" => {
             parse_pharos_retirement(rest.iter().cloned())
                 .map(PharosBeaconCommand::Reconcile)
+                .map(Command::PharosBeacon)
+        }
+        [pharos, detach, rest @ ..] if pharos == "pharos-beacon" && detach == "detach-metadata" => {
+            parse_pharos_retirement(rest.iter().cloned())
+                .map(PharosBeaconCommand::DetachMetadata)
                 .map(Command::PharosBeacon)
         }
         _ => anyhow::bail!(
@@ -4717,15 +4823,25 @@ fn load_age_store_from_env() -> Result<AgeSecretStore> {
     load_age_store_from_env_with_metadata_path(None)
 }
 
-fn load_age_store_from_env_with_metadata_path(
-    metadata_file: Option<&Path>,
-) -> Result<AgeSecretStore> {
-    let manifest = env_first(&[
+fn runtime_secretspec_manifest_file_path() -> Result<PathBuf> {
+    env_first(&[
         "JANUS_AGE_MANIFEST_FILE",
         "JANUS_WARDEN_AGE_MANIFEST_FILE",
         "JANUS_WARDEN_SECRETSPEC_FILE",
     ])
-    .context("JANUS_AGE_MANIFEST_FILE is required")?;
+    .map(PathBuf::from)
+    .context("JANUS_AGE_MANIFEST_FILE is required")
+}
+
+fn runtime_secretspec_manifest_secret_names() -> Result<BTreeSet<SecretName>> {
+    load_secretspec_manifest_secret_names(runtime_secretspec_manifest_file_path()?)
+        .context("failed to load all reviewed Secretspec manifest names")
+}
+
+fn load_age_store_from_env_with_metadata_path(
+    metadata_file: Option<&Path>,
+) -> Result<AgeSecretStore> {
+    let manifest = runtime_secretspec_manifest_file_path()?;
     let profile = env_first(&["JANUS_AGE_PROFILE", "JANUS_WARDEN_AGE_PROFILE"])
         .unwrap_or_else(|| "default".to_string());
     let store_dir = env_first(&["JANUS_AGE_STORE_DIR", "JANUS_WARDEN_AGE_STORE_DIR"])
@@ -5110,6 +5226,7 @@ Administration commands:
   retention preflight|quarantine|purge|rollback|status --policy PATH
   pharos-beacon retire --host HOST --disposition destroyed|unmanaged|rebuilt [--successor HOST] --intent-file PATH --metadata-file PATH --profile-manifest PATH --state-dir PATH [--retain-for-days N]
   pharos-beacon reconcile --host HOST --disposition destroyed|unmanaged|rebuilt [--successor HOST] --intent-file PATH --metadata-file PATH --profile-manifest PATH --state-dir PATH
+  pharos-beacon detach-metadata --host HOST --disposition destroyed|unmanaged|rebuilt [--successor HOST] --intent-file PATH --metadata-file PATH --profile-manifest PATH --state-dir PATH
 
 This process cannot execute managed commands, render env files, consume UsePermits, or expose Warden tools.
 Lifecycle and retirement operations remain value-free; provider deletion is not implied.
@@ -5151,6 +5268,11 @@ mod tests {
 
     #[derive(Clone)]
     struct RedactedCliArg(String);
+
+    #[cfg(unix)]
+    fn fixture_manifest_names(name: &SecretName) -> BTreeSet<SecretName> {
+        [name.clone()].into_iter().collect()
+    }
 
     impl fmt::Debug for RedactedCliArg {
         fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -5316,6 +5438,10 @@ mod tests {
             (
                 &["pharos-beacon", "reconcile"][..],
                 RuntimeAction::PharosReconcile,
+            ),
+            (
+                &["pharos-beacon", "detach-metadata"][..],
+                RuntimeAction::PharosDetachMetadata,
             ),
             (
                 &["role-binding", "issue"][..],
@@ -6498,6 +6624,32 @@ mod tests {
         assert_eq!(config.successor.as_deref(), Some("hera"));
         assert_eq!(config.retain_for_days, DEFAULT_PHAROS_RETENTION_DAYS);
 
+        let detached = parse_args(
+            [
+                "pharos-beacon",
+                "detach-metadata",
+                "--host",
+                "ares",
+                "--disposition",
+                "destroyed",
+                "--intent-file",
+                "/tmp/retired-hosts.json",
+                "--metadata-file",
+                "/tmp/metadata.toml",
+                "--profile-manifest",
+                "/tmp/profiles.toml",
+                "--state-dir",
+                "/tmp/state",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        )
+        .unwrap();
+        assert!(matches!(
+            detached,
+            Command::PharosBeacon(PharosBeaconCommand::DetachMetadata(_))
+        ));
+
         let err = parse_args(
             ["pharos-beacon", "retire", "--token", "do-not-echo-me"]
                 .into_iter()
@@ -7124,10 +7276,18 @@ mod tests {
             owner = "security"
             classification = "high_value"
             lifecycle = "active"
+
+            [[secrets]]
+            name = "OTHER_PROFILE"
+            owner = "platform"
+            classification = "normal"
+            lifecycle = "disabled"
             "#,
         )
         .unwrap();
         let name = SecretName::new("CANARY").unwrap();
+        let other_name = SecretName::new("OTHER_PROFILE").unwrap();
+        let manifest_names = [name.clone(), other_name.clone()].into_iter().collect();
         let secret_ref = SecretRef::for_manifest_entry(&test_scope(), &name);
         let profile_id = ProfileId::new("profile.canary").unwrap();
         let config = LifecycleTransitionConfig {
@@ -7141,6 +7301,7 @@ mod tests {
         let outcome = apply_lifecycle_transition_with(
             &config,
             &metadata_file,
+            &manifest_names,
             fixture_store_with_class_and_lifecycle(
                 &secret_ref,
                 &name,
@@ -7173,10 +7334,13 @@ mod tests {
             trust_level: TrustLevel::L1,
             allowed_uses: vec![profile_id],
         }];
-        overlay.apply_to_entries(&mut entries).unwrap();
+        overlay
+            .apply_to_entries_with_manifest_names(&mut entries, &manifest_names)
+            .unwrap();
         assert_eq!(entries[0].owner.as_ref().unwrap().as_str(), "security");
         assert_eq!(entries[0].classification, Some(SecretClass::HighValue));
         assert_eq!(entries[0].lifecycle, SecretLifecycle::Disabled);
+        assert!(overlay.to_toml_string().unwrap().contains("OTHER_PROFILE"));
         assert_eq!(audit.events().len(), 1);
         let event = &audit.events()[0];
         assert_eq!(event.action, AuditAction::SecretLifecycle);
@@ -7235,6 +7399,7 @@ mod tests {
             let err = apply_lifecycle_transition_with(
                 &config,
                 &metadata_file,
+                &fixture_manifest_names(&name),
                 fixture_store_with_class_and_lifecycle(
                     &secret_ref,
                     &name,
@@ -7441,6 +7606,7 @@ mod tests {
         let outcome = finalize_lifecycle_destroy_with(
             &config,
             &metadata_file,
+            &fixture_manifest_names(&name),
             fixture_store_with_class_and_lifecycle(
                 &secret_ref,
                 &name,
@@ -7547,6 +7713,7 @@ mod tests {
         let outcome = finalize_lifecycle_destroy_with(
             &config,
             &metadata_file,
+            &fixture_manifest_names(&name),
             fixture_store_with_class_and_lifecycle(
                 &secret_ref,
                 &name,
@@ -7609,6 +7776,7 @@ mod tests {
         let err = finalize_lifecycle_destroy_with(
             &config,
             &metadata_file,
+            &fixture_manifest_names(&name),
             fixture_store_with_class_and_lifecycle(
                 &secret_ref,
                 &name,
@@ -7684,6 +7852,7 @@ mod tests {
         let err = finalize_lifecycle_destroy_with(
             &config,
             &metadata_file,
+            &fixture_manifest_names(&name),
             fixture_store_with_class_and_lifecycle(
                 &secret_ref,
                 &name,
@@ -7917,6 +8086,7 @@ mod tests {
         let disable = apply_lifecycle_transition_with(
             &disable_config,
             &metadata_file,
+            &fixture_manifest_names(&name),
             fixture_store_from_metadata_overlay(
                 &secret_ref,
                 &name,
@@ -7955,6 +8125,7 @@ mod tests {
         let pending = apply_lifecycle_transition_with(
             &pending_config,
             &metadata_file,
+            &fixture_manifest_names(&name),
             fixture_store_from_metadata_overlay(
                 &secret_ref,
                 &name,
@@ -8025,6 +8196,7 @@ mod tests {
         let finalized = finalize_lifecycle_destroy_with(
             &finalize_config,
             &metadata_file,
+            &fixture_manifest_names(&name),
             fixture_store_from_metadata_overlay(
                 &secret_ref,
                 &name,
