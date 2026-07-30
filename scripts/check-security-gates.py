@@ -162,6 +162,11 @@ def validate_workflows() -> None:
         "local release-security gate does not validate workflow structure",
     )
     require("--check-installed-tools" in local, "local scanner-version gate is not wired")
+    require(
+        '--subject "${JANUS_SECURITY_IMAGE}"' in local
+        and '--subject "${image}"' not in local,
+        "local image scan does not bind its summary to JANUS_SECURITY_IMAGE",
+    )
 
 
 def validate_tool_reports(policy: dict[str, Any], reports: dict[str, str]) -> None:
