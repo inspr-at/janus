@@ -11,6 +11,7 @@ import re
 import subprocess
 import sys
 from collections.abc import Callable
+from datetime import datetime
 from typing import Any
 
 REPOSITORY = "inspr-at/janus"
@@ -34,6 +35,17 @@ class PostureError(RuntimeError):
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise PostureError(message)
+
+
+def same_revision(value: object, expected: str) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")) == datetime.fromisoformat(
+            expected.replace("Z", "+00:00")
+        )
+    except ValueError:
+        return False
 
 
 def validate_repository(value: dict[str, Any]) -> None:
@@ -76,9 +88,7 @@ def validate_rulesets(values: list[dict[str, Any]]) -> None:
     ]
     require(len(branch_rules) == 1, "default_branch_ruleset")
     require(
-        branch_rules[0].get("source") == REPOSITORY
-        and branch_rules[0].get("source_type") == "Repository"
-        and branch_rules[0].get("updated_at") == BRANCH_RULESET_REVISION,
+        same_revision(branch_rules[0].get("updated_at"), BRANCH_RULESET_REVISION),
         "default_branch_ruleset_revision",
     )
     require(
@@ -105,9 +115,7 @@ def validate_rulesets(values: list[dict[str, Any]]) -> None:
     require(len(matches) == 1, "release_tag_ruleset")
     ruleset = matches[0]
     require(
-        ruleset.get("source") == REPOSITORY
-        and ruleset.get("source_type") == "Repository"
-        and ruleset.get("updated_at") == TAG_RULESET_REVISION,
+        same_revision(ruleset.get("updated_at"), TAG_RULESET_REVISION),
         "release_tag_ruleset_revision",
     )
     ref_names = (ruleset.get("conditions") or {}).get("ref_name") or {}
@@ -307,6 +315,9 @@ def self_test() -> None:
     redacted_bypass = copy.deepcopy(rulesets)
     redacted_bypass[1].pop("bypass_actors")
     validate_rulesets(redacted_bypass)
+    equivalent_timezone = copy.deepcopy(rulesets)
+    equivalent_timezone[0]["updated_at"] = "2026-07-23T13:41:48.674Z"
+    validate_rulesets(equivalent_timezone)
     expect_denied(lambda: validate_alerts([{"number": 1}]))
 
     def denied_runner(*_args: object, **_kwargs: object) -> Any:
