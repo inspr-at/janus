@@ -154,6 +154,31 @@ def validate_workflows() -> None:
         "scheduled repository-posture assurance is not wired",
     )
     require(
+        "actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1"
+        in repository_posture
+        and "client-id: ${{ vars.JANUS_POSTURE_APP_CLIENT_ID }}"
+        in repository_posture
+        and "private-key: ${{ secrets.JANUS_POSTURE_APP_PRIVATE_KEY }}"
+        in repository_posture
+        and "permission-administration: read" in repository_posture
+        and "permission-secret-scanning-alerts: read" in repository_posture
+        and "GH_TOKEN: ${{ steps.posture-token.outputs.token }}"
+        in repository_posture
+        and "GH_TOKEN: ${{ github.token }}" not in repository_posture
+        and "JANUS_REPOSITORY_POSTURE_TOKEN" not in repository_posture
+        and "skip-token-revoke: true" not in repository_posture
+        and "\n          owner:" not in repository_posture
+        and "\n          repositories:" not in repository_posture
+        and "security-events:" not in repository_posture,
+        "scheduled repository-posture assurance lacks its read-only GitHub App token",
+    )
+    require(
+        "reason=app_credential_missing" in repository_posture
+        and "test -n \"${JANUS_POSTURE_APP_CLIENT_ID}\"" in repository_posture
+        and "test -n \"${JANUS_POSTURE_APP_PRIVATE_KEY}\"" in repository_posture,
+        "scheduled repository-posture assurance does not fail closed on missing app credentials",
+    )
+    require(
         "python3 scripts/check-github-repository-posture.py --self-test" in local,
         "local release-security gate does not test repository posture",
     )

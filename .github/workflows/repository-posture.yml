@@ -7,7 +7,6 @@ on:
 
 permissions:
   contents: read
-  security-events: read
 
 jobs:
   repository-posture:
@@ -16,7 +15,24 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: verify repository posture fixtures
         run: python3 scripts/check-github-repository-posture.py --self-test
+      - name: require read-only repository posture app credentials
+        env:
+          JANUS_POSTURE_APP_CLIENT_ID: ${{ vars.JANUS_POSTURE_APP_CLIENT_ID }}
+          JANUS_POSTURE_APP_PRIVATE_KEY: ${{ secrets.JANUS_POSTURE_APP_PRIVATE_KEY }}
+        run: |
+          test -n "${JANUS_POSTURE_APP_CLIENT_ID}" && test -n "${JANUS_POSTURE_APP_PRIVATE_KEY}" || {
+            printf 'github_repository_posture=blocked reason=app_credential_missing value_returned=false\n' >&2
+            exit 1
+          }
+      - name: create one-run repository posture token
+        id: posture-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.JANUS_POSTURE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.JANUS_POSTURE_APP_PRIVATE_KEY }}
+          permission-administration: read
+          permission-secret-scanning-alerts: read
       - name: verify live repository posture
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.posture-token.outputs.token }}
         run: python3 scripts/check-github-repository-posture.py --live
