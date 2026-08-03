@@ -7,8 +7,10 @@ import argparse
 import copy
 import json
 import os
+import re
 import subprocess
 import sys
+from collections.abc import Callable
 from typing import Any
 
 REPOSITORY = "inspr-at/janus"
@@ -119,12 +121,29 @@ def validate_alerts(values: list[dict[str, Any]]) -> None:
     require(not values, "unresolved_secret_scanning_alerts")
 
 
-def gh_json(endpoint: str, *fields: str) -> Any:
+def api_failure_reason(label: str, error: BaseException) -> str:
+    if isinstance(error, subprocess.CalledProcessError):
+        stderr = error.stderr if isinstance(error.stderr, str) else ""
+        match = re.search(r"\bHTTP ([1-5][0-9]{2})\b", stderr)
+        status = match.group(1) if match else "unknown"
+    elif isinstance(error, OSError):
+        status = "unavailable"
+    else:
+        status = "invalid_json"
+    return f"github_posture_api_{label}_{status}"
+
+
+def gh_json(
+    endpoint: str,
+    *fields: str,
+    label: str,
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> Any:
     command = ["gh", "api", "--method", "GET", endpoint]
     for field in fields:
         command.extend(("-f", field))
     try:
-        result = subprocess.run(
+        result = runner(
             command,
             check=True,
             capture_output=True,
@@ -133,24 +152,28 @@ def gh_json(endpoint: str, *fields: str) -> Any:
         )
         return json.loads(result.stdout)
     except (OSError, subprocess.SubprocessError, ValueError) as error:
-        raise PostureError("github_posture_api") from error
+        raise PostureError(api_failure_reason(label, error)) from error
 
 
 def live_state() -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
-    repository = gh_json(f"repos/{REPOSITORY}")
-    summaries = gh_json(f"repos/{REPOSITORY}/rulesets")
+    repository = gh_json(f"repos/{REPOSITORY}", label="repository")
+    summaries = gh_json(f"repos/{REPOSITORY}/rulesets", label="ruleset_summaries")
     require(isinstance(summaries, list), "github_ruleset_state")
     rulesets = []
     for summary in summaries:
         ruleset_id = summary.get("id") if isinstance(summary, dict) else None
         require(isinstance(ruleset_id, int), "github_ruleset_state")
-        detail = gh_json(f"repos/{REPOSITORY}/rulesets/{ruleset_id}")
+        detail = gh_json(
+            f"repos/{REPOSITORY}/rulesets/{ruleset_id}",
+            label="ruleset_detail",
+        )
         require(isinstance(detail, dict), "github_ruleset_state")
         rulesets.append(detail)
     alerts = gh_json(
         f"repos/{REPOSITORY}/secret-scanning/alerts",
         "state=open",
         "per_page=100",
+        label="secret_alerts",
     )
     require(
         isinstance(repository, dict)
@@ -213,6 +236,15 @@ def expect_denied(action: object) -> None:
     raise PostureError("repository_posture_negative_fixture")
 
 
+def expect_api_failure(action: object, expected: str) -> None:
+    try:
+        action()
+    except PostureError as error:
+        require(str(error) == expected, "repository_posture_api_fixture")
+        return
+    raise PostureError("repository_posture_api_fixture")
+
+
 def self_test() -> None:
     repository, rulesets, alerts = fixture()
     validate_repository(repository)
@@ -236,6 +268,33 @@ def self_test() -> None:
     weakened_tag_rules[1]["rules"].pop()
     expect_denied(lambda: validate_rulesets(weakened_tag_rules))
     expect_denied(lambda: validate_alerts([{"number": 1}]))
+
+    def denied_runner(*_args: object, **_kwargs: object) -> Any:
+        raise subprocess.CalledProcessError(
+            1,
+            ["gh", "api"],
+            stderr="gh: Resource not accessible by integration (HTTP 403)",
+        )
+
+    def missing_runner(*_args: object, **_kwargs: object) -> Any:
+        raise FileNotFoundError("gh")
+
+    expect_api_failure(
+        lambda: gh_json(
+            f"repos/{REPOSITORY}/secret-scanning/alerts",
+            label="secret_alerts",
+            runner=denied_runner,
+        ),
+        "github_posture_api_secret_alerts_403",
+    )
+    expect_api_failure(
+        lambda: gh_json(
+            f"repos/{REPOSITORY}",
+            label="repository",
+            runner=missing_runner,
+        ),
+        "github_posture_api_repository_unavailable",
+    )
 
 
 def main() -> int:
