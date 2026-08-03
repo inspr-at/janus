@@ -7,7 +7,6 @@ on:
 
 permissions:
   contents: read
-  security-events: read
 
 jobs:
   repository-posture:
@@ -16,7 +15,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: verify repository posture fixtures
         run: python3 scripts/check-github-repository-posture.py --self-test
+      - name: require read-only repository posture credential
+        env:
+          JANUS_REPOSITORY_POSTURE_TOKEN: ${{ secrets.JANUS_REPOSITORY_POSTURE_TOKEN }}
+        run: |
+          test -n "${JANUS_REPOSITORY_POSTURE_TOKEN}" || {
+            printf 'github_repository_posture=blocked reason=credential_missing value_returned=false\n' >&2
+            exit 1
+          }
       - name: verify live repository posture
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.JANUS_REPOSITORY_POSTURE_TOKEN }}
         run: python3 scripts/check-github-repository-posture.py --live
