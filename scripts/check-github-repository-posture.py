@@ -14,7 +14,12 @@ from collections.abc import Callable
 from typing import Any
 
 REPOSITORY = "inspr-at/janus"
+BRANCH_RULESET = "CodeQL merge protection"
+BRANCH_RULESET_ID = 19622624
+BRANCH_RULESET_REVISION = "2026-07-23T15:41:48.674+02:00"
 TAG_RULESET = "Janus release tag protection"
+TAG_RULESET_ID = 19952373
+TAG_RULESET_REVISION = "2026-07-29T08:47:18.572+02:00"
 TAG_PATTERNS = {
     "refs/tags/go-envelope-v*",
     "refs/tags/rust-engine-v*",
@@ -62,12 +67,20 @@ def validate_rulesets(values: list[dict[str, Any]]) -> None:
     branch_rules = [
         item
         for item in values
-        if item.get("target") == "branch"
+        if item.get("id") == BRANCH_RULESET_ID
+        and item.get("name") == BRANCH_RULESET
+        and item.get("target") == "branch"
         and item.get("enforcement") == "active"
         and "~DEFAULT_BRANCH"
         in ((item.get("conditions") or {}).get("ref_name") or {}).get("include", [])
     ]
-    require(branch_rules, "default_branch_ruleset")
+    require(len(branch_rules) == 1, "default_branch_ruleset")
+    require(
+        branch_rules[0].get("source") == REPOSITORY
+        and branch_rules[0].get("source_type") == "Repository"
+        and branch_rules[0].get("updated_at") == BRANCH_RULESET_REVISION,
+        "default_branch_ruleset_revision",
+    )
     require(
         any(
             "code_scanning"
@@ -84,12 +97,19 @@ def validate_rulesets(values: list[dict[str, Any]]) -> None:
     matches = [
         item
         for item in values
-        if item.get("name") == TAG_RULESET
+        if item.get("id") == TAG_RULESET_ID
+        and item.get("name") == TAG_RULESET
         and item.get("target") == "tag"
         and item.get("enforcement") == "active"
     ]
     require(len(matches) == 1, "release_tag_ruleset")
     ruleset = matches[0]
+    require(
+        ruleset.get("source") == REPOSITORY
+        and ruleset.get("source_type") == "Repository"
+        and ruleset.get("updated_at") == TAG_RULESET_REVISION,
+        "release_tag_ruleset_revision",
+    )
     ref_names = (ruleset.get("conditions") or {}).get("ref_name") or {}
     require(
         set(ref_names.get("include") or []) == TAG_PATTERNS
@@ -108,10 +128,13 @@ def validate_rulesets(values: list[dict[str, Any]]) -> None:
     )
     bypass = ruleset.get("bypass_actors")
     require(
-        isinstance(bypass, list)
-        and len(bypass) == 1
-        and bypass[0].get("actor_type") == "OrganizationAdmin"
-        and bypass[0].get("bypass_mode") == "always",
+        bypass is None
+        or (
+            isinstance(bypass, list)
+            and len(bypass) == 1
+            and bypass[0].get("actor_type") == "OrganizationAdmin"
+            and bypass[0].get("bypass_mode") == "always"
+        ),
         "release_tag_bypass",
     )
 
@@ -199,7 +222,11 @@ def fixture() -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]
     }
     rulesets = [
         {
-            "name": "CodeQL merge protection",
+            "id": BRANCH_RULESET_ID,
+            "name": BRANCH_RULESET,
+            "source": REPOSITORY,
+            "source_type": "Repository",
+            "updated_at": BRANCH_RULESET_REVISION,
             "target": "branch",
             "enforcement": "active",
             "conditions": {
@@ -209,7 +236,11 @@ def fixture() -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]
             "rules": [{"type": "code_scanning"}],
         },
         {
+            "id": TAG_RULESET_ID,
             "name": TAG_RULESET,
+            "source": REPOSITORY,
+            "source_type": "Repository",
+            "updated_at": TAG_RULESET_REVISION,
             "target": "tag",
             "enforcement": "active",
             "conditions": {
@@ -267,6 +298,15 @@ def self_test() -> None:
     weakened_tag_rules = copy.deepcopy(rulesets)
     weakened_tag_rules[1]["rules"].pop()
     expect_denied(lambda: validate_rulesets(weakened_tag_rules))
+    changed_revision = copy.deepcopy(rulesets)
+    changed_revision[1]["updated_at"] = "2026-08-03T00:00:00Z"
+    expect_denied(lambda: validate_rulesets(changed_revision))
+    weakened_bypass = copy.deepcopy(rulesets)
+    weakened_bypass[1]["bypass_actors"] = []
+    expect_denied(lambda: validate_rulesets(weakened_bypass))
+    redacted_bypass = copy.deepcopy(rulesets)
+    redacted_bypass[1].pop("bypass_actors")
+    validate_rulesets(redacted_bypass)
     expect_denied(lambda: validate_alerts([{"number": 1}]))
 
     def denied_runner(*_args: object, **_kwargs: object) -> Any:

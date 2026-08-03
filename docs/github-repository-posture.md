@@ -22,6 +22,8 @@ Create a GitHub App named `Janus Repository Posture` with this exact boundary:
 
 GitHub automatically grants Metadata/read. Administration/read permits the existing live repository settings and ruleset checks. Secret-scanning-alerts/read permits only the zero-open-alert assertion. None of these permissions authorize writes.
 
+GitHub redacts a ruleset's bypass actors from identities that cannot write the ruleset. To preserve read-only access without creating a blind spot, the checker pins each protected ruleset's repository identity, numeric ID, and `updated_at` revision in addition to its visible conditions and rules. Any ruleset edit therefore blocks posture assurance until an administrator reviews the complete ruleset and deliberately updates the pinned revision.
+
 After installing the App only on `janus`:
 
 1. Store its client ID as the repository Actions variable `JANUS_POSTURE_APP_CLIENT_ID`.
