@@ -1,22 +1,33 @@
-# GitHub repository-posture credential
+# GitHub repository-posture App
 
 The scheduled `repository-posture` workflow verifies the live controls that protect Janus releases and secret handling. Its default `GITHUB_TOKEN` cannot read secret-scanning alerts: GitHub's `security-events` workflow permission covers code-scanning alerts only.
 
-## Credential contract
+## Why an App
 
-Store a fine-grained personal access token as the repository Actions secret `JANUS_REPOSITORY_POSTURE_TOKEN` with this exact boundary:
+A fine-grained personal access token has a selected expiry and GitHub does not expose an API that Janus can use to mint its replacement. A classic personal access token can be long-lived, but the scopes needed for this check also grant unrelated write access.
 
-- resource owner: `inspr-at`
-- repository access: only `janus`
+Use a repository-only GitHub App instead. Its private key is the stable credential; every workflow run automatically mints a new installation token that expires after one hour and is revoked when the job completes.
+
+## App contract
+
+Create a GitHub App named `Janus Repository Posture` with this exact boundary:
+
+- installation owner: `inspr-at`
+- installation repository: only `janus`
 - repository permissions:
   - Administration: read-only
   - Secret scanning alerts: read-only
-- every other repository and organization permission: no access
-- no account permissions
+- every other repository, organization, and account permission: no access
+- webhook: inactive
 
-The Administration/read permission permits the existing live repository settings and ruleset checks. Secret-scanning-alerts/read permits only the zero-open-alert assertion. Neither permission authorizes writes.
+GitHub automatically grants Metadata/read. Administration/read permits the existing live repository settings and ruleset checks. Secret-scanning-alerts/read permits only the zero-open-alert assertion. None of these permissions authorize writes.
 
-Create and store the token through GitHub's web UI. Do not paste it into chat, tickets, command arguments, logs, or repository files. Set the generated value directly at **Janus → Settings → Secrets and variables → Actions → New repository secret**.
+After installing the App only on `janus`:
+
+1. Store its client ID as the repository Actions variable `JANUS_POSTURE_APP_CLIENT_ID`.
+2. Generate a private key and store the downloaded PEM directly as the repository Actions secret `JANUS_POSTURE_APP_PRIVATE_KEY`.
+
+Do not paste the private key into chat, tickets, command arguments, logs, or repository files. The workflow asks GitHub for only the two read permissions even if the App is later misconfigured more broadly, and the official token action is pinned to an immutable commit.
 
 ## Verification
 
@@ -26,6 +37,6 @@ Run **repository-posture** with `workflow_dispatch`. A trusted result ends with:
 github_repository_posture=trusted value_returned=false
 ```
 
-Missing credentials fail before the live check with `reason=credential_missing`. API failures report only a symbolic endpoint label and safe HTTP class; response bodies and alert data are never printed.
+Missing App credentials fail before token creation with `reason=app_credential_missing`. API failures report only a symbolic endpoint label and safe HTTP class; response bodies and alert data are never printed.
 
-Rotate the credential before its selected expiry, replace the repository secret in place, and run the workflow manually. Delete the superseded token only after the replacement run is green.
+The installation token rotates automatically on every run. Rotate the App private key manually only after suspected exposure or as part of a deliberate cryptographic-key rotation: add a new key, replace the repository secret, run the workflow, and delete the old key only after the replacement run is green.
