@@ -1,19 +1,15 @@
-//! # janus-providers — backend implementations of `janus-core::SecretStore`
+//! # janus-providers — adapters for external provider contracts
 //!
-//! Vendor-neutral by construction: the **manifest (`secretspec.toml`) is the
-//! constant allowlist** across all tiers; only the provider changes per
-//! deployment (architecture-v1 §backend, goal 9 — key-custody-pluggable):
+//! [`janus_core::SecretStore`] is the provider-neutral boundary, and the
+//! `secretspec.toml` manifest remains the allowlist regardless of the selected
+//! backend. This crate owns adapters such as [`SecretspecStore`], which binds
+//! that manifest to an explicit secretspec provider.
 //!
-//! | Tier | Provider | Ticket |
-//! |---|---|---|
-//! | Self-host / NixOS (default) | **age / agenix** | JANUS-21 |
-//! | Cross-tier manifest/allowlist | **secretspec** | JANUS-12 |
-//! | Big-corp fleet | OpenBao | — |
-//! | Laptop / hobbyist | OS keyring | — |
-//!
-//! TODO: one module per provider, each behind the `SecretStore` trait. age is
-//! the self-host default, **not** the enterprise ceiling — the model must allow
-//! HSM/KMS/OpenBao-class custody later.
+//! Native custody implementations may live in dedicated crates when their
+//! ownership and dependencies warrant it. The self-hosted default is the
+//! age-backed store in `janus-provider-age`; future OpenBao-, KMS-, or HSM-class
+//! custody must preserve the same `SecretStore` contract rather than expanding
+//! the core policy surface.
 
 #![forbid(unsafe_code)]
 
