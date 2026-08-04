@@ -29,9 +29,9 @@ const CATALOG_SCHEMA: &str = "inspr.janus.managed-dynamic-delivery-catalog.v1";
 const PROFILE_SCHEMA: &str = "inspr.janus.managed-dynamic-delivery-profile.v1";
 const REQUEST_SCHEMA: &str = "inspr.janus.managed-dynamic-delivery-request.v1";
 const RESPONSE_SCHEMA: &str = "inspr.janus.managed-dynamic-delivery-response.v1";
-const OUTBOX_SCHEMA: &str = "inspr.janus.managed-dynamic-host-package-outbox.v1";
+pub(super) const OUTBOX_SCHEMA: &str = "inspr.janus.managed-dynamic-host-package-outbox.v1";
 const HOST_PAYLOAD_SCHEMA: &str = "inspr.janus.dynamic-host-envelope-payload.v1";
-const SCHEMA_VERSION: u8 = 1;
+pub(super) const SCHEMA_VERSION: u8 = 1;
 const SOCKET_ENV: &str = "JANUS_MANAGED_DYNAMIC_DELIVERY_SOCKET";
 const PEER_UID_ENV: &str = "JANUS_MANAGED_DYNAMIC_DELIVERY_ALLOWED_UID";
 const DECLARATIONS_ENV: &str = "JANUS_MANAGED_DYNAMIC_DELIVERY_DECLARATION_PATHS";
@@ -41,7 +41,7 @@ const RECEIPTS_ENV: &str = "JANUS_MANAGED_DYNAMIC_DELIVERY_CUSTODY_RECEIPT_DIR";
 const MAX_REQUEST_BYTES: usize = 16 * 1024;
 const MAX_RESPONSE_BYTES: usize = 16 * 1024;
 const MAX_CATALOG_BYTES: usize = 1024 * 1024;
-const MAX_OUTBOX_BYTES: usize = 512 * 1024;
+pub(super) const MAX_OUTBOX_BYTES: usize = 512 * 1024;
 const MAX_PROFILES: usize = 256;
 const MAX_DELIVERY_TTL_SECONDS: u64 = 7 * 24 * 60 * 60;
 const MAX_CUSTODY_PLAINTEXT_BYTES: usize = 1024;
@@ -57,18 +57,18 @@ struct DeliveryCatalog {
 
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct DeliveryProfile {
-    schema: String,
-    schema_version: u8,
-    host_ref: String,
-    service_ref: String,
-    delivery_profile_ref: String,
-    host_recipient: String,
-    producer_key_id: String,
-    producer_signing_key_file: PathBuf,
-    revocation_epoch: u64,
-    envelope_ttl_seconds: u64,
-    outbox_dir: PathBuf,
+pub(super) struct DeliveryProfile {
+    pub(super) schema: String,
+    pub(super) schema_version: u8,
+    pub(super) host_ref: String,
+    pub(super) service_ref: String,
+    pub(super) delivery_profile_ref: String,
+    pub(super) host_recipient: String,
+    pub(super) producer_key_id: String,
+    pub(super) producer_signing_key_file: PathBuf,
+    pub(super) revocation_epoch: u64,
+    pub(super) envelope_ttl_seconds: u64,
+    pub(super) outbox_dir: PathBuf,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -106,36 +106,36 @@ struct DeliveryResponse {
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct OutboxRecord {
-    schema: String,
-    schema_version: u8,
-    package_ref: String,
-    envelope_ref: String,
-    operation_ref: String,
-    operation_kind: String,
-    source: String,
-    host_ref: String,
-    service_ref: String,
-    binding_ref: String,
-    secret_ref: String,
-    generation_ref: String,
-    environment_policy_ref: String,
-    environment_policy_fingerprint: String,
-    declaration_fingerprint: String,
-    environment_name: String,
-    delivery_profile_ref: String,
-    reload_profile_ref: String,
-    health_profile_ref: String,
-    revocation_epoch: u64,
-    prepared_at_unix_secs: u64,
-    expires_at_unix_secs: u64,
-    packet_base64: String,
-    packet_returned: bool,
-    value_returned: bool,
-    integrity_hash: String,
+pub(super) struct OutboxRecord {
+    pub(super) schema: String,
+    pub(super) schema_version: u8,
+    pub(super) package_ref: String,
+    pub(super) envelope_ref: String,
+    pub(super) operation_ref: String,
+    pub(super) operation_kind: String,
+    pub(super) source: String,
+    pub(super) host_ref: String,
+    pub(super) service_ref: String,
+    pub(super) binding_ref: String,
+    pub(super) secret_ref: String,
+    pub(super) generation_ref: String,
+    pub(super) environment_policy_ref: String,
+    pub(super) environment_policy_fingerprint: String,
+    pub(super) declaration_fingerprint: String,
+    pub(super) environment_name: String,
+    pub(super) delivery_profile_ref: String,
+    pub(super) reload_profile_ref: String,
+    pub(super) health_profile_ref: String,
+    pub(super) revocation_epoch: u64,
+    pub(super) prepared_at_unix_secs: u64,
+    pub(super) expires_at_unix_secs: u64,
+    pub(super) packet_base64: String,
+    pub(super) packet_returned: bool,
+    pub(super) value_returned: bool,
+    pub(super) integrity_hash: String,
 }
 
-type ProfileKey = (String, String, String);
+pub(super) type ProfileKey = (String, String, String);
 
 pub(crate) async fn run_from_env() -> Result<()> {
     let socket_path = required_absolute_path(SOCKET_ENV)?;
@@ -377,7 +377,7 @@ async fn prepare(
     Ok(response_from_record(&record))
 }
 
-fn load_catalog(path: &Path) -> Result<BTreeMap<ProfileKey, DeliveryProfile>> {
+pub(super) fn load_catalog(path: &Path) -> Result<BTreeMap<ProfileKey, DeliveryProfile>> {
     let raw = super::read_regular_bounded(path, MAX_CATALOG_BYTES, true)
         .context("dynamic delivery catalog unavailable")?;
     let catalog: DeliveryCatalog =
@@ -606,7 +606,7 @@ fn write_create_new(path: &Path, record: &OutboxRecord) -> std::result::Result<(
     result
 }
 
-fn outbox_hash(record: &OutboxRecord) -> std::result::Result<String, &'static str> {
+pub(super) fn outbox_hash(record: &OutboxRecord) -> std::result::Result<String, &'static str> {
     let mut unsigned = record.clone();
     unsigned.integrity_hash.clear();
     let encoded = serde_json::to_vec(&unsigned).map_err(|_| "dynamic_delivery_outbox_invalid")?;
@@ -648,7 +648,7 @@ fn derived_ref(prefix: &str, domain: &str, operation_ref: &str) -> String {
     format!("{prefix}{}", &hex::encode(digest)[..32])
 }
 
-fn valid_ref(prefix: &str, value: &str) -> bool {
+pub(super) fn valid_ref(prefix: &str, value: &str) -> bool {
     value.len() >= prefix.len() + 8
         && value.len() <= 96
         && value.starts_with(prefix)
@@ -657,7 +657,7 @@ fn valid_ref(prefix: &str, value: &str) -> bool {
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
 }
 
-fn normalized_absolute(path: &Path) -> bool {
+pub(super) fn normalized_absolute(path: &Path) -> bool {
     path.is_absolute()
         && path.file_name().is_some()
         && !path.components().any(|part| {

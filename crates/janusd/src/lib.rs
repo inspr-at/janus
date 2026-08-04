@@ -6,6 +6,6 @@
 mod runtime;
 
 pub use runtime::{
-    run_dynamic_custody_service, run_dynamic_delivery_service, run_for_plane,
-    run_web_transaction_service,
+    run_dynamic_custody_service, run_dynamic_delivery_service, run_dynamic_transport_service,
+    run_for_plane, run_web_transaction_service,
 };

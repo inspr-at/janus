@@ -217,6 +217,16 @@ pub async fn run_dynamic_delivery_service() -> Result<()> {
     lifecycle_entry::dynamic_delivery::run_from_env().await
 }
 
+/// Run the private dynamic host-package transport boundary.
+///
+/// This entry point can return only an already signed, host-encrypted packet
+/// to the trusted Go edge and can persist only a value-free host receipt. It
+/// never opens custody, reloads a service, probes health, or activates a
+/// binding.
+pub async fn run_dynamic_transport_service() -> Result<()> {
+    lifecycle_entry::dynamic_transport::run_from_env().await
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Command {
     Help,

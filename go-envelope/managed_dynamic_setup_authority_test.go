@@ -23,12 +23,14 @@ func clearManagedDynamicSetupEnvironment(t *testing.T) {
 		managedDynamicSetupPathsEnv,
 		managedDynamicCustodySocketEnv,
 		managedDynamicDeliverySocketEnv,
+		managedDynamicTransportSocketEnv,
+		managedDynamicHostTokensEnv,
 	} {
 		t.Setenv(name, "")
 	}
 }
 
-func writeManagedDynamicSetupConfigFiles(t *testing.T) (string, string, string, managedIntentKeyring) {
+func writeManagedDynamicSetupConfigFiles(t *testing.T) (string, string, string, string, managedIntentKeyring) {
 	t.Helper()
 	directory := t.TempDir()
 	tokenPath := filepath.Join(directory, "token")
@@ -56,7 +58,12 @@ func writeManagedDynamicSetupConfigFiles(t *testing.T) (string, string, string, 
 	if err := os.WriteFile(declarationPath, managedDynamicFixtureDeclaration(t), 0444); err != nil {
 		t.Fatal(err)
 	}
-	return tokenPath, keyPath, declarationPath, managedIntentKeyring{"key_dynamic0001": publicKey}
+	hostTokenDirectory := filepath.Join(directory, "host-token-generations")
+	if err := os.Mkdir(hostTokenDirectory, 0750); err != nil {
+		t.Fatal(err)
+	}
+	writeManagedHostTokenGeneration(t, hostTokenDirectory, "host_7f94a1c8e912", strings.Repeat("h", 32))
+	return tokenPath, keyPath, declarationPath, hostTokenDirectory, managedIntentKeyring{"key_dynamic0001": publicKey}
 }
 
 func TestManagedDynamicSetupRuntimeConfigRequiresExplicitCompleteGate(t *testing.T) {
@@ -85,13 +92,15 @@ func TestManagedDynamicSetupRuntimeConfigRequiresExplicitCompleteGate(t *testing
 		t.Fatal("partial enabled configuration was accepted")
 	}
 
-	tokenPath, keyPath, declarationPath, _ := writeManagedDynamicSetupConfigFiles(t)
+	tokenPath, keyPath, declarationPath, hostTokenDirectory, _ := writeManagedDynamicSetupConfigFiles(t)
 	t.Setenv(managedDynamicSetupOriginEnv, "http://control.example.test")
 	t.Setenv(managedDynamicSetupTokenFileEnv, tokenPath)
 	t.Setenv(managedDynamicSetupKeyFileEnv, keyPath)
 	t.Setenv(managedDynamicSetupPathsEnv, declarationPath)
 	t.Setenv(managedDynamicCustodySocketEnv, "/run/janus/dynamic-custody.sock")
 	t.Setenv(managedDynamicDeliverySocketEnv, "/run/janus/dynamic-delivery.sock")
+	t.Setenv(managedDynamicTransportSocketEnv, "/run/janus/dynamic-transport.sock")
+	t.Setenv(managedDynamicHostTokensEnv, hostTokenDirectory)
 	if _, err := loadManagedDynamicSetupRuntimeConfigFromEnv(); err == nil {
 		t.Fatal("non-HTTPS control-plane origin was accepted")
 	}
@@ -108,7 +117,9 @@ func TestManagedDynamicSetupRuntimeConfigRequiresExplicitCompleteGate(t *testing
 		len(config.DeclarationPaths) != 1 ||
 		config.DeclarationPaths[0] != declarationPath ||
 		config.CustodySocket != "/run/janus/dynamic-custody.sock" ||
-		config.DeliverySocket != "/run/janus/dynamic-delivery.sock" {
+		config.DeliverySocket != "/run/janus/dynamic-delivery.sock" ||
+		config.TransportSocket != "/run/janus/dynamic-transport.sock" ||
+		config.HostTokenGenerationDir != hostTokenDirectory {
 		t.Fatalf("complete explicit configuration was not preserved: %#v", config)
 	}
 
@@ -140,7 +151,7 @@ func newManagedDynamicHTTPAuthorityForTest(
 ) (*managedDynamicHTTPAuthority, *httptest.Server, managedDynamicSetupIntent) {
 	t.Helper()
 	intent := managedDynamicTestIntent()
-	_, _, declarationPath, keyring := writeManagedDynamicSetupConfigFiles(t)
+	_, _, declarationPath, _, keyring := writeManagedDynamicSetupConfigFiles(t)
 	server := httptest.NewTLSServer(handler)
 	t.Cleanup(server.Close)
 	authority, err := newManagedDynamicSetupAuthority(managedDynamicSetupRuntimeConfig{
@@ -279,7 +290,7 @@ func TestManagedDynamicHTTPAuthorityReservesAndRecoversAcrossRestart(t *testing.
 		_, _ = response.Write(rawEnvelope)
 	}))
 	t.Cleanup(server.Close)
-	_, _, declarationPath, _ := writeManagedDynamicSetupConfigFiles(t)
+	_, _, declarationPath, _, _ := writeManagedDynamicSetupConfigFiles(t)
 	config := managedDynamicSetupRuntimeConfig{
 		ControlPlaneOrigin: server.URL,
 		InternalToken:      strings.Repeat("a", 32),
@@ -336,7 +347,7 @@ func TestManagedDynamicHTTPAuthorityReservesAndRecoversAcrossRestart(t *testing.
 }
 
 func TestNewAppWiresDynamicAuthorityOnlyFromDedicatedConfig(t *testing.T) {
-	_, _, declarationPath, keyring := writeManagedDynamicSetupConfigFiles(t)
+	_, _, declarationPath, hostTokenDirectory, keyring := writeManagedDynamicSetupConfigFiles(t)
 	config := testConfig()
 	config.DataDir = t.TempDir()
 	config.RequireAuth = false
@@ -356,12 +367,14 @@ func TestNewAppWiresDynamicAuthorityOnlyFromDedicatedConfig(t *testing.T) {
 	}
 
 	config.DynamicSetup = &managedDynamicSetupRuntimeConfig{
-		ControlPlaneOrigin: "https://control.example.test",
-		InternalToken:      strings.Repeat("a", 32),
-		Keyring:            keyring,
-		DeclarationPaths:   []string{declarationPath},
-		CustodySocket:      "/run/janus/dynamic-custody.sock",
-		DeliverySocket:     "/run/janus/dynamic-delivery.sock",
+		ControlPlaneOrigin:     "https://control.example.test",
+		InternalToken:          strings.Repeat("a", 32),
+		Keyring:                keyring,
+		DeclarationPaths:       []string{declarationPath},
+		CustodySocket:          "/run/janus/dynamic-custody.sock",
+		DeliverySocket:         "/run/janus/dynamic-delivery.sock",
+		TransportSocket:        "/run/janus/dynamic-transport.sock",
+		HostTokenGenerationDir: hostTokenDirectory,
 	}
 	app, err = NewApp(t.Context(), config, store)
 	if err != nil {

@@ -435,20 +435,22 @@ type AuditEntry struct {
 }
 
 type App struct {
-	cfg                    Config
-	store                  *Store
-	broker                 *Broker
-	permits                *PermitStore
-	limiter                *RateLimiter
-	oauth                  *oauth2.Config
-	verifier               *oidc.IDTokenVerifier
-	templates              *template.Template
-	managedSetup           managedSetupIntentAuthority
-	managedTxn             managedTransactionExecutor
-	managedBridge          *managedOperationBridge
-	managedDynamicSetup    managedDynamicSetupIntentAuthority
-	managedDynamicCustody  managedDynamicCustodyExecutor
-	managedDynamicDelivery managedDynamicDeliveryExecutor
+	cfg                      Config
+	store                    *Store
+	broker                   *Broker
+	permits                  *PermitStore
+	limiter                  *RateLimiter
+	oauth                    *oauth2.Config
+	verifier                 *oidc.IDTokenVerifier
+	templates                *template.Template
+	managedSetup             managedSetupIntentAuthority
+	managedTxn               managedTransactionExecutor
+	managedBridge            *managedOperationBridge
+	managedDynamicSetup      managedDynamicSetupIntentAuthority
+	managedDynamicCustody    managedDynamicCustodyExecutor
+	managedDynamicDelivery   managedDynamicDeliveryExecutor
+	managedDynamicTransport  managedDynamicTransportExecutor
+	managedDynamicHostTokens *managedHostTokenVerifier
 }
 
 type Session struct {
@@ -710,6 +712,11 @@ func NewApp(ctx context.Context, cfg Config, store *Store) (*App, error) {
 		app.managedDynamicSetup = dynamicSetup
 		app.managedDynamicCustody = newManagedDynamicCustodyClient(cfg.DynamicSetup.CustodySocket)
 		app.managedDynamicDelivery = newManagedDynamicDeliveryClient(cfg.DynamicSetup.DeliverySocket)
+		if info, statErr := os.Stat(cfg.DynamicSetup.HostTokenGenerationDir); statErr != nil || !info.IsDir() || info.Mode().Perm()&0027 != 0 {
+			return nil, fmt.Errorf("managed dynamic host token generation is unavailable")
+		}
+		app.managedDynamicTransport = newManagedDynamicTransportClient(cfg.DynamicSetup.TransportSocket)
+		app.managedDynamicHostTokens = &managedHostTokenVerifier{root: cfg.DynamicSetup.HostTokenGenerationDir}
 	}
 
 	if cfg.OIDCConfigured() {
@@ -753,6 +760,8 @@ func (app *App) routeSpecs() []routeSpec {
 		{pattern: "GET /managed-environment/setup", permission: PermissionLifecycleEntry, authenticated: true, handler: app.handleManagedDynamicSetup},
 		{pattern: "POST /managed-environment/setup/step-up", permission: PermissionLifecycleEntry, authenticated: true, handler: app.handleManagedDynamicSetupStepUp},
 		{pattern: "POST /managed-environment/setup/admit", permission: PermissionLifecycleEntry, authenticated: true, handler: app.handleManagedDynamicValueAdmission},
+		{pattern: "GET /internal/managed-environment-host-packages/{hostRef}", permission: PermissionLifecycleEntry, handler: app.handleManagedDynamicHostPackage},
+		{pattern: "POST /internal/managed-environment-host-packages/{hostRef}/{operationRef}/receipt", permission: PermissionLifecycleEntry, handler: app.handleManagedDynamicHostReceipt},
 		{pattern: "GET /internal/managed-service-host-envelopes/{hostRef}/{operationRef}", permission: PermissionLifecycleEntry, handler: app.handleManagedHostEnvelope},
 		{pattern: "POST /internal/managed-service-operations/{operationRef}/reconcile", permission: PermissionLifecycleEntry, handler: app.handleManagedHostReconcile},
 		{pattern: "POST /logout", permission: PermissionDescriptorRead, authenticated: true, handler: app.handleLogout},
@@ -839,6 +848,10 @@ func allowedMethodsForPath(path string) ([]string, bool) {
 	case managedHostEnvelopePath(path):
 		return []string{http.MethodGet}, true
 	case managedHostReconcilePath(path):
+		return []string{http.MethodPost}, true
+	case managedDynamicHostPackagePath(path):
+		return []string{http.MethodGet}, true
+	case managedDynamicHostReceiptPath(path):
 		return []string{http.MethodPost}, true
 	default:
 		return nil, false

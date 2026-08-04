@@ -11,12 +11,13 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine as _};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
 use super::{
-    read_private_regular, valid_ref, HostEnvelopeControlV1, HostEnvelopeQuarantineControlV1,
-    HostExecutor, HostExecutorOutcome,
+    read_private_regular, valid_ref, DynamicHostExecutorOutcome, HostEnvelopeControlV1,
+    HostEnvelopeQuarantineControlV1, HostExecutor, HostExecutorOutcome,
 };
 
 const CONFIG_SCHEMA: &str = "inspr.janus.managed-host-agent-config.v2";
@@ -26,12 +27,15 @@ const LEASE_SCHEMA: &str = "inspr.pharos.managed-service-operation-lease.v1";
 const RESULT_SCHEMA: &str = "inspr.pharos.managed-service-operation-result.v1";
 const STATUS_SCHEMA: &str = "inspr.pharos.managed-service-operation-status.v1";
 const RECONCILE_SCHEMA: &str = "inspr.janus.managed-host-reconcile-request.v1";
+const DYNAMIC_CLAIM_SCHEMA: &str = "inspr.janus.managed-dynamic-host-package-claim.v1";
+const DYNAMIC_RECEIPT_SCHEMA: &str = "inspr.janus.managed-dynamic-host-receipt-submission.v1";
 const SCHEMA_VERSION: u16 = 1;
 const SYSTEM_CONFIG_PATH: &str = "/run/janus-managed-agent/config.json";
 const MAX_CONFIG_BYTES: usize = 128 * 1024;
 const MAX_TOKEN_BYTES: usize = 4 * 1024;
 const MAX_JSON_BYTES: usize = 32 * 1024;
 const MAX_PACKET_BYTES: usize = 256 * 1024;
+const MAX_DYNAMIC_CLAIM_BYTES: usize = 512 * 1024;
 const MAX_PROFILES: usize = 128;
 const MAX_COMMAND_OUTPUT_BYTES: usize = 16 * 1024;
 // Docker reports a newly started container as `starting` until its first
@@ -210,6 +214,45 @@ struct ManagedOperationStatusV1 {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct ManagedDynamicHostPackageClaimV1 {
+    schema: String,
+    schema_version: u16,
+    host_ref: String,
+    service_ref: String,
+    environment_policy_ref: String,
+    operation_ref: String,
+    package_ref: String,
+    envelope_ref: String,
+    binding_ref: String,
+    generation_ref: String,
+    packet_base64: String,
+    phase: String,
+    reason_code: String,
+    packet_returned: bool,
+    value_returned: bool,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+struct ManagedDynamicHostReceiptV1 {
+    schema: &'static str,
+    schema_version: u16,
+    host_ref: String,
+    service_ref: String,
+    environment_policy_ref: String,
+    operation_ref: String,
+    package_ref: String,
+    envelope_ref: String,
+    binding_ref: String,
+    generation_ref: String,
+    phase: &'static str,
+    reason_code: String,
+    observed_at_unix_secs: i64,
+    packet_returned: bool,
+    value_returned: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ManagedOperationSummaryV1 {
     operation_ref: String,
     operation_kind: String,
@@ -362,8 +405,80 @@ impl ManagedHostAgent {
     fn run_once(&self, executor: &HostExecutor) -> AgentResult<()> {
         match self.claim()? {
             Some(lease) => self.execute_lease(executor, &lease),
+            None if self.execute_dynamic_package(executor)? => Ok(()),
             None => self.recover_staged(executor),
         }
+    }
+
+    fn execute_dynamic_package(&self, executor: &HostExecutor) -> AgentResult<bool> {
+        let Some(claim) = self.claim_dynamic_package()? else {
+            return Ok(false);
+        };
+        let packet = STANDARD_NO_PAD
+            .decode(claim.packet_base64.as_bytes())
+            .map_err(|_| ManagedHostAgentError::new("managed_dynamic_claim_invalid"))?;
+        if packet.is_empty() || packet.len() > MAX_PACKET_BYTES {
+            return Err(ManagedHostAgentError::new("managed_dynamic_claim_invalid"));
+        }
+        let outcome = executor
+            .install_dynamic(&packet, SystemTime::now())
+            .map_err(|_| ManagedHostAgentError::new("managed_dynamic_install_failed"))?;
+        let receipt = dynamic_receipt_for_outcome(&claim, &outcome, unix_seconds()?)?;
+        let body = serde_json::to_vec(&receipt)
+            .map_err(|_| ManagedHostAgentError::new("managed_dynamic_receipt_invalid"))?;
+        let path = format!(
+            "/internal/managed-environment-host-packages/{}/{}/receipt",
+            self.config.host_ref, claim.operation_ref
+        );
+        let response = self.post_json(&self.config.janus_origin, &path, &body, MAX_JSON_BYTES)?;
+        if response.status != 204 || !response.body.is_empty() {
+            return Err(ManagedHostAgentError::new(
+                "managed_dynamic_receipt_unavailable",
+            ));
+        }
+        Ok(true)
+    }
+
+    fn claim_dynamic_package(&self) -> AgentResult<Option<ManagedDynamicHostPackageClaimV1>> {
+        let path = format!(
+            "/internal/managed-environment-host-packages/{}",
+            self.config.host_ref
+        );
+        let response = self.get(
+            &self.config.janus_origin,
+            &path,
+            MAX_DYNAMIC_CLAIM_BYTES,
+            Some("application/json"),
+        )?;
+        if matches!(response.status, 204 | 404) {
+            return Ok(None);
+        }
+        if response.status != 200 {
+            return Err(ManagedHostAgentError::new(
+                "managed_dynamic_claim_unavailable",
+            ));
+        }
+        let claim: ManagedDynamicHostPackageClaimV1 = decode_strict(&response.body)
+            .map_err(|_| ManagedHostAgentError::new("managed_dynamic_claim_invalid"))?;
+        if claim.schema != DYNAMIC_CLAIM_SCHEMA
+            || claim.schema_version != 1
+            || claim.host_ref != self.config.host_ref
+            || !valid_ref("svc_", &claim.service_ref)
+            || !valid_ref("envpol_", &claim.environment_policy_ref)
+            || !valid_ref("op_", &claim.operation_ref)
+            || !valid_ref("pkg_", &claim.package_ref)
+            || !valid_ref("env_", &claim.envelope_ref)
+            || !valid_ref("bind_", &claim.binding_ref)
+            || !valid_ref("gen_", &claim.generation_ref)
+            || claim.packet_base64.is_empty()
+            || claim.phase != "claimed"
+            || claim.reason_code != "dynamic_transport_package_claimed"
+            || !claim.packet_returned
+            || claim.value_returned
+        {
+            return Err(ManagedHostAgentError::new("managed_dynamic_claim_invalid"));
+        }
+        Ok(Some(claim))
     }
 
     fn claim(&self) -> AgentResult<Option<ManagedOperationLeaseV1>> {
@@ -1211,6 +1326,49 @@ fn endpoint(origin: &str, path: &str) -> AgentResult<Url> {
         .map_err(|_| ManagedHostAgentError::new("managed_host_target_invalid"))
 }
 
+fn dynamic_receipt_for_outcome(
+    claim: &ManagedDynamicHostPackageClaimV1,
+    outcome: &DynamicHostExecutorOutcome,
+    observed_at_unix_secs: i64,
+) -> AgentResult<ManagedDynamicHostReceiptV1> {
+    if outcome.action != "install-dynamic"
+        || outcome.host_ref != claim.host_ref
+        || outcome.service_ref != claim.service_ref
+        || outcome.environment_policy_ref != claim.environment_policy_ref
+        || outcome.operation_ref.as_deref() != Some(claim.operation_ref.as_str())
+        || outcome.binding_ref.as_deref() != Some(claim.binding_ref.as_str())
+        || outcome.generation_ref.as_deref() != Some(claim.generation_ref.as_str())
+        || outcome.binding_count == 0
+        || outcome.phase != "materialized"
+        || !matches!(
+            outcome.reason_code.as_str(),
+            "dynamic_host_environment_materialized" | "dynamic_host_materialization_idempotent"
+        )
+        || outcome.value_returned
+    {
+        return Err(ManagedHostAgentError::new(
+            "managed_dynamic_outcome_invalid",
+        ));
+    }
+    Ok(ManagedDynamicHostReceiptV1 {
+        schema: DYNAMIC_RECEIPT_SCHEMA,
+        schema_version: SCHEMA_VERSION,
+        host_ref: claim.host_ref.clone(),
+        service_ref: claim.service_ref.clone(),
+        environment_policy_ref: claim.environment_policy_ref.clone(),
+        operation_ref: claim.operation_ref.clone(),
+        package_ref: claim.package_ref.clone(),
+        envelope_ref: claim.envelope_ref.clone(),
+        binding_ref: claim.binding_ref.clone(),
+        generation_ref: claim.generation_ref.clone(),
+        phase: "materialized",
+        reason_code: outcome.reason_code.clone(),
+        observed_at_unix_secs,
+        packet_returned: false,
+        value_returned: false,
+    })
+}
+
 fn validate_config(config: &ManagedHostAgentConfigV2) -> AgentResult<()> {
     if config.schema != CONFIG_SCHEMA
         || config.schema_version != CONFIG_SCHEMA_VERSION
@@ -1637,6 +1795,60 @@ mod tests {
                 container_name: "janus-managed-secret-canary".to_string(),
             }],
         }
+    }
+
+    #[test]
+    fn dynamic_receipt_requires_exact_value_free_materialization() {
+        let claim = ManagedDynamicHostPackageClaimV1 {
+            schema: DYNAMIC_CLAIM_SCHEMA.to_string(),
+            schema_version: SCHEMA_VERSION,
+            host_ref: "host_58f36c72a91e".to_string(),
+            service_ref: "svc_0bca8d31f7e2".to_string(),
+            environment_policy_ref: "envpol_2d7a0f63c951".to_string(),
+            operation_ref: "op_58f36c72a91e".to_string(),
+            package_ref: "pkg_49c0e8a17d63".to_string(),
+            envelope_ref: "env_a84f209c4b32".to_string(),
+            binding_ref: "bind_094df2f6c8b1".to_string(),
+            generation_ref: "gen_8a0f4e271c93".to_string(),
+            packet_base64: "cGFja2V0".to_string(),
+            phase: "claimed".to_string(),
+            reason_code: "dynamic_transport_package_claimed".to_string(),
+            packet_returned: true,
+            value_returned: false,
+        };
+        let outcome = DynamicHostExecutorOutcome {
+            action: "install-dynamic".to_string(),
+            host_ref: claim.host_ref.clone(),
+            service_ref: claim.service_ref.clone(),
+            environment_policy_ref: claim.environment_policy_ref.clone(),
+            binding_ref: Some(claim.binding_ref.clone()),
+            operation_ref: Some(claim.operation_ref.clone()),
+            generation_ref: Some(claim.generation_ref.clone()),
+            binding_count: 1,
+            phase: "materialized".to_string(),
+            reason_code: "dynamic_host_environment_materialized".to_string(),
+            value_returned: false,
+        };
+        let receipt = dynamic_receipt_for_outcome(&claim, &outcome, 1_800_000_000)
+            .expect("exact materialization");
+        assert_eq!(receipt.operation_ref, claim.operation_ref);
+        assert!(!receipt.packet_returned);
+        assert!(!receipt.value_returned);
+
+        let mut mismatch = outcome.clone();
+        mismatch.operation_ref = Some("op_attacker000001".to_string());
+        assert_eq!(
+            dynamic_receipt_for_outcome(&claim, &mismatch, 1_800_000_000)
+                .expect_err("cross-operation outcome denied"),
+            ManagedHostAgentError::new("managed_dynamic_outcome_invalid")
+        );
+        let mut leaking = outcome;
+        leaking.value_returned = true;
+        assert_eq!(
+            dynamic_receipt_for_outcome(&claim, &leaking, 1_800_000_000)
+                .expect_err("value-bearing outcome denied"),
+            ManagedHostAgentError::new("managed_dynamic_outcome_invalid")
+        );
     }
 
     #[test]

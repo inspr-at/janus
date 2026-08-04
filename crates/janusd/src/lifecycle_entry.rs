@@ -62,6 +62,8 @@ fn load_host_producer_signing_key(path: &Path, key_id: &str) -> Result<SigningKe
 pub(super) mod dynamic_custody;
 #[path = "lifecycle_entry/dynamic_delivery.rs"]
 pub(super) mod dynamic_delivery;
+#[path = "lifecycle_entry/dynamic_transport.rs"]
+pub(super) mod dynamic_transport;
 #[path = "lifecycle_entry/web_transaction.rs"]
 pub(super) mod web_transaction;
 

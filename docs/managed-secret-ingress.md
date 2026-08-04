@@ -21,8 +21,11 @@ packet for the declared host, and persists it in a private Janus outbox.
 JANUS-399 adds the corresponding local host acceptance boundary: a strict
 version 2 executor configuration may accept a `create` packet only for an
 exact root-owned dynamic service policy and atomically rebuild that service's
-private aggregate environment file. It still does not transport the outbox
-packet or perform reload, health, activation, replacement, removal, or
+private aggregate environment file. JANUS-400 adds the separate transport
+boundary: the enrolled host agent may claim only its exact package through the
+existing host-token model, install it with the v2 executor only when no v1
+lease is pending, and return a strict value-free materialization receipt.
+It still performs no reload, health, activation, replacement, removal, or
 deployment enablement.
 The existing v1 declared-slot flow described below remains unchanged and is
 still the only production value-bearing path.
@@ -89,6 +92,8 @@ only when all of the following are present:
 | `JANUS_MANAGED_DYNAMIC_SETUP_DECLARATION_PATHS` | Comma-separated, unique absolute paths to the root-owned v2 service declarations. |
 | `JANUS_MANAGED_DYNAMIC_CUSTODY_SOCKET` | Absolute path to the private custody-only Rust daemon socket. |
 | `JANUS_MANAGED_DYNAMIC_DELIVERY_SOCKET` | Different absolute path to the private host-package preparation socket. |
+| `JANUS_MANAGED_DYNAMIC_TRANSPORT_SOCKET` | Third, distinct absolute path to the private outbox-claim and receipt daemon socket. |
+| `JANUS_MANAGED_DYNAMIC_HOST_TOKEN_GENERATION_DIR` | Absolute private directory containing the existing enrolled-host token generation. |
 
 Detail configuration without the exact enable flag, an invalid flag, partial
 configuration, a non-HTTPS origin, an unsafe token file, an invalid key
@@ -118,11 +123,11 @@ or unwritable fails closed; it never falls back to browser state.
 
 No current deployment configuration enables this capability. Janus can create
 encrypted custody and a host-bound package in its private outbox, and the
-version 2 host executor can locally validate that packet and materialize the
-pre-approved service's private aggregate. There is still no transport between
-those boundaries, no Pharos operation registration, and no service reload,
-health, activation, replacement, or removal claim. Each remains a separate
-reviewed slice.
+enrolled host agent can claim that package for the exact host, ask the version
+2 executor to materialize the pre-approved service's private aggregate, and
+return value-free evidence. There is still no Pharos operation registration
+and no service reload, health, activation, replacement, or removal claim. Each
+remains a separate reviewed slice.
 
 ## Dynamic value admission boundary
 
@@ -179,9 +184,9 @@ A duplicate browser POST does not read value bytes and resolves to the existing
 safe state.
 
 The completed page says **Host-bound package prepared**, clears first-party
-cache and storage, and states that the package remains in Janus's private
-outbox: it has not been sent, installed, reloaded, or health-checked. The
-capability remains explicitly default-off.
+cache and storage, and states that the package is queued in Janus's private
+outbox for its exact enrolled host. It does not claim reload, health, or
+activation. The capability remains explicitly default-off.
 
 The custody daemon is separately configured and has no HTTP listener, Pharos
 client, host-delivery outbox, or lifecycle bridge:
@@ -196,7 +201,7 @@ client, host-delivery outbox, or lifecycle bridge:
 | `JANUS_AGE_RECIPIENT` or `JANUS_AGE_RECIPIENTS_FILE` | Existing reviewed native-Age or SSH-Ed25519 recipient configuration. |
 
 The delivery daemon is a second no-argv process with no HTTP listener, Pharos
-client, transport, host executor, reload, or health code:
+client, host executor, reload, or health code:
 
 | Environment variable | Contract |
 | --- | --- |
@@ -212,6 +217,26 @@ The daemon also requires the normal release-admission, migration-ready, and
 scope-transfer-ready environment used by Janus lifecycle entry. Startup or a
 request fails closed if any boundary, declaration, recipient, directory,
 receipt, ciphertext, peer identity, or release gate is invalid.
+
+The transport daemon is a third no-argv process. It never decrypts a packet,
+contacts a host, reloads a service, or inspects health. It exposes only exact
+host claim and exact materialization-receipt operations to the Go envelope:
+
+| Environment variable | Contract |
+| --- | --- |
+| `JANUS_MANAGED_DYNAMIC_TRANSPORT_SOCKET` | Absolute private Unix-socket path; shared with the Go envelope and distinct from custody and delivery. |
+| `JANUS_MANAGED_DYNAMIC_TRANSPORT_ALLOWED_UID` | Exact kernel-reported UID permitted to connect. |
+| `JANUS_MANAGED_DYNAMIC_TRANSPORT_PROFILE_FILE` | Existing strict delivery catalog used to locate and revalidate the exact host outbox. |
+| `JANUS_MANAGED_DYNAMIC_TRANSPORT_RECEIPT_DIR` | Separate private root for strict value-free materialization receipts. |
+
+When the dynamic capability is enabled, the Go envelope also requires
+`JANUS_MANAGED_DYNAMIC_HOST_TOKEN_GENERATION_DIR`, the existing private
+host-token generation directory. The host agent authenticates its exact
+`host_` reference, receives only the still-encrypted packet, calls
+`install-dynamic`, validates the returned identity and materialized outcome,
+then submits a receipt containing no packet or value. Lost responses retry
+idempotently; invalid earlier outbox state, cross-host claims, mismatched
+outcomes, and conflicting receipts fail closed.
 
 ## Route and trust boundary
 
