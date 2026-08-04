@@ -118,10 +118,12 @@ func managedDynamicCleanAbsolutePath(path string) bool {
 type managedDynamicHTTPAuthority struct {
 	fetcher  *managedHTTPIntentFetcher
 	consumer managedDynamicSetupIntentConsumer
+	replays  *managedDynamicReplayStore
 }
 
 func newManagedDynamicSetupAuthority(
 	config managedDynamicSetupRuntimeConfig,
+	dataDir string,
 	transport http.RoundTripper,
 ) (*managedDynamicHTTPAuthority, error) {
 	parsedOrigin, err := parseManagedOrigin(config.ControlPlaneOrigin)
@@ -139,6 +141,10 @@ func newManagedDynamicSetupAuthority(
 	if _, err := loadManagedDynamicDeclarations(config.DeclarationPaths); err != nil {
 		return nil, errors.New("managed_dynamic_setup_config_invalid")
 	}
+	replays, err := newManagedDynamicReplayStore(filepath.Join(dataDir, managedDynamicReplayStoreFile))
+	if err != nil {
+		return nil, err
+	}
 	return &managedDynamicHTTPAuthority{
 		fetcher: fetcher,
 		consumer: managedDynamicSetupIntentConsumer{
@@ -148,6 +154,7 @@ func newManagedDynamicSetupAuthority(
 			audienceRef: managedSetupExpectedAudienceRef,
 			now:         time.Now,
 		},
+		replays: replays,
 	}, nil
 }
 
@@ -170,4 +177,42 @@ func (authority *managedDynamicHTTPAuthority) Inspect(
 		return managedDynamicSetupInspection{}, normalizeManagedIntentError(err)
 	}
 	return authority.consumer.Inspect(envelope, intentRef, humanSessionRef)
+}
+
+func (authority *managedDynamicHTTPAuthority) Reserve(
+	ctx context.Context,
+	intentRef string,
+	humanSessionRef string,
+) (managedDynamicSetupReservation, error) {
+	if authority == nil || authority.replays == nil {
+		return managedDynamicSetupReservation{}, managedIntentError("managed_intent_internal_failure")
+	}
+	inspection, err := authority.Inspect(ctx, intentRef, humanSessionRef)
+	if err != nil {
+		return managedDynamicSetupReservation{}, err
+	}
+	operationRef, err := authority.replays.reserve(inspection.Intent, authority.consumer.now().Unix())
+	if err != nil {
+		return managedDynamicSetupReservation{}, normalizeManagedIntentError(err)
+	}
+	return managedDynamicSetupReservation{Inspection: inspection, OperationRef: operationRef}, nil
+}
+
+func (authority *managedDynamicHTTPAuthority) RecoverReservation(
+	ctx context.Context,
+	intentRef string,
+	humanSessionRef string,
+	operationRef string,
+) (managedDynamicSetupReservation, error) {
+	if authority == nil || authority.replays == nil || !validManagedRef("op_", operationRef) {
+		return managedDynamicSetupReservation{}, managedIntentError("managed_intent_recovery_unavailable")
+	}
+	inspection, err := authority.Inspect(ctx, intentRef, humanSessionRef)
+	if err != nil {
+		return managedDynamicSetupReservation{}, err
+	}
+	if err := authority.replays.recover(inspection.Intent, operationRef, authority.consumer.now().Unix()); err != nil {
+		return managedDynamicSetupReservation{}, normalizeManagedIntentError(err)
+	}
+	return managedDynamicSetupReservation{Inspection: inspection, OperationRef: operationRef}, nil
 }
