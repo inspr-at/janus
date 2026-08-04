@@ -209,6 +209,14 @@ pub async fn run_dynamic_custody_service() -> Result<()> {
     lifecycle_entry::dynamic_custody::run_from_env().await
 }
 
+/// Run the private dynamic host-package preparation boundary.
+///
+/// This entry point opens existing custody only to create a signed,
+/// host-encrypted outbox package. It has no transport or host-side effects.
+pub async fn run_dynamic_delivery_service() -> Result<()> {
+    lifecycle_entry::dynamic_delivery::run_from_env().await
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Command {
     Help,

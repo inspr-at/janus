@@ -20,7 +20,7 @@ const (
 func (app *App) handleManagedDynamicValueAdmission(w http.ResponseWriter, r *http.Request) {
 	managedSecretResponseBoundary(w)
 	session := currentSession(r.Context())
-	if !app.managedDynamicSetupEnabled() || app.managedDynamicCustody == nil || !app.cfg.RequireAuth {
+	if !app.managedDynamicSetupEnabled() || app.managedDynamicCustody == nil || app.managedDynamicDelivery == nil || !app.cfg.RequireAuth {
 		app.audit(r, "managed_environment.value.admit", "denied", session.Subject, "dynamic setup unavailable")
 		app.renderSafeFailure(w, r, http.StatusServiceUnavailable, "managed_setup_unavailable", "Managed environment setup is not ready.", nil)
 		return
@@ -61,12 +61,15 @@ func (app *App) handleManagedDynamicValueAdmission(w http.ResponseWriter, r *htt
 			if recoverErr == nil && recovered.ValueAdmissionStarted {
 				custody, custodyErr := app.managedDynamicCustody.Recover(r.Context(), proof.Target, proof.OperationRef)
 				if custodyErr == nil {
-					completed, completeErr := app.managedDynamicSetup.CompleteValueAdmission(r.Context(), proof.Target, proof.OperationRef, custody)
-					if completeErr == nil && completed.ValueAdmissionComplete && completed.BindingRef == custody.BindingRef && completed.SecretRef == custody.SecretRef && completed.GenerationRef == custody.GenerationRef {
-						w.Header().Set("Clear-Site-Data", `"cache", "storage"`)
-						app.audit(r, "managed_environment.value.admit", "allowed", session.Subject, "lost custody response recovered without reading submitted value")
-						http.Redirect(w, r, "/managed-environment/setup?intent="+url.QueryEscape(proof.Target.IntentRef), http.StatusSeeOther)
-						return
+					delivery, deliveryErr := app.managedDynamicDelivery.Prepare(r.Context(), proof.Target, proof.OperationRef, custody)
+					if deliveryErr == nil {
+						completed, completeErr := app.managedDynamicSetup.CompleteValueAdmission(r.Context(), proof.Target, proof.OperationRef, custody, delivery)
+						if completeErr == nil && completed.ValueAdmissionComplete && completed.BindingRef == custody.BindingRef && completed.SecretRef == custody.SecretRef && completed.GenerationRef == custody.GenerationRef && completed.PackageRef == delivery.PackageRef && completed.EnvelopeRef == delivery.EnvelopeRef {
+							w.Header().Set("Clear-Site-Data", `"cache", "storage"`)
+							app.audit(r, "managed_environment.value.admit", "allowed", session.Subject, "lost custody response recovered without reading submitted value")
+							http.Redirect(w, r, "/managed-environment/setup?intent="+url.QueryEscape(proof.Target.IntentRef), http.StatusSeeOther)
+							return
+						}
 					}
 				}
 			}
@@ -106,20 +109,29 @@ func (app *App) handleManagedDynamicValueAdmission(w http.ResponseWriter, r *htt
 		app.renderSafeFailure(w, r, http.StatusServiceUnavailable, "value_custody_unavailable", "Janus could not confirm encrypted custody. Start again from Pharos; the submitted value cannot be reused.", nil)
 		return
 	}
-	completed, err := app.managedDynamicSetup.CompleteValueAdmission(r.Context(), proof.Target, proof.OperationRef, custody)
+	delivery, err := app.managedDynamicDelivery.Prepare(r.Context(), proof.Target, proof.OperationRef, custody)
+	if err != nil || validateManagedDynamicDeliveryResult(delivery, proof.OperationRef) != nil {
+		app.clearManagedDynamicStepUpProofCookies(w)
+		w.Header().Set("Clear-Site-Data", `"cache", "storage"`)
+		app.audit(r, "managed_environment.value.admit", "denied", session.Subject, "host-bound package unavailable after encrypted custody")
+		app.renderSafeFailure(w, r, http.StatusServiceUnavailable, "value_delivery_unavailable", "Janus encrypted the value but could not prepare its host-bound package. Start again from Pharos.", nil)
+		return
+	}
+	completed, err := app.managedDynamicSetup.CompleteValueAdmission(r.Context(), proof.Target, proof.OperationRef, custody, delivery)
 	if err != nil || completed.OperationRef != proof.OperationRef ||
 		managedDynamicTargetFromInspection(completed.Inspection) != proof.Target ||
 		!completed.ValueAdmissionStarted || !completed.ValueAdmissionComplete ||
 		completed.BindingRef != custody.BindingRef || completed.SecretRef != custody.SecretRef ||
-		completed.GenerationRef != custody.GenerationRef {
+		completed.GenerationRef != custody.GenerationRef || completed.PackageRef != delivery.PackageRef ||
+		completed.EnvelopeRef != delivery.EnvelopeRef {
 		app.clearManagedDynamicStepUpProofCookies(w)
 		w.Header().Set("Clear-Site-Data", `"cache", "storage"`)
 		app.audit(r, "managed_environment.value.admit", "denied", session.Subject, "value-free custody receipt unavailable")
-		app.renderSafeFailure(w, r, http.StatusServiceUnavailable, "value_admission_incomplete", "Janus encrypted the value but could not confirm its value-free receipt. Start again from Pharos.", nil)
+		app.renderSafeFailure(w, r, http.StatusServiceUnavailable, "value_admission_incomplete", "Janus prepared the encrypted host package but could not confirm its value-free receipt. Start again from Pharos.", nil)
 		return
 	}
 	w.Header().Set("Clear-Site-Data", `"cache", "storage"`)
-	app.audit(r, "managed_environment.value.admit", "allowed", session.Subject, "one bounded value stored in opaque encrypted custody")
+	app.audit(r, "managed_environment.value.admit", "allowed", session.Subject, "one bounded value stored in custody and prepared as a host-bound package")
 	http.Redirect(w, r, "/managed-environment/setup?intent="+url.QueryEscape(proof.Target.IntentRef), http.StatusSeeOther)
 }
 

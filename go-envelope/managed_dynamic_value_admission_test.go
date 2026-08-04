@@ -33,6 +33,27 @@ func managedDynamicCustodyTestResult(operationRef string) managedDynamicCustodyR
 	}
 }
 
+func managedDynamicDeliveryTestResult(operationRef string) managedDynamicDeliveryResult {
+	return managedDynamicDeliveryResult{
+		OperationRef: operationRef, PackageRef: "pkg_fixture0001", EnvelopeRef: "env_fixture0001",
+		Phase: "prepared", ReasonCode: "dynamic_delivery_prepared",
+	}
+}
+
+type fakeManagedDynamicDeliveryExecutor struct {
+	prepareErr error
+}
+
+func (executor *fakeManagedDynamicDeliveryExecutor) Prepare(_ context.Context, _ managedDynamicStepUpTarget, operationRef string, custody managedDynamicCustodyResult) (managedDynamicDeliveryResult, error) {
+	if executor.prepareErr != nil {
+		return managedDynamicDeliveryResult{}, executor.prepareErr
+	}
+	if validateManagedDynamicCustodyResult(custody, operationRef) != nil {
+		return managedDynamicDeliveryResult{}, managedDynamicDeliveryError("dynamic_delivery_request_invalid")
+	}
+	return managedDynamicDeliveryTestResult(operationRef), nil
+}
+
 func (executor *fakeManagedDynamicCustodyExecutor) Custody(_ context.Context, _ managedDynamicStepUpTarget, operationRef string, value []byte) (managedDynamicCustodyResult, error) {
 	executor.count++
 	if executor.custodyErr != nil {
@@ -99,6 +120,7 @@ func managedDynamicAdmissionFixture(
 	t.Helper()
 	app, authority, session, sessionCookie, _ := managedDynamicSessionFixture(t)
 	app.managedDynamicCustody = &fakeManagedDynamicCustodyExecutor{}
+	app.managedDynamicDelivery = &fakeManagedDynamicDeliveryExecutor{}
 	authority.inspection.Intent.Source = source
 	target := managedDynamicTargetFromInspection(authority.inspection)
 	reservation, err := authority.Reserve(t.Context(), target.IntentRef, target.HumanSessionRef)
@@ -138,7 +160,7 @@ func TestManagedDynamicImportReachesEncryptedCustodyOnce(t *testing.T) {
 	viewResponse := httptest.NewRecorder()
 	app.routes().ServeHTTP(viewResponse, view)
 	body := viewResponse.Body.String()
-	if viewResponse.Code != http.StatusOK || !strings.Contains(body, "Encrypted custody confirmed") || !strings.Contains(body, "No value returned") || strings.Contains(body, `name="secret_value"`) || strings.Contains(body, canary) {
+	if viewResponse.Code != http.StatusOK || !strings.Contains(body, "Host-bound package prepared") || !strings.Contains(body, "No value or packet returned") || !strings.Contains(body, authority.reservation.PackageRef) || strings.Contains(body, `name="secret_value"`) || strings.Contains(body, canary) {
 		t.Fatalf("value-free admission receipt is invalid: status=%d body=%s", viewResponse.Code, body)
 	}
 }

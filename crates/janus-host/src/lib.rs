@@ -20,7 +20,7 @@ use age::{Decryptor, Encryptor};
 use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine as _};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use fs2::FileExt;
-use janus_core::{ScopeRef, SecretValue};
+use janus_core::{ManagedEnvironmentName, ScopeRef, SecretValue};
 use rustix::fs::{fchown, Uid};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -34,6 +34,9 @@ const CONTROL_SCHEMA: &str = "inspr.janus.host-envelope-control.v1";
 const QUARANTINE_CONTROL_SCHEMA: &str = "inspr.janus.host-envelope-quarantine-control.v1";
 const QUARANTINE_STATE_SCHEMA: &str = "inspr.janus.host-envelope-quarantine.v1";
 const SIGNATURE_DOMAIN: &[u8] = b"inspr.janus.host-envelope.signature.v1\0";
+const DYNAMIC_ENVELOPE_SCHEMA: &str = "inspr.janus.dynamic-host-envelope.v1";
+const DYNAMIC_PAYLOAD_SCHEMA: &str = "inspr.janus.dynamic-host-envelope-payload.v1";
+const DYNAMIC_SIGNATURE_DOMAIN: &[u8] = b"inspr.janus.dynamic-host-envelope.signature.v1\0";
 const SCHEMA_VERSION: u8 = 1;
 const MAX_CONFIG_BYTES: usize = 64 * 1024;
 const MAX_PACKET_BYTES: usize = 256 * 1024;
@@ -109,6 +112,57 @@ pub struct HostEnvelopeSealRequest<'a> {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SignedHostEnvelopeV1 {
+    pub schema: String,
+    pub schema_version: u8,
+    pub key_id: String,
+    pub ciphertext: String,
+    pub signature: String,
+}
+
+/// Exact binding encrypted into one not-yet-installable dynamic host package.
+///
+/// The current host executor intentionally does not accept this schema. A
+/// later reviewed host slice must add explicit dynamic-policy enforcement
+/// before these packages can have a host effect.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DynamicHostEnvelopeBindingV1 {
+    pub schema: String,
+    pub schema_version: u8,
+    pub envelope_ref: String,
+    pub operation_ref: String,
+    pub operation_kind: String,
+    pub source: String,
+    pub host_ref: String,
+    pub service_ref: String,
+    pub binding_ref: String,
+    pub secret_ref: String,
+    pub generation_ref: String,
+    pub environment_policy_ref: String,
+    pub environment_policy_fingerprint: String,
+    pub declaration_fingerprint: String,
+    pub environment_name: String,
+    pub delivery_profile_ref: String,
+    pub reload_profile_ref: String,
+    pub health_profile_ref: String,
+    pub revocation_epoch: u64,
+    pub issued_at_unix_secs: u64,
+    pub expires_at_unix_secs: u64,
+}
+
+/// Input to the dynamic host-package seal boundary.
+pub struct DynamicHostEnvelopeSealRequest<'a> {
+    pub binding: DynamicHostEnvelopeBindingV1,
+    pub host_recipient: &'a str,
+    pub signing_key_id: &'a str,
+    pub signing_key: &'a SigningKey,
+    pub value: SecretValue,
+}
+
+/// A separately signed packet that no current host executor will install.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SignedDynamicHostEnvelopeV1 {
     pub schema: String,
     pub schema_version: u8,
     pub key_id: String,
@@ -300,6 +354,63 @@ pub fn seal_host_envelope(request: HostEnvelopeSealRequest<'_>) -> HostResult<Ve
         .map_err(|_| HostEnvelopeError::new("host_envelope_packet_invalid"))?;
     if encoded.len() > MAX_PACKET_BYTES {
         return Err(HostEnvelopeError::new("host_envelope_packet_oversized"));
+    }
+    Ok(encoded)
+}
+
+/// Seal one dynamic value for exactly one host under a signature domain that
+/// is deliberately incompatible with the existing declared-slot executor.
+pub fn seal_dynamic_host_envelope(
+    request: DynamicHostEnvelopeSealRequest<'_>,
+) -> HostResult<Vec<u8>> {
+    validate_dynamic_binding(&request.binding)?;
+    let value = request.value.expose_bytes();
+    if value.is_empty() || value.len() > MAX_SECRET_BYTES {
+        return Err(HostEnvelopeError::new(
+            "dynamic_host_envelope_value_invalid",
+        ));
+    }
+    if !valid_ref("key_", request.signing_key_id) {
+        return Err(HostEnvelopeError::new(
+            "dynamic_host_envelope_signing_key_invalid",
+        ));
+    }
+    let metadata = serde_json::to_vec(&request.binding)
+        .map_err(|_| HostEnvelopeError::new("dynamic_host_envelope_metadata_invalid"))?;
+    if metadata.len() > MAX_PAYLOAD_METADATA_BYTES {
+        return Err(HostEnvelopeError::new(
+            "dynamic_host_envelope_metadata_oversized",
+        ));
+    }
+    let mut plaintext = Vec::with_capacity(4 + metadata.len() + value.len());
+    plaintext.extend_from_slice(&(metadata.len() as u32).to_be_bytes());
+    plaintext.extend_from_slice(&metadata);
+    plaintext.extend_from_slice(value);
+    let ciphertext = encrypt_for_recipient(request.host_recipient, &plaintext);
+    plaintext.zeroize();
+    let ciphertext = ciphertext?;
+    if ciphertext.len() > MAX_CIPHERTEXT_BYTES {
+        return Err(HostEnvelopeError::new(
+            "dynamic_host_envelope_ciphertext_oversized",
+        ));
+    }
+    let signature = request.signing_key.sign(&dynamic_signature_message(
+        request.signing_key_id,
+        &ciphertext,
+    ));
+    let packet = SignedDynamicHostEnvelopeV1 {
+        schema: DYNAMIC_ENVELOPE_SCHEMA.to_string(),
+        schema_version: SCHEMA_VERSION,
+        key_id: request.signing_key_id.to_string(),
+        ciphertext: STANDARD_NO_PAD.encode(ciphertext),
+        signature: STANDARD_NO_PAD.encode(signature.to_bytes()),
+    };
+    let encoded = serde_json::to_vec(&packet)
+        .map_err(|_| HostEnvelopeError::new("dynamic_host_envelope_packet_invalid"))?;
+    if encoded.len() > MAX_PACKET_BYTES {
+        return Err(HostEnvelopeError::new(
+            "dynamic_host_envelope_packet_oversized",
+        ));
     }
     Ok(encoded)
 }
@@ -1420,6 +1531,40 @@ fn validate_binding(binding: &HostEnvelopeBindingV1) -> HostResult<()> {
     Ok(())
 }
 
+fn validate_dynamic_binding(binding: &DynamicHostEnvelopeBindingV1) -> HostResult<()> {
+    let ttl = binding
+        .expires_at_unix_secs
+        .checked_sub(binding.issued_at_unix_secs)
+        .ok_or_else(|| HostEnvelopeError::new("dynamic_host_envelope_binding_invalid"))?;
+    if binding.schema != DYNAMIC_PAYLOAD_SCHEMA
+        || binding.schema_version != SCHEMA_VERSION
+        || !valid_ref("env_", &binding.envelope_ref)
+        || !valid_ref("op_", &binding.operation_ref)
+        || !matches!(binding.operation_kind.as_str(), "create" | "replace")
+        || !matches!(binding.source.as_str(), "generated" | "import")
+        || !valid_ref("host_", &binding.host_ref)
+        || !valid_ref("svc_", &binding.service_ref)
+        || !valid_ref("bind_", &binding.binding_ref)
+        || !valid_ref("sec_", &binding.secret_ref)
+        || !valid_ref("gen_", &binding.generation_ref)
+        || !valid_ref("envpol_", &binding.environment_policy_ref)
+        || !valid_ref("envpf_", &binding.environment_policy_fingerprint)
+        || !valid_ref("decl_", &binding.declaration_fingerprint)
+        || ManagedEnvironmentName::new(binding.environment_name.clone()).is_err()
+        || !valid_ref("delivery_", &binding.delivery_profile_ref)
+        || !valid_ref("reload_", &binding.reload_profile_ref)
+        || !valid_ref("health_", &binding.health_profile_ref)
+        || binding.revocation_epoch == 0
+        || binding.issued_at_unix_secs == 0
+        || !(60..=31 * 24 * 60 * 60).contains(&ttl)
+    {
+        return Err(HostEnvelopeError::new(
+            "dynamic_host_envelope_binding_invalid",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_control(request: &HostEnvelopeControlV1, host_ref: &str) -> HostResult<()> {
     if request.schema != CONTROL_SCHEMA
         || request.schema_version != SCHEMA_VERSION
@@ -1677,6 +1822,16 @@ fn signature_message(key_id: &str, ciphertext: &[u8]) -> Vec<u8> {
     let mut message =
         Vec::with_capacity(SIGNATURE_DOMAIN.len() + key_id.len() + 1 + ciphertext.len());
     message.extend_from_slice(SIGNATURE_DOMAIN);
+    message.extend_from_slice(key_id.as_bytes());
+    message.push(0);
+    message.extend_from_slice(ciphertext);
+    message
+}
+
+fn dynamic_signature_message(key_id: &str, ciphertext: &[u8]) -> Vec<u8> {
+    let mut message =
+        Vec::with_capacity(DYNAMIC_SIGNATURE_DOMAIN.len() + key_id.len() + 1 + ciphertext.len());
+    message.extend_from_slice(DYNAMIC_SIGNATURE_DOMAIN);
     message.extend_from_slice(key_id.as_bytes());
     message.push(0);
     message.extend_from_slice(ciphertext);
@@ -2166,6 +2321,11 @@ pub fn parse_quarantine_control(raw: &[u8]) -> HostResult<HostEnvelopeQuarantine
 /// Maximum accepted install packet size.
 pub const fn maximum_packet_bytes() -> usize {
     MAX_PACKET_BYTES
+}
+
+/// Validate one supported host Age recipient without encrypting a value.
+pub fn validate_host_recipient(value: &str) -> HostResult<()> {
+    parse_recipient(value).map(|_| ())
 }
 
 /// Maximum accepted control request size.

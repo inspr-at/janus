@@ -37,6 +37,11 @@ name = "janusd-dynamic-custodyd"
 path = "src/bin/janusd-dynamic-custodyd.rs"
 test = false
 
+[[bin]]
+name = "janusd-dynamic-deliveryd"
+path = "src/bin/janusd-dynamic-deliveryd.rs"
+test = false
+
 [dependencies]
 anyhow = "=1.0.103"
 async-trait = "0.1"

@@ -64,6 +64,78 @@ pub async fn create_dynamic_custody_if_absent(
     })
 }
 
+/// Open one opaque dynamic custody object for a reviewed internal consumer.
+///
+/// The caller supplies only the validated managed secret reference. The final
+/// path is derived from that reference, ciphertext and plaintext are bounded,
+/// and invalid plaintext is zeroized before an error is returned.
+pub async fn open_dynamic_custody(
+    root_dir: impl Into<PathBuf>,
+    secret_ref: janus_core::ManagedSecretRef,
+    identity_files: Vec<PathBuf>,
+    maximum_plaintext_bytes: usize,
+) -> JanusResult<SecretValue> {
+    let root_dir = root_dir.into();
+    if !normalized_absolute_path(&root_dir)
+        || identity_files.is_empty()
+        || identity_files
+            .iter()
+            .any(|path| !normalized_absolute_path(path))
+        || identity_files
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            != identity_files.len()
+        || maximum_plaintext_bytes == 0
+        || maximum_plaintext_bytes > 64 * 1024
+    {
+        return Err(JanusError::StoreUnavailable {
+            detail: "dynamic age custody open contract is invalid".to_string(),
+        });
+    }
+    let path = root_dir.join(format!("{}.age", secret_ref.as_str()));
+    let metadata = fs::symlink_metadata(&path).map_err(map_store_io)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if !metadata.is_file()
+            || metadata.file_type().is_symlink()
+            || metadata.permissions().mode() & 0o077 != 0
+            || metadata.len() == 0
+            || metadata.len() > 2 * 1024 * 1024
+        {
+            return Err(JanusError::StoreUnavailable {
+                detail: "dynamic age custody ciphertext is invalid".to_string(),
+            });
+        }
+    }
+    let mut plaintext = tokio::task::spawn_blocking(move || {
+        decrypt_file_bounded(&path, &identity_files, maximum_plaintext_bytes)
+    })
+    .await
+    .map_err(|err| JanusError::StoreUnavailable {
+        detail: format!("dynamic age custody open task failed: {err}"),
+    })??;
+    if plaintext.is_empty() || plaintext.len() > maximum_plaintext_bytes {
+        plaintext.zeroize();
+        return Err(JanusError::StoreUnavailable {
+            detail: "dynamic age custody plaintext is invalid".to_string(),
+        });
+    }
+    Ok(SecretValue::new(plaintext))
+}
+
+fn normalized_absolute_path(path: &Path) -> bool {
+    path.is_absolute()
+        && path.file_name().is_some()
+        && !path.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::CurDir | std::path::Component::ParentDir
+            )
+        })
+}
+
 /// Native age-backed store.
 pub struct AgeSecretStore {
     project: ProjectId,
@@ -1088,6 +1160,27 @@ fn decrypt_file(path: &Path, identity_files: &[PathBuf]) -> JanusResult<Vec<u8>>
     Ok(plaintext)
 }
 
+fn decrypt_file_bounded(
+    path: &Path,
+    identity_files: &[PathBuf],
+    maximum_plaintext_bytes: usize,
+) -> JanusResult<Vec<u8>> {
+    let encrypted = fs::read(path).map_err(map_store_io)?;
+    let identities = parse_identity_files(identity_files)?;
+    let identity_refs = identities
+        .iter()
+        .map(|identity| identity.as_ref() as &dyn age::Identity);
+    let decryptor = Decryptor::new_buffered(&encrypted[..]).map_err(map_age_decrypt)?;
+    let mut reader = decryptor.decrypt(identity_refs).map_err(map_age_decrypt)?;
+    let mut plaintext = Vec::with_capacity(maximum_plaintext_bytes.min(4096));
+    reader
+        .by_ref()
+        .take(maximum_plaintext_bytes as u64 + 1)
+        .read_to_end(&mut plaintext)
+        .map_err(map_store_io)?;
+    Ok(plaintext)
+}
+
 fn verify_recoverability_paths(paths: &[PathBuf], identity_files: &[PathBuf]) -> JanusResult<()> {
     parse_identity_files(identity_files)?;
     for path in paths {
@@ -1656,6 +1749,23 @@ AAAEADBJvjZT8X6JRJI8xVq/1aU8nMVgOtVnmdwqWwrSlXG3sKLqeplhpW+uObz5dvMgjz
             decrypt_file(&ciphertext, std::slice::from_ref(&identity_file)).unwrap(),
             b"first-value"
         );
+        let opened = open_dynamic_custody(
+            temporary.path().join("custody"),
+            secret_ref.clone(),
+            vec![identity_file.clone()],
+            1024,
+        )
+        .await
+        .unwrap();
+        assert_eq!(opened.expose_bytes(), b"first-value");
+        assert!(open_dynamic_custody(
+            temporary.path().join("custody"),
+            secret_ref.clone(),
+            vec![identity_file.clone()],
+            4,
+        )
+        .await
+        .is_err());
 
         assert!(create_dynamic_custody_if_absent(
             temporary.path().join("custody"),
