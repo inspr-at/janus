@@ -22,6 +22,48 @@ use janus_core::{
 };
 use zeroize::Zeroize;
 
+/// Encrypt one dynamically approved value into a caller-selected opaque
+/// custody reference without admitting a filesystem path from the caller.
+///
+/// The reference is validated as a managed secret reference and is the only
+/// input used to derive the final filename. Existing ciphertext is never
+/// replaced. The plaintext copy is zeroized after the blocking encryption
+/// task completes on every result path.
+pub async fn create_dynamic_custody_if_absent(
+    root_dir: impl Into<PathBuf>,
+    secret_ref: janus_core::ManagedSecretRef,
+    recipients: Vec<String>,
+    value: SecretValue,
+) -> JanusResult<AgeAdminOutcome> {
+    let root_dir = root_dir.into();
+    if !root_dir.is_absolute() {
+        return Err(JanusError::StoreUnavailable {
+            detail: "dynamic age custody root must be absolute".to_string(),
+        });
+    }
+    let recipients = normalize_recipient_strings(recipients)?;
+    let recipient_count = recipients.len();
+    let path = root_dir.join(format!("{}.age", secret_ref.as_str()));
+    let mut plaintext = value.expose_bytes().to_vec();
+    tokio::task::spawn_blocking(move || {
+        let _lock = try_lock_store_exclusive(&root_dir)?;
+        let result = encrypt_to_new_file(&path, &root_dir, &recipients, &plaintext);
+        plaintext.zeroize();
+        result
+    })
+    .await
+    .map_err(|err| JanusError::StoreUnavailable {
+        detail: format!("dynamic age custody task failed: {err}"),
+    })??;
+    Ok(AgeAdminOutcome {
+        action: "dynamic.custody.create",
+        changed: true,
+        present_secrets: 1,
+        recipient_count,
+        value_returned: false,
+    })
+}
+
 /// Native age-backed store.
 pub struct AgeSecretStore {
     project: ProjectId,
@@ -1585,6 +1627,48 @@ AAAEADBJvjZT8X6JRJI8xVq/1aU8nMVgOtVnmdwqWwrSlXG3sKLqeplhpW+uObz5dvMgjz
             ),
             Err(JanusError::StoreUnavailable { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn dynamic_custody_encrypts_once_and_never_overwrites() {
+        let temporary = TempDir::new().unwrap();
+        let identity = age::x25519::Identity::generate();
+        let recipient = identity.to_public().to_string();
+        let identity_file = temporary.path().join("identity");
+        fs::write(&identity_file, identity.to_string().expose_secret()).unwrap();
+        let secret_ref = janus_core::ManagedSecretRef::new("sec_dynamicfixture").unwrap();
+
+        let outcome = create_dynamic_custody_if_absent(
+            temporary.path().join("custody"),
+            secret_ref.clone(),
+            vec![recipient.clone()],
+            SecretValue::new(b"first-value".to_vec()),
+        )
+        .await
+        .unwrap();
+        assert!(outcome.changed);
+        assert!(!outcome.value_returned);
+        let ciphertext = temporary
+            .path()
+            .join("custody")
+            .join("sec_dynamicfixture.age");
+        assert_eq!(
+            decrypt_file(&ciphertext, std::slice::from_ref(&identity_file)).unwrap(),
+            b"first-value"
+        );
+
+        assert!(create_dynamic_custody_if_absent(
+            temporary.path().join("custody"),
+            secret_ref,
+            vec![recipient],
+            SecretValue::new(b"replacement-denied".to_vec()),
+        )
+        .await
+        .is_err());
+        assert_eq!(
+            decrypt_file(&ciphertext, &[identity_file]).unwrap(),
+            b"first-value"
+        );
     }
 
     struct Fixture {

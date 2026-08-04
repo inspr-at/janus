@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +16,44 @@ type managedDynamicTrackingReader struct {
 	value   []byte
 	offset  int
 	exposed [][]byte
+}
+
+type fakeManagedDynamicCustodyExecutor struct {
+	count      int
+	custodyErr error
+	recoverErr error
+	custodied  *managedDynamicCustodyResult
+}
+
+func managedDynamicCustodyTestResult(operationRef string) managedDynamicCustodyResult {
+	return managedDynamicCustodyResult{
+		OperationRef: operationRef, BindingRef: "bind_fixture0001",
+		SecretRef: "sec_fixture0001", GenerationRef: "gen_fixture0001",
+		Phase: "custodied", ReasonCode: "dynamic_custody_stored", ValueReturned: false,
+	}
+}
+
+func (executor *fakeManagedDynamicCustodyExecutor) Custody(_ context.Context, _ managedDynamicStepUpTarget, operationRef string, value []byte) (managedDynamicCustodyResult, error) {
+	executor.count++
+	if executor.custodyErr != nil {
+		return managedDynamicCustodyResult{}, executor.custodyErr
+	}
+	if validateManagedDynamicValue(value) != nil {
+		return managedDynamicCustodyResult{}, managedDynamicCustodyError("dynamic_custody_value_invalid")
+	}
+	result := managedDynamicCustodyTestResult(operationRef)
+	executor.custodied = &result
+	return result, nil
+}
+
+func (executor *fakeManagedDynamicCustodyExecutor) Recover(_ context.Context, _ managedDynamicStepUpTarget, operationRef string) (managedDynamicCustodyResult, error) {
+	if executor.recoverErr != nil {
+		return managedDynamicCustodyResult{}, executor.recoverErr
+	}
+	if executor.custodied == nil || executor.custodied.OperationRef != operationRef {
+		return managedDynamicCustodyResult{}, managedDynamicCustodyError("dynamic_custody_not_found")
+	}
+	return *executor.custodied, nil
 }
 
 func (reader *managedDynamicTrackingReader) Read(target []byte) (int, error) {
@@ -59,6 +98,7 @@ func managedDynamicAdmissionFixture(
 ) (*App, *fakeManagedDynamicIntentAuthority, Session, *http.Cookie, *http.Cookie) {
 	t.Helper()
 	app, authority, session, sessionCookie, _ := managedDynamicSessionFixture(t)
+	app.managedDynamicCustody = &fakeManagedDynamicCustodyExecutor{}
 	authority.inspection.Intent.Source = source
 	target := managedDynamicTargetFromInspection(authority.inspection)
 	reservation, err := authority.Reserve(t.Context(), target.IntentRef, target.HumanSessionRef)
@@ -76,7 +116,7 @@ func managedDynamicAdmissionFixture(
 	return app, authority, session, sessionCookie, proofCookie
 }
 
-func TestManagedDynamicImportIsAdmittedOnceThenForgotten(t *testing.T) {
+func TestManagedDynamicImportReachesEncryptedCustodyOnce(t *testing.T) {
 	app, authority, session, sessionCookie, proofCookie := managedDynamicAdmissionFixture(t, "import")
 	canary := "bounded-once-canary"
 	request, _ := managedDynamicAdmissionRequest(t, app, session, sessionCookie, proofCookie, "import", url.QueryEscape(canary))
@@ -98,7 +138,7 @@ func TestManagedDynamicImportIsAdmittedOnceThenForgotten(t *testing.T) {
 	viewResponse := httptest.NewRecorder()
 	app.routes().ServeHTTP(viewResponse, view)
 	body := viewResponse.Body.String()
-	if viewResponse.Code != http.StatusOK || !strings.Contains(body, "Value checked and forgotten") || !strings.Contains(body, "No value retained") || strings.Contains(body, `name="secret_value"`) || strings.Contains(body, canary) {
+	if viewResponse.Code != http.StatusOK || !strings.Contains(body, "Encrypted custody confirmed") || !strings.Contains(body, "No value returned") || strings.Contains(body, `name="secret_value"`) || strings.Contains(body, canary) {
 		t.Fatalf("value-free admission receipt is invalid: status=%d body=%s", viewResponse.Code, body)
 	}
 }
@@ -118,6 +158,20 @@ func TestManagedDynamicDuplicateAdmissionNeverReadsValueAgain(t *testing.T) {
 	prefixLength := len(reader.value) - len("must-not-be-read")
 	if secondResponse.Code != http.StatusSeeOther || reader.offset != prefixLength || authority.completeCount != 1 {
 		t.Fatalf("duplicate read value bytes or completed twice: status=%d read=%d prefix=%d complete=%d", secondResponse.Code, reader.offset, prefixLength, authority.completeCount)
+	}
+}
+
+func TestManagedDynamicLostCustodyResponseRecoversWithoutReadingValueAgain(t *testing.T) {
+	app, authority, session, sessionCookie, proofCookie := managedDynamicAdmissionFixture(t, "import")
+	executor := app.managedDynamicCustody.(*fakeManagedDynamicCustodyExecutor)
+	executor.custodyErr = managedDynamicCustodyError("dynamic_custody_unavailable")
+	result := managedDynamicCustodyTestResult(authority.reservation.OperationRef)
+	executor.custodied = &result
+	first, _ := managedDynamicAdmissionRequest(t, app, session, sessionCookie, proofCookie, "import", "stored-before-response-loss")
+	firstResponse := httptest.NewRecorder()
+	app.routes().ServeHTTP(firstResponse, first)
+	if firstResponse.Code != http.StatusSeeOther || authority.reservation == nil || !authority.reservation.ValueAdmissionComplete || authority.reservation.SecretRef != result.SecretRef {
+		t.Fatalf("lost response recovery was not idempotent: status=%d reservation=%#v", firstResponse.Code, authority.reservation)
 	}
 }
 
@@ -193,17 +247,21 @@ func TestManagedDynamicGeneratedAdmissionRequiresEmptyBrowserValue(t *testing.T)
 
 func TestManagedDynamicValueProcessorZeroizesOwnedBuffers(t *testing.T) {
 	requestReader := &managedDynamicTrackingReader{value: []byte("owned-import-value")}
-	if err := processManagedDynamicValue(requestReader, int64(len(requestReader.value)), "import", bytes.NewReader(nil)); err != nil {
+	value, err := processManagedDynamicValue(requestReader, int64(len(requestReader.value)), "import", bytes.NewReader(nil))
+	if err != nil {
 		t.Fatal(err)
 	}
+	zeroizeBytes(value)
 	if len(requestReader.exposed) == 0 || !allZero(requestReader.exposed[0]) {
 		t.Fatal("owned import buffer was not zeroized")
 	}
 
 	randomReader := &managedDynamicTrackingReader{value: bytes.Repeat([]byte{0x5a}, managedDynamicGeneratedEntropyBytes)}
-	if err := processManagedDynamicValue(bytes.NewReader(nil), 0, "generated", randomReader); err != nil {
+	value, err = processManagedDynamicValue(bytes.NewReader(nil), 0, "generated", randomReader)
+	if err != nil {
 		t.Fatal(err)
 	}
+	zeroizeBytes(value)
 	if len(randomReader.exposed) == 0 || !allZero(randomReader.exposed[0]) {
 		t.Fatal("owned generator entropy buffer was not zeroized")
 	}

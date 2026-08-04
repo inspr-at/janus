@@ -29,6 +29,8 @@ const MAX_ENTRY_JOURNALS: usize = 4096;
 const REMOVAL_TOMBSTONE_RETAIN_SECONDS: u64 = 366 * 24 * 60 * 60;
 const TOMBSTONE_DIR_ENV: &str = "JANUS_LIFECYCLE_TOMBSTONE_DIR";
 
+#[path = "lifecycle_entry/dynamic_custody.rs"]
+pub(super) mod dynamic_custody;
 #[path = "lifecycle_entry/web_transaction.rs"]
 pub(super) mod web_transaction;
 

@@ -34,6 +34,9 @@ type managedDynamicReplayRecord struct {
 	ReservedAtUnixSecond            int64  `json:"reserved_at_unix_secs"`
 	ValueAdmissionStartedUnixSecond int64  `json:"value_admission_started_at_unix_secs,omitempty"`
 	ValueAdmissionDoneUnixSecond    int64  `json:"value_admission_done_at_unix_secs,omitempty"`
+	BindingRef                      string `json:"binding_ref,omitempty"`
+	SecretRef                       string `json:"secret_ref,omitempty"`
+	GenerationRef                   string `json:"generation_ref,omitempty"`
 	ExpiresAtUnixSecond             int64  `json:"expires_at_unix_secs"`
 }
 
@@ -170,14 +173,14 @@ func (store *managedDynamicReplayStore) recover(intent managedDynamicSetupIntent
 }
 
 func (store *managedDynamicReplayStore) beginValueAdmission(intent managedDynamicSetupIntent, operationRef string, now int64) (managedDynamicReplayRecord, error) {
-	return store.updateValueAdmission(intent, operationRef, now, false)
+	return store.updateValueAdmission(intent, operationRef, managedDynamicCustodyResult{}, now, false)
 }
 
-func (store *managedDynamicReplayStore) completeValueAdmission(intent managedDynamicSetupIntent, operationRef string, now int64) (managedDynamicReplayRecord, error) {
-	return store.updateValueAdmission(intent, operationRef, now, true)
+func (store *managedDynamicReplayStore) completeValueAdmission(intent managedDynamicSetupIntent, operationRef string, custody managedDynamicCustodyResult, now int64) (managedDynamicReplayRecord, error) {
+	return store.updateValueAdmission(intent, operationRef, custody, now, true)
 }
 
-func (store *managedDynamicReplayStore) updateValueAdmission(intent managedDynamicSetupIntent, operationRef string, now int64, complete bool) (managedDynamicReplayRecord, error) {
+func (store *managedDynamicReplayStore) updateValueAdmission(intent managedDynamicSetupIntent, operationRef string, custody managedDynamicCustodyResult, now int64, complete bool) (managedDynamicReplayRecord, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 
@@ -203,12 +206,18 @@ func (store *managedDynamicReplayStore) updateValueAdmission(intent managedDynam
 		return managedDynamicReplayRecord{}, managedIntentError("managed_intent_value_admission_unavailable")
 	}
 	if complete {
+		if validateManagedDynamicCustodyResult(custody, operationRef) != nil {
+			return managedDynamicReplayRecord{}, managedIntentError("managed_intent_value_admission_unavailable")
+		}
 		if record.ValueAdmissionStartedUnixSecond == 0 ||
 			now < record.ValueAdmissionStartedUnixSecond ||
 			record.ValueAdmissionDoneUnixSecond != 0 {
 			return managedDynamicReplayRecord{}, managedIntentError("managed_intent_value_admission_unavailable")
 		}
 		record.ValueAdmissionDoneUnixSecond = now
+		record.BindingRef = custody.BindingRef
+		record.SecretRef = custody.SecretRef
+		record.GenerationRef = custody.GenerationRef
 	} else {
 		if record.ValueAdmissionStartedUnixSecond != 0 {
 			return record, managedIntentError("managed_intent_value_replayed")
@@ -299,6 +308,12 @@ func validateManagedDynamicReplayDocument(document managedDynamicReplayDocument)
 				(record.ValueAdmissionStartedUnixSecond == 0 ||
 					record.ValueAdmissionDoneUnixSecond < record.ValueAdmissionStartedUnixSecond ||
 					record.ValueAdmissionDoneUnixSecond >= record.ExpiresAtUnixSecond) ||
+			record.ValueAdmissionDoneUnixSecond == 0 &&
+				(record.BindingRef != "" || record.SecretRef != "" || record.GenerationRef != "") ||
+			record.ValueAdmissionDoneUnixSecond != 0 &&
+				(!validManagedRef("bind_", record.BindingRef) ||
+					!validManagedRef("sec_", record.SecretRef) ||
+					!validManagedRef("gen_", record.GenerationRef)) ||
 			intentNonces[intentRef] != 1 ||
 			operationRefs[record.OperationRef] {
 			return errors.New("managed_intent_replay_store_invalid")

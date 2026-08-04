@@ -19,6 +19,7 @@ const (
 	managedDynamicSetupTokenFileEnv  = "JANUS_MANAGED_DYNAMIC_SETUP_INTERNAL_TOKEN_FILE"
 	managedDynamicSetupKeyFileEnv    = "JANUS_MANAGED_DYNAMIC_SETUP_VERIFICATION_KEYS_FILE"
 	managedDynamicSetupPathsEnv      = "JANUS_MANAGED_DYNAMIC_SETUP_DECLARATION_PATHS"
+	managedDynamicCustodySocketEnv   = "JANUS_MANAGED_DYNAMIC_CUSTODY_SOCKET"
 )
 
 // managedDynamicSetupRuntimeConfig is a separate, explicit capability gate.
@@ -28,6 +29,7 @@ type managedDynamicSetupRuntimeConfig struct {
 	InternalToken      string
 	Keyring            managedIntentKeyring
 	DeclarationPaths   []string
+	CustodySocket      string
 }
 
 func loadManagedDynamicSetupRuntimeConfigFromEnv() (*managedDynamicSetupRuntimeConfig, error) {
@@ -36,6 +38,7 @@ func loadManagedDynamicSetupRuntimeConfigFromEnv() (*managedDynamicSetupRuntimeC
 	tokenFile := strings.TrimSpace(os.Getenv(managedDynamicSetupTokenFileEnv))
 	keyFile := strings.TrimSpace(os.Getenv(managedDynamicSetupKeyFileEnv))
 	declarationRaw := strings.TrimSpace(os.Getenv(managedDynamicSetupPathsEnv))
+	custodySocket := strings.TrimSpace(os.Getenv(managedDynamicCustodySocketEnv))
 
 	enabled := false
 	switch enabledRaw {
@@ -45,17 +48,17 @@ func loadManagedDynamicSetupRuntimeConfigFromEnv() (*managedDynamicSetupRuntimeC
 	default:
 		return nil, errors.New("managed dynamic setup enable flag is invalid")
 	}
-	configured := origin != "" || tokenFile != "" || keyFile != "" || declarationRaw != ""
+	configured := origin != "" || tokenFile != "" || keyFile != "" || declarationRaw != "" || custodySocket != ""
 	if !enabled {
 		if configured {
 			return nil, errors.New("managed dynamic setup configuration requires the explicit enable flag")
 		}
 		return nil, nil
 	}
-	if origin == "" || tokenFile == "" || keyFile == "" || declarationRaw == "" {
+	if origin == "" || tokenFile == "" || keyFile == "" || declarationRaw == "" || custodySocket == "" {
 		return nil, errors.New("managed dynamic setup configuration is partial")
 	}
-	if !managedDynamicCleanAbsolutePath(tokenFile) || !managedDynamicCleanAbsolutePath(keyFile) {
+	if !managedDynamicCleanAbsolutePath(tokenFile) || !managedDynamicCleanAbsolutePath(keyFile) || !managedDynamicCleanAbsolutePath(custodySocket) {
 		return nil, errors.New("managed dynamic setup configuration file path is invalid")
 	}
 	parsedOrigin, err := parseManagedOrigin(origin)
@@ -83,6 +86,7 @@ func loadManagedDynamicSetupRuntimeConfigFromEnv() (*managedDynamicSetupRuntimeC
 		InternalToken:      token,
 		Keyring:            keyring,
 		DeclarationPaths:   declarationPaths,
+		CustodySocket:      custodySocket,
 	}, nil
 }
 
@@ -230,8 +234,26 @@ func (authority *managedDynamicHTTPAuthority) CompleteValueAdmission(
 	ctx context.Context,
 	expected managedDynamicStepUpTarget,
 	operationRef string,
+	custody managedDynamicCustodyResult,
 ) (managedDynamicSetupReservation, error) {
-	return authority.updateValueAdmission(ctx, expected, operationRef, true)
+	if validateManagedDynamicCustodyResult(custody, operationRef) != nil {
+		return managedDynamicSetupReservation{}, managedIntentError("managed_intent_value_admission_unavailable")
+	}
+	if authority == nil || authority.replays == nil || !validManagedDynamicStepUpTarget(expected) || !validManagedRef("op_", operationRef) {
+		return managedDynamicSetupReservation{}, managedIntentError("managed_intent_value_admission_unavailable")
+	}
+	inspection, err := authority.Inspect(ctx, expected.IntentRef, expected.HumanSessionRef)
+	if err != nil {
+		return managedDynamicSetupReservation{}, err
+	}
+	if managedDynamicTargetFromInspection(inspection) != expected {
+		return managedDynamicSetupReservation{}, managedIntentError("managed_intent_declaration_drift")
+	}
+	record, err := authority.replays.completeValueAdmission(inspection.Intent, operationRef, custody, authority.consumer.now().Unix())
+	if err != nil {
+		return managedDynamicSetupReservation{}, normalizeManagedIntentError(err)
+	}
+	return managedDynamicReservationFromRecord(inspection, record), nil
 }
 
 func (authority *managedDynamicHTTPAuthority) updateValueAdmission(
@@ -253,7 +275,7 @@ func (authority *managedDynamicHTTPAuthority) updateValueAdmission(
 	}
 	var record managedDynamicReplayRecord
 	if complete {
-		record, err = authority.replays.completeValueAdmission(inspection.Intent, operationRef, authority.consumer.now().Unix())
+		return managedDynamicSetupReservation{}, managedIntentError("managed_intent_value_admission_unavailable")
 	} else {
 		record, err = authority.replays.beginValueAdmission(inspection.Intent, operationRef, authority.consumer.now().Unix())
 	}
@@ -269,5 +291,8 @@ func managedDynamicReservationFromRecord(inspection managedDynamicSetupInspectio
 		OperationRef:           record.OperationRef,
 		ValueAdmissionStarted:  record.ValueAdmissionStartedUnixSecond != 0,
 		ValueAdmissionComplete: record.ValueAdmissionDoneUnixSecond != 0,
+		BindingRef:             record.BindingRef,
+		SecretRef:              record.SecretRef,
+		GenerationRef:          record.GenerationRef,
 	}
 }

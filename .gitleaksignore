@@ -16,14 +16,15 @@ ec303796fd52b902824bba9e8f3f54b0b927a670:go-envelope/managed_operation_bridge_te
 22bc41b4b3dab3aebdfcb4a330fdcf51a7745324:go-envelope/managed_operation_bridge_test.go:generic-api-key:51
 22bc41b4b3dab3aebdfcb4a330fdcf51a7745324:go-envelope/managed_operation_bridge_test.go:generic-api-key:75
 
-# Independently reviewed JANUS-321 fixtures rebased by the signed-source-policy
-# merge. These are the two exact mainline commit fingerprints seen by PR CI.
+# Independently reviewed JANUS-321 fixtures at their exact mainline commits.
+# Keep historical fingerprints when later production edits move fixture lines.
 8918b3bbaa36040b508712dad225412bc70dff06:crates/janus-provider-age/src/lib.rs:private-key:1248
 8918b3bbaa36040b508712dad225412bc70dff06:go-envelope/vault_ui_test.go:generic-api-key:480
+c2b07e44b8b9d3fd3c12d260f3ee02268b5663b8:crates/janus-provider-age/src/lib.rs:private-key:1555
 
 # Current tracked-tree positions for the same required synthetic fixtures.
 go-envelope/vault_ui_test.go:generic-api-key:539
-crates/janus-provider-age/src/lib.rs:private-key:1555
+crates/janus-provider-age/src/lib.rs:private-key:1597
 go-envelope/main_test.go:generic-api-key:743
 contracts/managed-service-secret-contract-v1.json:generic-api-key:56
 crates/janusd/src/lifecycle_entry/web_transaction.rs:generic-api-key:1448

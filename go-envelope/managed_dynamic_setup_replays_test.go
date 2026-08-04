@@ -119,7 +119,7 @@ func TestManagedDynamicValueAdmissionIsDurableSingleUseAndRestartSafe(t *testing
 	if err != nil || recovered.ValueAdmissionStartedUnixSecond == 0 || recovered.ValueAdmissionDoneUnixSecond != 0 {
 		t.Fatalf("started admission did not survive restart: record=%#v err=%v", recovered, err)
 	}
-	completed, err := restarted.completeValueAdmission(intent, operationRef, now+2)
+	completed, err := restarted.completeValueAdmission(intent, operationRef, managedDynamicCustodyTestResult(operationRef), now+2)
 	if err != nil || completed.ValueAdmissionDoneUnixSecond == 0 {
 		t.Fatalf("value-free admission receipt did not complete: record=%#v err=%v", completed, err)
 	}
@@ -132,7 +132,7 @@ func TestManagedDynamicValueAdmissionIsDurableSingleUseAndRestartSafe(t *testing
 	if err != nil || recovered.ValueAdmissionDoneUnixSecond == 0 {
 		t.Fatalf("completed admission did not survive restart: record=%#v err=%v", recovered, err)
 	}
-	if _, err := again.completeValueAdmission(intent, operationRef, now+2); err == nil || err.Error() != "managed_intent_value_admission_unavailable" {
+	if _, err := again.completeValueAdmission(intent, operationRef, managedDynamicCustodyTestResult(operationRef), now+2); err == nil || err.Error() != "managed_intent_value_admission_unavailable" {
 		t.Fatalf("value admission completed twice: %v", err)
 	}
 	raw, err := os.ReadFile(path)
@@ -203,7 +203,7 @@ func TestManagedDynamicValueAdmissionRejectsImpossibleTimestampsWithoutMutation(
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.completeValueAdmission(intent, operationRef, started.ValueAdmissionStartedUnixSecond-1); err == nil || err.Error() != "managed_intent_value_admission_unavailable" {
+	if _, err := store.completeValueAdmission(intent, operationRef, managedDynamicCustodyTestResult(operationRef), started.ValueAdmissionStartedUnixSecond-1); err == nil || err.Error() != "managed_intent_value_admission_unavailable" {
 		t.Fatalf("admission completed before it began: %v", err)
 	}
 	recovered, err = store.recover(intent, operationRef, reservedAt+1)

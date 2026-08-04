@@ -206,10 +206,10 @@ nix build .#janus-engine
 ```
 
 The package installs `janusd-use`, `janusd-admin`,
-`janusd-web-transactiond`, `janus-warden`, and the non-operational `janusd`
-migration helper for supported Linux systems. The private transaction daemon
-has no CLI operations and accepts only the reviewed local socket protocol; the
-legacy helper cannot run either plane's commands.
+`janusd-web-transactiond`, `janusd-dynamic-custodyd`, `janus-warden`, and the
+non-operational `janusd` migration helper for supported Linux systems. The
+private daemons have no CLI operations and accept only their reviewed local
+socket protocols; the legacy helper cannot run either plane's commands.
 
 ### Release assurance
 
