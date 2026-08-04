@@ -203,7 +203,7 @@ test("passwordless import shows Check, forgets the value, and recovers navigatio
   ).toBe(false);
 });
 
-test("dynamic target is locked to a fresh passkey before any value field", async ({
+test("dynamic import is passkey-bound, admitted once, and forgotten", async ({
   page,
 }) => {
   await page.goto("/__managed-browser/session?kind=dynamic");
@@ -219,7 +219,7 @@ test("dynamic target is locked to a fresh passkey before any value field", async
   await expect(page.locator('input[name="secret_value"]')).toHaveCount(0);
   await expect(page.locator('input[type="password"]')).toHaveCount(0);
   await expect(
-    page.locator('form[action="/managed-environment/setup/execute"]'),
+    page.locator('form[action="/managed-environment/setup/admit"]'),
   ).toHaveCount(0);
 
   const callbackResponse = page.waitForResponse(
@@ -232,10 +232,14 @@ test("dynamic target is locked to a fresh passkey before any value field", async
     "0; url=/managed-environment/setup?intent=intent_13579bdf2468ace0",
   );
   await expect(
-    page.getByRole("heading", { name: "Exact request reserved" }),
+    page.getByRole("heading", { name: "Add one value" }),
   ).toBeVisible();
-  await expect(page.getByText(/No value accepted yet/)).toBeVisible();
-  await expect(page.locator('input[name="secret_value"]')).toHaveCount(0);
+  await expect(page.getByText(/Validation only/)).toBeVisible();
+  await expect(page.locator('input[name="secret_value"]')).toBeVisible();
+  await expect(page.locator('input[name="secret_value"]')).toHaveAttribute(
+    "type",
+    "password",
+  );
   await expect(
     page.locator('form[action="/managed-environment/setup/step-up"]'),
   ).toHaveCount(0);
@@ -246,6 +250,91 @@ test("dynamic target is locked to a fresh passkey before any value field", async
       ["serious", "critical"].includes(impact),
     ),
   ).toEqual([]);
+
+  const form = page.locator(
+    'form[action="/managed-environment/setup/admit"]',
+  );
+  const csrf = await form.locator('input[name="csrf_token"]').inputValue();
+  const intent = await form.locator('input[name="intent_ref"]').inputValue();
+  const source = await form.locator('input[name="source"]').inputValue();
+  const canary = runtimeCanary("dynamic-import");
+  await form.evaluate((element, value) => {
+    const input = element.querySelector('input[name="secret_value"]');
+    if (!(input instanceof HTMLInputElement)) {
+      throw new Error("dynamic value input unavailable");
+    }
+    input.value = value;
+    try {
+      element.requestSubmit();
+    } finally {
+      input.value = "";
+    }
+  }, canary);
+  await expect(
+    page.getByRole("heading", { name: "Value checked and forgotten" }),
+  ).toBeVisible();
+  await expect(page.getByRole("status")).toContainText("No value retained");
+  await expect(page.locator('input[name="secret_value"]')).toHaveCount(0);
+  await expectCanariesAbsent(page, [canary]);
+
+  const duplicate = await page.request.post(
+    "/managed-environment/setup/admit",
+    {
+      data: new URLSearchParams([
+        ["csrf_token", csrf],
+        ["intent_ref", intent],
+        ["source", source],
+        ["secret_value", canary],
+      ]).toString(),
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        Origin: new URL(page.url()).origin,
+        "Sec-Fetch-Site": "same-origin",
+      },
+      maxRedirects: 0,
+    },
+  );
+  expect(duplicate.status()).toBe(303);
+  expect(await duplicate.text()).not.toContain(canary);
+  await page.reload();
+  await expect(
+    page.getByRole("heading", { name: "Value checked and forgotten" }),
+  ).toBeVisible();
+  await expectCanariesAbsent(page, [canary]);
+});
+
+test("dynamic generation accepts no browser value", async ({ page }) => {
+  await page.goto("/__managed-browser/session?kind=dynamic-generated");
+  await expect(
+    page.getByRole("heading", { name: "Add environment variable" }),
+  ).toBeVisible();
+  await expect(page.getByText("Generate inside Janus")).toBeVisible();
+  await expect(page.locator('input[name="secret_value"]')).toHaveCount(0);
+
+  await page.getByRole("button", { name: "Confirm with passkey" }).click();
+  await expect(page.getByRole("heading", { name: "Add one value" })).toBeVisible();
+  await expect(page.locator('input[name="secret_value"]')).toHaveAttribute(
+    "type",
+    "hidden",
+  );
+  await expect(
+    page.getByText(/Fresh URL-safe bytes are created and erased/),
+  ).toBeVisible();
+
+  const accessibility = await new AxeBuilder({ page }).analyze();
+  expect(
+    accessibility.violations.filter(({ impact }) =>
+      ["serious", "critical"].includes(impact),
+    ),
+  ).toEqual([]);
+  await page
+    .getByRole("button", { name: "Generate and check once" })
+    .click();
+  await expect(
+    page.getByRole("heading", { name: "Value checked and forgotten" }),
+  ).toBeVisible();
+  await expect(page.getByRole("status")).toContainText("No value retained");
+  await expect(page.locator('input[name="secret_value"]')).toHaveCount(0);
 });
 
 test("compact generated flow works from the keyboard", async ({ page }) => {

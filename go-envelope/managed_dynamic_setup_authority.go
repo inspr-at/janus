@@ -211,8 +211,63 @@ func (authority *managedDynamicHTTPAuthority) RecoverReservation(
 	if err != nil {
 		return managedDynamicSetupReservation{}, err
 	}
-	if err := authority.replays.recover(inspection.Intent, operationRef, authority.consumer.now().Unix()); err != nil {
+	record, err := authority.replays.recover(inspection.Intent, operationRef, authority.consumer.now().Unix())
+	if err != nil {
 		return managedDynamicSetupReservation{}, normalizeManagedIntentError(err)
 	}
-	return managedDynamicSetupReservation{Inspection: inspection, OperationRef: operationRef}, nil
+	return managedDynamicReservationFromRecord(inspection, record), nil
+}
+
+func (authority *managedDynamicHTTPAuthority) BeginValueAdmission(
+	ctx context.Context,
+	expected managedDynamicStepUpTarget,
+	operationRef string,
+) (managedDynamicSetupReservation, error) {
+	return authority.updateValueAdmission(ctx, expected, operationRef, false)
+}
+
+func (authority *managedDynamicHTTPAuthority) CompleteValueAdmission(
+	ctx context.Context,
+	expected managedDynamicStepUpTarget,
+	operationRef string,
+) (managedDynamicSetupReservation, error) {
+	return authority.updateValueAdmission(ctx, expected, operationRef, true)
+}
+
+func (authority *managedDynamicHTTPAuthority) updateValueAdmission(
+	ctx context.Context,
+	expected managedDynamicStepUpTarget,
+	operationRef string,
+	complete bool,
+) (managedDynamicSetupReservation, error) {
+	if authority == nil || authority.replays == nil ||
+		!validManagedDynamicStepUpTarget(expected) || !validManagedRef("op_", operationRef) {
+		return managedDynamicSetupReservation{}, managedIntentError("managed_intent_value_admission_unavailable")
+	}
+	inspection, err := authority.Inspect(ctx, expected.IntentRef, expected.HumanSessionRef)
+	if err != nil {
+		return managedDynamicSetupReservation{}, err
+	}
+	if managedDynamicTargetFromInspection(inspection) != expected {
+		return managedDynamicSetupReservation{}, managedIntentError("managed_intent_declaration_drift")
+	}
+	var record managedDynamicReplayRecord
+	if complete {
+		record, err = authority.replays.completeValueAdmission(inspection.Intent, operationRef, authority.consumer.now().Unix())
+	} else {
+		record, err = authority.replays.beginValueAdmission(inspection.Intent, operationRef, authority.consumer.now().Unix())
+	}
+	if err != nil {
+		return managedDynamicSetupReservation{}, normalizeManagedIntentError(err)
+	}
+	return managedDynamicReservationFromRecord(inspection, record), nil
+}
+
+func managedDynamicReservationFromRecord(inspection managedDynamicSetupInspection, record managedDynamicReplayRecord) managedDynamicSetupReservation {
+	return managedDynamicSetupReservation{
+		Inspection:             inspection,
+		OperationRef:           record.OperationRef,
+		ValueAdmissionStarted:  record.ValueAdmissionStartedUnixSecond != 0,
+		ValueAdmissionComplete: record.ValueAdmissionDoneUnixSecond != 0,
+	}
 }

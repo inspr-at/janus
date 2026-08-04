@@ -748,6 +748,7 @@ func (app *App) routeSpecs() []routeSpec {
 		{pattern: "POST /managed-service/setup/execute", permission: PermissionLifecycleEntry, authenticated: true, handler: app.handleManagedSetupExecute},
 		{pattern: "GET /managed-environment/setup", permission: PermissionLifecycleEntry, authenticated: true, handler: app.handleManagedDynamicSetup},
 		{pattern: "POST /managed-environment/setup/step-up", permission: PermissionLifecycleEntry, authenticated: true, handler: app.handleManagedDynamicSetupStepUp},
+		{pattern: "POST /managed-environment/setup/admit", permission: PermissionLifecycleEntry, authenticated: true, handler: app.handleManagedDynamicValueAdmission},
 		{pattern: "GET /internal/managed-service-host-envelopes/{hostRef}/{operationRef}", permission: PermissionLifecycleEntry, handler: app.handleManagedHostEnvelope},
 		{pattern: "POST /internal/managed-service-operations/{operationRef}/reconcile", permission: PermissionLifecycleEntry, handler: app.handleManagedHostReconcile},
 		{pattern: "POST /logout", permission: PermissionDescriptorRead, authenticated: true, handler: app.handleLogout},
@@ -817,7 +818,7 @@ func allowedMethodsForPath(path string) ([]string, bool) {
 		return []string{http.MethodGet, http.MethodPost}, true
 	case "/session-witness/verify-current":
 		return []string{http.MethodPost}, true
-	case "/logout", "/managed-service/setup/step-up", "/managed-service/setup/execute", "/managed-environment/setup/step-up", "/api/warden/resolve", "/api/permits", "/ui/warden/resolve", "/ui/permits":
+	case "/logout", "/managed-service/setup/step-up", "/managed-service/setup/execute", "/managed-environment/setup/step-up", "/managed-environment/setup/admit", "/api/warden/resolve", "/api/permits", "/ui/warden/resolve", "/ui/permits":
 		return []string{http.MethodPost}, true
 	case "/api/auth/session-witness/verify":
 		return []string{http.MethodPost}, true

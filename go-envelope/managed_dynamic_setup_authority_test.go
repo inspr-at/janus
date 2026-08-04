@@ -305,6 +305,28 @@ func TestManagedDynamicHTTPAuthorityReservesAndRecoversAcrossRestart(t *testing.
 	if recovered, err := restarted.RecoverReservation(t.Context(), intent.IntentRef, intent.HumanSessionRef, reservation.OperationRef); err != nil || recovered.Inspection.Intent != intent {
 		t.Fatalf("authority restart lost exact reservation: %#v %v", recovered, err)
 	}
+	target := managedDynamicTargetFromInspection(reservation.Inspection)
+	started, err := restarted.BeginValueAdmission(t.Context(), target, reservation.OperationRef)
+	if err != nil || !started.ValueAdmissionStarted || started.ValueAdmissionComplete {
+		t.Fatalf("authority did not begin exact value admission: %#v %v", started, err)
+	}
+	if _, err := restarted.BeginValueAdmission(t.Context(), target, reservation.OperationRef); err == nil || err.Error() != "managed_intent_value_replayed" {
+		t.Fatalf("authority admitted a duplicate value: %v", err)
+	}
+	completed, err := restarted.CompleteValueAdmission(t.Context(), target, reservation.OperationRef)
+	if err != nil || !completed.ValueAdmissionStarted || !completed.ValueAdmissionComplete {
+		t.Fatalf("authority did not complete the value-free admission receipt: %#v %v", completed, err)
+	}
+
+	again, err := newManagedDynamicSetupAuthority(config, dataDir, server.Client().Transport)
+	if err != nil {
+		t.Fatal(err)
+	}
+	again.consumer.now = func() time.Time { return time.Unix(managedDynamicTestNow+1, 0) }
+	recovered, err := again.RecoverReservation(t.Context(), intent.IntentRef, intent.HumanSessionRef, reservation.OperationRef)
+	if err != nil || !recovered.ValueAdmissionComplete {
+		t.Fatalf("authority restart lost the value-free admission receipt: %#v %v", recovered, err)
+	}
 }
 
 func TestNewAppWiresDynamicAuthorityOnlyFromDedicatedConfig(t *testing.T) {

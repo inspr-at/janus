@@ -13,14 +13,16 @@ import (
 )
 
 type fakeManagedDynamicIntentAuthority struct {
-	inspection   managedDynamicSetupInspection
-	inspectErr   error
-	inspectCount int
-	reservation  *managedDynamicSetupReservation
-	reserveErr   error
-	recoverErr   error
-	reserveCount int
-	recoverCount int
+	inspection    managedDynamicSetupInspection
+	inspectErr    error
+	inspectCount  int
+	reservation   *managedDynamicSetupReservation
+	reserveErr    error
+	recoverErr    error
+	reserveCount  int
+	recoverCount  int
+	beginCount    int
+	completeCount int
 }
 
 func (fake *fakeManagedDynamicIntentAuthority) Inspect(_ context.Context, intentRef, humanSessionRef string) (managedDynamicSetupInspection, error) {
@@ -63,6 +65,29 @@ func (fake *fakeManagedDynamicIntentAuthority) RecoverReservation(ctx context.Co
 	if err != nil || fake.reservation == nil || fake.reservation.OperationRef != operationRef || fake.reservation.Inspection.Intent != inspection.Intent {
 		return managedDynamicSetupReservation{}, managedIntentError("managed_intent_recovery_unavailable")
 	}
+	return *fake.reservation, nil
+}
+
+func (fake *fakeManagedDynamicIntentAuthority) BeginValueAdmission(ctx context.Context, expected managedDynamicStepUpTarget, operationRef string) (managedDynamicSetupReservation, error) {
+	fake.beginCount++
+	inspection, err := fake.Inspect(ctx, expected.IntentRef, expected.HumanSessionRef)
+	if err != nil || managedDynamicTargetFromInspection(inspection) != expected || fake.reservation == nil || fake.reservation.OperationRef != operationRef {
+		return managedDynamicSetupReservation{}, managedIntentError("managed_intent_value_admission_unavailable")
+	}
+	if fake.reservation.ValueAdmissionStarted {
+		return *fake.reservation, managedIntentError("managed_intent_value_replayed")
+	}
+	fake.reservation.ValueAdmissionStarted = true
+	return *fake.reservation, nil
+}
+
+func (fake *fakeManagedDynamicIntentAuthority) CompleteValueAdmission(ctx context.Context, expected managedDynamicStepUpTarget, operationRef string) (managedDynamicSetupReservation, error) {
+	fake.completeCount++
+	inspection, err := fake.Inspect(ctx, expected.IntentRef, expected.HumanSessionRef)
+	if err != nil || managedDynamicTargetFromInspection(inspection) != expected || fake.reservation == nil || fake.reservation.OperationRef != operationRef || !fake.reservation.ValueAdmissionStarted || fake.reservation.ValueAdmissionComplete {
+		return managedDynamicSetupReservation{}, managedIntentError("managed_intent_value_admission_unavailable")
+	}
+	fake.reservation.ValueAdmissionComplete = true
 	return *fake.reservation, nil
 }
 
@@ -138,7 +163,7 @@ func TestManagedDynamicSetupPageBindsTargetBeforeAnyValueAdmission(t *testing.T)
 			t.Fatalf("dynamic setup should show %q: %s", expected, body)
 		}
 	}
-	for _, forbidden := range []string{`name="secret_value"`, `type="password"`, "/managed-service/setup/execute", "/managed-environment/setup/execute"} {
+	for _, forbidden := range []string{`name="secret_value"`, `type="password"`, "/managed-service/setup/execute", "/managed-environment/setup/admit"} {
 		if strings.Contains(body, forbidden) {
 			t.Fatalf("dynamic setup must remain value-free and non-executable; found %q", forbidden)
 		}
@@ -188,8 +213,8 @@ func TestManagedDynamicSetupAcceptsOnlyProofForCurrentExactTarget(t *testing.T) 
 	response := httptest.NewRecorder()
 	app.routes().ServeHTTP(response, request)
 	body := response.Body.String()
-	if response.Code != http.StatusOK || !strings.Contains(body, "Exact request reserved") || !strings.Contains(body, "No value accepted yet") || !strings.Contains(body, reservation.OperationRef) || strings.Contains(body, "Confirm with passkey") {
-		t.Fatalf("exact proof should unlock only value-free readiness: status=%d body=%s", response.Code, body)
+	if response.Code != http.StatusOK || !strings.Contains(body, "Add one value") || !strings.Contains(body, "Validation only") || !strings.Contains(body, `name="secret_value"`) || !strings.Contains(body, reservation.OperationRef) || strings.Contains(body, "Confirm with passkey") {
+		t.Fatalf("exact proof should unlock only the bounded admission form: status=%d body=%s", response.Code, body)
 	}
 	if authority.recoverCount != 1 {
 		t.Fatalf("refresh did not recover the durable reservation exactly once: %d", authority.recoverCount)
