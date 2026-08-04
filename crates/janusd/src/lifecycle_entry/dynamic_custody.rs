@@ -93,6 +93,75 @@ struct CustodyReceipt {
     value_returned: bool,
 }
 
+/// Value-free proof that a delivery request is bound to one current custody
+/// object and one current reviewed declaration.
+pub(super) struct ValidatedCustodyHandoff {
+    pub declaration: ManagedServiceDeclarationV2,
+    pub binding_ref: String,
+    pub secret_ref: String,
+    pub generation_ref: String,
+}
+
+/// Exact value-free custody identity supplied by the delivery boundary.
+pub(super) struct CustodyHandoffRequest<'a> {
+    pub operation_ref: &'a str,
+    pub operation_kind: &'a str,
+    pub source: &'a str,
+    pub host_ref: &'a str,
+    pub service_ref: &'a str,
+    pub environment_policy_ref: &'a str,
+    pub environment_policy_fingerprint: &'a str,
+    pub declaration_fingerprint: &'a str,
+    pub environment_name: &'a str,
+    pub binding_ref: &'a str,
+    pub secret_ref: &'a str,
+    pub generation_ref: &'a str,
+}
+
+/// Revalidate the exact custody receipt and ciphertext selected by a
+/// value-free downstream delivery request. Paths are always server-derived.
+pub(super) fn validate_delivery_handoff(
+    declarations: &[ManagedServiceDeclarationV2],
+    receipt_dir: &Path,
+    store_dir: &Path,
+    handoff: CustodyHandoffRequest<'_>,
+) -> std::result::Result<ValidatedCustodyHandoff, &'static str> {
+    let request = CustodyRequest {
+        schema: REQUEST_SCHEMA.to_string(),
+        schema_version: SCHEMA_VERSION,
+        operation_ref: handoff.operation_ref.to_string(),
+        operation_kind: handoff.operation_kind.to_string(),
+        source: handoff.source.to_string(),
+        host_ref: handoff.host_ref.to_string(),
+        service_ref: handoff.service_ref.to_string(),
+        environment_policy_ref: handoff.environment_policy_ref.to_string(),
+        environment_policy_fingerprint: handoff.environment_policy_fingerprint.to_string(),
+        declaration_fingerprint: handoff.declaration_fingerprint.to_string(),
+        environment_name: handoff.environment_name.to_string(),
+    };
+    let declaration = resolve_request(declarations, &request)?;
+    let refs = derived_refs(handoff.operation_ref);
+    if handoff.binding_ref != refs.binding_ref
+        || handoff.secret_ref != refs.secret_ref
+        || handoff.generation_ref != refs.generation_ref
+    {
+        return Err("dynamic_custody_handoff_invalid");
+    }
+    load_bound_receipt(
+        &receipt_dir.join(format!("{}.json", handoff.operation_ref)),
+        &request,
+        &refs,
+        declaration,
+        &store_dir.join(format!("{}.age", handoff.secret_ref)),
+    )?;
+    Ok(ValidatedCustodyHandoff {
+        declaration: declaration.clone(),
+        binding_ref: refs.binding_ref,
+        secret_ref: refs.secret_ref,
+        generation_ref: refs.generation_ref,
+    })
+}
+
 struct SecretBuffer(Vec<u8>);
 
 impl SecretBuffer {
@@ -574,7 +643,7 @@ fn denied_response(operation_ref: Option<String>, reason_code: &'static str) -> 
     }
 }
 
-fn load_declarations(paths: &[PathBuf]) -> Result<Vec<ManagedServiceDeclarationV2>> {
+pub(super) fn load_declarations(paths: &[PathBuf]) -> Result<Vec<ManagedServiceDeclarationV2>> {
     let mut declarations = Vec::with_capacity(paths.len());
     let mut service_keys = std::collections::BTreeSet::new();
     let mut policy_refs = std::collections::BTreeSet::new();

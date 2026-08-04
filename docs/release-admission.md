@@ -74,7 +74,7 @@ cannot produce an admissible release.
 ## Runtime configuration
 
 Set these variables for `janus-warden`, `janusd-use`, `janusd-admin`,
-`janusd-web-transactiond`, and `janusd-dynamic-custodyd`:
+`janusd-web-transactiond`, `janusd-dynamic-custodyd`, and `janusd-dynamic-deliveryd`:
 
 | Variable | Meaning |
 | --- | --- |

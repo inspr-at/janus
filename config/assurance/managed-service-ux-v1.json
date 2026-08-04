@@ -1,7 +1,7 @@
 {
   "schema": "inspr.janus.managed-service-ux-assurance.v1",
   "schema_version": 1,
-  "reviewed_on": "2026-07-24",
+  "reviewed_on": "2026-08-04",
   "review_valid_days": 90,
   "timeout_seconds": 120,
   "required_families": [
@@ -346,6 +346,26 @@
       "working_directory": ".",
       "target": "janusd",
       "test_name": "runtime::lifecycle_entry::dynamic_custody::tests::connection_encrypts_once_then_recovers_without_another_value_frame",
+      "value_returned": false
+    },
+    {
+      "id": "dynamic-host-package-create-new-retry",
+      "family": "host-custody",
+      "stack": "rust",
+      "runner": "cargo",
+      "working_directory": ".",
+      "target": "janusd",
+      "test_name": "runtime::lifecycle_entry::dynamic_delivery::tests::prepares_one_value_free_retry_stable_host_package",
+      "value_returned": false
+    },
+    {
+      "id": "dynamic-packet-current-executor-denied",
+      "family": "intent-binding",
+      "stack": "rust",
+      "runner": "cargo",
+      "working_directory": ".",
+      "target": "janus-host",
+      "test_name": "tests::dynamic_packet_is_separately_sealed_and_current_executor_rejects_it",
       "value_returned": false
     },
     {

@@ -81,7 +81,7 @@ func (fake *fakeManagedDynamicIntentAuthority) BeginValueAdmission(ctx context.C
 	return *fake.reservation, nil
 }
 
-func (fake *fakeManagedDynamicIntentAuthority) CompleteValueAdmission(ctx context.Context, expected managedDynamicStepUpTarget, operationRef string, custody managedDynamicCustodyResult) (managedDynamicSetupReservation, error) {
+func (fake *fakeManagedDynamicIntentAuthority) CompleteValueAdmission(ctx context.Context, expected managedDynamicStepUpTarget, operationRef string, custody managedDynamicCustodyResult, delivery managedDynamicDeliveryResult) (managedDynamicSetupReservation, error) {
 	fake.completeCount++
 	inspection, err := fake.Inspect(ctx, expected.IntentRef, expected.HumanSessionRef)
 	if err != nil || managedDynamicTargetFromInspection(inspection) != expected || fake.reservation == nil || fake.reservation.OperationRef != operationRef || !fake.reservation.ValueAdmissionStarted || fake.reservation.ValueAdmissionComplete {
@@ -91,6 +91,8 @@ func (fake *fakeManagedDynamicIntentAuthority) CompleteValueAdmission(ctx contex
 	fake.reservation.BindingRef = custody.BindingRef
 	fake.reservation.SecretRef = custody.SecretRef
 	fake.reservation.GenerationRef = custody.GenerationRef
+	fake.reservation.PackageRef = delivery.PackageRef
+	fake.reservation.EnvelopeRef = delivery.EnvelopeRef
 	return *fake.reservation, nil
 }
 

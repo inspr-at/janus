@@ -35,7 +35,6 @@ const REQUEST_SCHEMA: &str = "inspr.janus.managed-web-transaction-request.v2";
 const RESPONSE_SCHEMA: &str = "inspr.janus.managed-web-transaction-response.v2";
 const DELIVERY_PLAN_SCHEMA: &str = "inspr.janus.managed-host-delivery-plan.v1";
 const OUTBOX_SCHEMA: &str = "inspr.janus.managed-host-envelope-outbox.v1";
-const SIGNING_KEY_SCHEMA: &str = "inspr.janus.host-envelope-signing-key.v1";
 const HOST_PAYLOAD_SCHEMA: &str = "inspr.janus.host-envelope-payload.v1";
 const SCHEMA_VERSION: u8 = 2;
 const DELIVERY_SCHEMA_VERSION: u8 = 1;
@@ -46,7 +45,6 @@ const MAX_CATALOG_ENTRIES: usize = 256;
 const MAX_CONCURRENT_CONNECTIONS: usize = 16;
 const REQUEST_WAIT: Duration = Duration::from_secs(5);
 const VALUE_WAIT: Duration = Duration::from_secs(30);
-const MAX_SIGNING_KEY_BYTES: usize = 4096;
 const MAX_OUTBOX_BYTES: usize = 512 * 1024;
 const MAX_DELIVERY_TTL_SECONDS: u64 = 7 * 24 * 60 * 60;
 const EXTERNAL_HEALTH_FRESHNESS_SECONDS: u64 = 120;
@@ -87,15 +85,6 @@ struct HostDeliveryPlan {
     generation: u64,
     revocation_epoch: u64,
     envelope_ttl_seconds: u64,
-}
-
-#[derive(Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct HostProducerSigningKeyFile {
-    schema: String,
-    schema_version: u8,
-    key_id: String,
-    private_key_base64: String,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -669,23 +658,8 @@ fn validate_delivery_plan(plan: &HostDeliveryPlan) -> Result<()> {
 }
 
 fn load_signing_key(plan: &HostDeliveryPlan) -> Result<SigningKey> {
-    let raw = read_regular_bounded(&plan.producer_signing_key_file, MAX_SIGNING_KEY_BYTES, true)
-        .map_err(|_| WebTransactionError("web_transaction_signing_key_unavailable"))?;
-    let document: HostProducerSigningKeyFile = serde_json::from_slice(&raw)
-        .map_err(|_| WebTransactionError("web_transaction_signing_key_invalid"))?;
-    if document.schema != SIGNING_KEY_SCHEMA
-        || document.schema_version != DELIVERY_SCHEMA_VERSION
-        || document.key_id != plan.producer_key_id
-    {
-        return Err(WebTransactionError("web_transaction_signing_key_invalid").into());
-    }
-    let raw_key = STANDARD_NO_PAD
-        .decode(document.private_key_base64.as_bytes())
-        .map_err(|_| WebTransactionError("web_transaction_signing_key_invalid"))?;
-    let key_bytes: [u8; 32] = raw_key
-        .try_into()
-        .map_err(|_| WebTransactionError("web_transaction_signing_key_invalid"))?;
-    Ok(SigningKey::from_bytes(&key_bytes))
+    super::load_host_producer_signing_key(&plan.producer_signing_key_file, &plan.producer_key_id)
+        .map_err(|_| WebTransactionError("web_transaction_signing_key_invalid").into())
 }
 
 async fn prepare_host_delivery(

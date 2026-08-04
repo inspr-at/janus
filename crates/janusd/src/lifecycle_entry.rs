@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
+use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine as _};
+use ed25519_dalek::SigningKey;
 use fs2::FileExt;
 use janus_core::{
     AuditAction, AuditEvent, AuditOutcome, AuditSink, ConsumerDescriptor, ConsumerRef, JanusError,
@@ -28,9 +30,38 @@ const MAX_REVIEW_AGE: Duration = Duration::from_secs(366 * 24 * 60 * 60);
 const MAX_ENTRY_JOURNALS: usize = 4096;
 const REMOVAL_TOMBSTONE_RETAIN_SECONDS: u64 = 366 * 24 * 60 * 60;
 const TOMBSTONE_DIR_ENV: &str = "JANUS_LIFECYCLE_TOMBSTONE_DIR";
+const HOST_SIGNING_KEY_SCHEMA: &str = "inspr.janus.host-envelope-signing-key.v1";
+const MAX_HOST_SIGNING_KEY_BYTES: usize = 4096;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HostProducerSigningKeyFile {
+    schema: String,
+    schema_version: u8,
+    key_id: String,
+    private_key_base64: String,
+}
+
+fn load_host_producer_signing_key(path: &Path, key_id: &str) -> Result<SigningKey> {
+    let raw = read_regular_bounded(path, MAX_HOST_SIGNING_KEY_BYTES, true)?;
+    let document: HostProducerSigningKeyFile = serde_json::from_slice(&raw)?;
+    if document.schema != HOST_SIGNING_KEY_SCHEMA
+        || document.schema_version != 1
+        || document.key_id != key_id
+    {
+        anyhow::bail!("host producer signing key is invalid");
+    }
+    let raw = STANDARD_NO_PAD.decode(document.private_key_base64)?;
+    let bytes: [u8; 32] = raw
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("host producer signing key is invalid"))?;
+    Ok(SigningKey::from_bytes(&bytes))
+}
 
 #[path = "lifecycle_entry/dynamic_custody.rs"]
 pub(super) mod dynamic_custody;
+#[path = "lifecycle_entry/dynamic_delivery.rs"]
+pub(super) mod dynamic_delivery;
 #[path = "lifecycle_entry/web_transaction.rs"]
 pub(super) mod web_transaction;
 

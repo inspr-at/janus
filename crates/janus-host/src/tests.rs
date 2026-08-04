@@ -838,3 +838,45 @@ fn errors_status_and_persisted_metadata_never_echo_the_canary() {
         .to_string();
     assert!(!error.contains("canary"));
 }
+
+#[test]
+fn dynamic_packet_is_separately_sealed_and_current_executor_rejects_it() {
+    let fixture = Fixture::new();
+    let canary = b"dynamic-host-package-canary";
+    let packet = seal_dynamic_host_envelope(DynamicHostEnvelopeSealRequest {
+        binding: DynamicHostEnvelopeBindingV1 {
+            schema: DYNAMIC_PAYLOAD_SCHEMA.to_string(),
+            schema_version: SCHEMA_VERSION,
+            envelope_ref: "env_dynamic0001".to_string(),
+            operation_ref: "op_dynamic0001".to_string(),
+            operation_kind: "create".to_string(),
+            source: "import".to_string(),
+            host_ref: HOST_REF.to_string(),
+            service_ref: SERVICE_REF.to_string(),
+            binding_ref: "bind_dynamic0001".to_string(),
+            secret_ref: "sec_dynamic0001".to_string(),
+            generation_ref: "gen_dynamic0001".to_string(),
+            environment_policy_ref: "envpol_dynamic0001".to_string(),
+            environment_policy_fingerprint: "envpf_dynamic0001".to_string(),
+            declaration_fingerprint: DECLARATION_REF.to_string(),
+            environment_name: "DATABASE_PASSWORD".to_string(),
+            delivery_profile_ref: "delivery_dynamic0001".to_string(),
+            reload_profile_ref: "reload_dynamic0001".to_string(),
+            health_profile_ref: "health_dynamic0001".to_string(),
+            revocation_epoch: 1,
+            issued_at_unix_secs: NOW - 10,
+            expires_at_unix_secs: NOW + 3600,
+        },
+        host_recipient: &fixture.recipient,
+        signing_key_id: KEY_REF,
+        signing_key: &fixture.signing_key,
+        value: SecretValue::new(canary.to_vec()),
+    })
+    .expect("seal dynamic packet");
+    assert!(!packet.windows(canary.len()).any(|window| window == canary));
+    assert_eq!(
+        fixture.executor.install(&packet, now()).unwrap_err(),
+        HostEnvelopeError::new("host_envelope_packet_invalid")
+    );
+    assert!(!fixture.runtime_target().exists());
+}

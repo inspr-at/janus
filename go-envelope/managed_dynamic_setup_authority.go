@@ -20,6 +20,7 @@ const (
 	managedDynamicSetupKeyFileEnv    = "JANUS_MANAGED_DYNAMIC_SETUP_VERIFICATION_KEYS_FILE"
 	managedDynamicSetupPathsEnv      = "JANUS_MANAGED_DYNAMIC_SETUP_DECLARATION_PATHS"
 	managedDynamicCustodySocketEnv   = "JANUS_MANAGED_DYNAMIC_CUSTODY_SOCKET"
+	managedDynamicDeliverySocketEnv  = "JANUS_MANAGED_DYNAMIC_DELIVERY_SOCKET"
 )
 
 // managedDynamicSetupRuntimeConfig is a separate, explicit capability gate.
@@ -30,6 +31,7 @@ type managedDynamicSetupRuntimeConfig struct {
 	Keyring            managedIntentKeyring
 	DeclarationPaths   []string
 	CustodySocket      string
+	DeliverySocket     string
 }
 
 func loadManagedDynamicSetupRuntimeConfigFromEnv() (*managedDynamicSetupRuntimeConfig, error) {
@@ -39,6 +41,7 @@ func loadManagedDynamicSetupRuntimeConfigFromEnv() (*managedDynamicSetupRuntimeC
 	keyFile := strings.TrimSpace(os.Getenv(managedDynamicSetupKeyFileEnv))
 	declarationRaw := strings.TrimSpace(os.Getenv(managedDynamicSetupPathsEnv))
 	custodySocket := strings.TrimSpace(os.Getenv(managedDynamicCustodySocketEnv))
+	deliverySocket := strings.TrimSpace(os.Getenv(managedDynamicDeliverySocketEnv))
 
 	enabled := false
 	switch enabledRaw {
@@ -48,17 +51,17 @@ func loadManagedDynamicSetupRuntimeConfigFromEnv() (*managedDynamicSetupRuntimeC
 	default:
 		return nil, errors.New("managed dynamic setup enable flag is invalid")
 	}
-	configured := origin != "" || tokenFile != "" || keyFile != "" || declarationRaw != "" || custodySocket != ""
+	configured := origin != "" || tokenFile != "" || keyFile != "" || declarationRaw != "" || custodySocket != "" || deliverySocket != ""
 	if !enabled {
 		if configured {
 			return nil, errors.New("managed dynamic setup configuration requires the explicit enable flag")
 		}
 		return nil, nil
 	}
-	if origin == "" || tokenFile == "" || keyFile == "" || declarationRaw == "" || custodySocket == "" {
+	if origin == "" || tokenFile == "" || keyFile == "" || declarationRaw == "" || custodySocket == "" || deliverySocket == "" {
 		return nil, errors.New("managed dynamic setup configuration is partial")
 	}
-	if !managedDynamicCleanAbsolutePath(tokenFile) || !managedDynamicCleanAbsolutePath(keyFile) || !managedDynamicCleanAbsolutePath(custodySocket) {
+	if !managedDynamicCleanAbsolutePath(tokenFile) || !managedDynamicCleanAbsolutePath(keyFile) || !managedDynamicCleanAbsolutePath(custodySocket) || !managedDynamicCleanAbsolutePath(deliverySocket) || custodySocket == deliverySocket {
 		return nil, errors.New("managed dynamic setup configuration file path is invalid")
 	}
 	parsedOrigin, err := parseManagedOrigin(origin)
@@ -87,6 +90,7 @@ func loadManagedDynamicSetupRuntimeConfigFromEnv() (*managedDynamicSetupRuntimeC
 		Keyring:            keyring,
 		DeclarationPaths:   declarationPaths,
 		CustodySocket:      custodySocket,
+		DeliverySocket:     deliverySocket,
 	}, nil
 }
 
@@ -235,8 +239,9 @@ func (authority *managedDynamicHTTPAuthority) CompleteValueAdmission(
 	expected managedDynamicStepUpTarget,
 	operationRef string,
 	custody managedDynamicCustodyResult,
+	delivery managedDynamicDeliveryResult,
 ) (managedDynamicSetupReservation, error) {
-	if validateManagedDynamicCustodyResult(custody, operationRef) != nil {
+	if validateManagedDynamicCustodyResult(custody, operationRef) != nil || validateManagedDynamicDeliveryResult(delivery, operationRef) != nil {
 		return managedDynamicSetupReservation{}, managedIntentError("managed_intent_value_admission_unavailable")
 	}
 	if authority == nil || authority.replays == nil || !validManagedDynamicStepUpTarget(expected) || !validManagedRef("op_", operationRef) {
@@ -249,7 +254,7 @@ func (authority *managedDynamicHTTPAuthority) CompleteValueAdmission(
 	if managedDynamicTargetFromInspection(inspection) != expected {
 		return managedDynamicSetupReservation{}, managedIntentError("managed_intent_declaration_drift")
 	}
-	record, err := authority.replays.completeValueAdmission(inspection.Intent, operationRef, custody, authority.consumer.now().Unix())
+	record, err := authority.replays.completeValueAdmission(inspection.Intent, operationRef, custody, delivery, authority.consumer.now().Unix())
 	if err != nil {
 		return managedDynamicSetupReservation{}, normalizeManagedIntentError(err)
 	}
@@ -294,5 +299,7 @@ func managedDynamicReservationFromRecord(inspection managedDynamicSetupInspectio
 		BindingRef:             record.BindingRef,
 		SecretRef:              record.SecretRef,
 		GenerationRef:          record.GenerationRef,
+		PackageRef:             record.PackageRef,
+		EnvelopeRef:            record.EnvelopeRef,
 	}
 }

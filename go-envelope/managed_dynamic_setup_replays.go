@@ -11,8 +11,9 @@ import (
 )
 
 const (
-	managedDynamicReplayStoreSchema = "inspr.janus.managed-environment-setup-replay-store.v2"
-	managedDynamicReplayStoreFile   = "managed-dynamic-setup-replays.json"
+	managedDynamicReplayStoreSchema  = "inspr.janus.managed-environment-setup-replay-store.v3"
+	managedDynamicReplayStoreVersion = 3
+	managedDynamicReplayStoreFile    = "managed-dynamic-setup-replays.json"
 )
 
 type managedDynamicReplayStore struct {
@@ -37,6 +38,8 @@ type managedDynamicReplayRecord struct {
 	BindingRef                      string `json:"binding_ref,omitempty"`
 	SecretRef                       string `json:"secret_ref,omitempty"`
 	GenerationRef                   string `json:"generation_ref,omitempty"`
+	PackageRef                      string `json:"package_ref,omitempty"`
+	EnvelopeRef                     string `json:"envelope_ref,omitempty"`
 	ExpiresAtUnixSecond             int64  `json:"expires_at_unix_secs"`
 }
 
@@ -82,7 +85,7 @@ func readManagedDynamicReplayDocument(path string) (managedDynamicReplayDocument
 func newManagedDynamicReplayDocument() managedDynamicReplayDocument {
 	return managedDynamicReplayDocument{
 		Schema:        managedDynamicReplayStoreSchema,
-		SchemaVersion: managedDynamicContractVersion,
+		SchemaVersion: managedDynamicReplayStoreVersion,
 		Reservations:  map[string]managedDynamicReplayRecord{},
 		Nonces:        map[string]string{},
 	}
@@ -173,14 +176,14 @@ func (store *managedDynamicReplayStore) recover(intent managedDynamicSetupIntent
 }
 
 func (store *managedDynamicReplayStore) beginValueAdmission(intent managedDynamicSetupIntent, operationRef string, now int64) (managedDynamicReplayRecord, error) {
-	return store.updateValueAdmission(intent, operationRef, managedDynamicCustodyResult{}, now, false)
+	return store.updateValueAdmission(intent, operationRef, managedDynamicCustodyResult{}, managedDynamicDeliveryResult{}, now, false)
 }
 
-func (store *managedDynamicReplayStore) completeValueAdmission(intent managedDynamicSetupIntent, operationRef string, custody managedDynamicCustodyResult, now int64) (managedDynamicReplayRecord, error) {
-	return store.updateValueAdmission(intent, operationRef, custody, now, true)
+func (store *managedDynamicReplayStore) completeValueAdmission(intent managedDynamicSetupIntent, operationRef string, custody managedDynamicCustodyResult, delivery managedDynamicDeliveryResult, now int64) (managedDynamicReplayRecord, error) {
+	return store.updateValueAdmission(intent, operationRef, custody, delivery, now, true)
 }
 
-func (store *managedDynamicReplayStore) updateValueAdmission(intent managedDynamicSetupIntent, operationRef string, custody managedDynamicCustodyResult, now int64, complete bool) (managedDynamicReplayRecord, error) {
+func (store *managedDynamicReplayStore) updateValueAdmission(intent managedDynamicSetupIntent, operationRef string, custody managedDynamicCustodyResult, delivery managedDynamicDeliveryResult, now int64, complete bool) (managedDynamicReplayRecord, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 
@@ -206,7 +209,7 @@ func (store *managedDynamicReplayStore) updateValueAdmission(intent managedDynam
 		return managedDynamicReplayRecord{}, managedIntentError("managed_intent_value_admission_unavailable")
 	}
 	if complete {
-		if validateManagedDynamicCustodyResult(custody, operationRef) != nil {
+		if validateManagedDynamicCustodyResult(custody, operationRef) != nil || validateManagedDynamicDeliveryResult(delivery, operationRef) != nil {
 			return managedDynamicReplayRecord{}, managedIntentError("managed_intent_value_admission_unavailable")
 		}
 		if record.ValueAdmissionStartedUnixSecond == 0 ||
@@ -218,6 +221,8 @@ func (store *managedDynamicReplayStore) updateValueAdmission(intent managedDynam
 		record.BindingRef = custody.BindingRef
 		record.SecretRef = custody.SecretRef
 		record.GenerationRef = custody.GenerationRef
+		record.PackageRef = delivery.PackageRef
+		record.EnvelopeRef = delivery.EnvelopeRef
 	} else {
 		if record.ValueAdmissionStartedUnixSecond != 0 {
 			return record, managedIntentError("managed_intent_value_replayed")
@@ -274,7 +279,7 @@ func pruneManagedDynamicReplayDocument(document *managedDynamicReplayDocument, n
 
 func validateManagedDynamicReplayDocument(document managedDynamicReplayDocument) error {
 	if document.Schema != managedDynamicReplayStoreSchema ||
-		document.SchemaVersion != managedDynamicContractVersion ||
+		document.SchemaVersion != managedDynamicReplayStoreVersion ||
 		document.Reservations == nil ||
 		document.Nonces == nil ||
 		len(document.Reservations) > managedReplayMaximumEntries ||
@@ -309,11 +314,13 @@ func validateManagedDynamicReplayDocument(document managedDynamicReplayDocument)
 					record.ValueAdmissionDoneUnixSecond < record.ValueAdmissionStartedUnixSecond ||
 					record.ValueAdmissionDoneUnixSecond >= record.ExpiresAtUnixSecond) ||
 			record.ValueAdmissionDoneUnixSecond == 0 &&
-				(record.BindingRef != "" || record.SecretRef != "" || record.GenerationRef != "") ||
+				(record.BindingRef != "" || record.SecretRef != "" || record.GenerationRef != "" || record.PackageRef != "" || record.EnvelopeRef != "") ||
 			record.ValueAdmissionDoneUnixSecond != 0 &&
 				(!validManagedRef("bind_", record.BindingRef) ||
 					!validManagedRef("sec_", record.SecretRef) ||
-					!validManagedRef("gen_", record.GenerationRef)) ||
+					!validManagedRef("gen_", record.GenerationRef) ||
+					!validManagedRef("pkg_", record.PackageRef) ||
+					!validManagedRef("env_", record.EnvelopeRef)) ||
 			intentNonces[intentRef] != 1 ||
 			operationRefs[record.OperationRef] {
 			return errors.New("managed_intent_replay_store_invalid")

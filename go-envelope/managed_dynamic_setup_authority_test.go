@@ -22,6 +22,7 @@ func clearManagedDynamicSetupEnvironment(t *testing.T) {
 		managedDynamicSetupKeyFileEnv,
 		managedDynamicSetupPathsEnv,
 		managedDynamicCustodySocketEnv,
+		managedDynamicDeliverySocketEnv,
 	} {
 		t.Setenv(name, "")
 	}
@@ -90,6 +91,7 @@ func TestManagedDynamicSetupRuntimeConfigRequiresExplicitCompleteGate(t *testing
 	t.Setenv(managedDynamicSetupKeyFileEnv, keyPath)
 	t.Setenv(managedDynamicSetupPathsEnv, declarationPath)
 	t.Setenv(managedDynamicCustodySocketEnv, "/run/janus/dynamic-custody.sock")
+	t.Setenv(managedDynamicDeliverySocketEnv, "/run/janus/dynamic-delivery.sock")
 	if _, err := loadManagedDynamicSetupRuntimeConfigFromEnv(); err == nil {
 		t.Fatal("non-HTTPS control-plane origin was accepted")
 	}
@@ -105,7 +107,8 @@ func TestManagedDynamicSetupRuntimeConfigRequiresExplicitCompleteGate(t *testing
 		len(config.Keyring) != 1 ||
 		len(config.DeclarationPaths) != 1 ||
 		config.DeclarationPaths[0] != declarationPath ||
-		config.CustodySocket != "/run/janus/dynamic-custody.sock" {
+		config.CustodySocket != "/run/janus/dynamic-custody.sock" ||
+		config.DeliverySocket != "/run/janus/dynamic-delivery.sock" {
 		t.Fatalf("complete explicit configuration was not preserved: %#v", config)
 	}
 
@@ -316,7 +319,7 @@ func TestManagedDynamicHTTPAuthorityReservesAndRecoversAcrossRestart(t *testing.
 	if _, err := restarted.BeginValueAdmission(t.Context(), target, reservation.OperationRef); err == nil || err.Error() != "managed_intent_value_replayed" {
 		t.Fatalf("authority admitted a duplicate value: %v", err)
 	}
-	completed, err := restarted.CompleteValueAdmission(t.Context(), target, reservation.OperationRef, managedDynamicCustodyTestResult(reservation.OperationRef))
+	completed, err := restarted.CompleteValueAdmission(t.Context(), target, reservation.OperationRef, managedDynamicCustodyTestResult(reservation.OperationRef), managedDynamicDeliveryTestResult(reservation.OperationRef))
 	if err != nil || !completed.ValueAdmissionStarted || !completed.ValueAdmissionComplete {
 		t.Fatalf("authority did not complete the value-free admission receipt: %#v %v", completed, err)
 	}
@@ -357,6 +360,8 @@ func TestNewAppWiresDynamicAuthorityOnlyFromDedicatedConfig(t *testing.T) {
 		InternalToken:      strings.Repeat("a", 32),
 		Keyring:            keyring,
 		DeclarationPaths:   []string{declarationPath},
+		CustodySocket:      "/run/janus/dynamic-custody.sock",
+		DeliverySocket:     "/run/janus/dynamic-delivery.sock",
 	}
 	app, err = NewApp(t.Context(), config, store)
 	if err != nil {

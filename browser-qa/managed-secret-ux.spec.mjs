@@ -271,9 +271,9 @@ test("dynamic import is passkey-bound and encrypted once", async ({
     }
   }, canary);
   await expect(
-    page.getByRole("heading", { name: "Encrypted custody confirmed" }),
+    page.getByRole("heading", { name: "Host-bound package prepared" }),
   ).toBeVisible();
-  await expect(page.getByRole("status")).toContainText("No value returned");
+  await expect(page.getByRole("status")).toContainText("No value or packet returned");
   await expect(page.locator('input[name="secret_value"]')).toHaveCount(0);
   await expectCanariesAbsent(page, [canary]);
 
@@ -298,7 +298,7 @@ test("dynamic import is passkey-bound and encrypted once", async ({
   expect(await duplicate.text()).not.toContain(canary);
   await page.reload();
   await expect(
-    page.getByRole("heading", { name: "Encrypted custody confirmed" }),
+    page.getByRole("heading", { name: "Host-bound package prepared" }),
   ).toBeVisible();
   await expectCanariesAbsent(page, [canary]);
 });
@@ -331,9 +331,9 @@ test("dynamic generation accepts no browser value", async ({ page }) => {
     .getByRole("button", { name: "Generate and encrypt once" })
     .click();
   await expect(
-    page.getByRole("heading", { name: "Encrypted custody confirmed" }),
+    page.getByRole("heading", { name: "Host-bound package prepared" }),
   ).toBeVisible();
-  await expect(page.getByRole("status")).toContainText("No value returned");
+  await expect(page.getByRole("status")).toContainText("No value or packet returned");
   await expect(page.locator('input[name="secret_value"]')).toHaveCount(0);
 });
 
