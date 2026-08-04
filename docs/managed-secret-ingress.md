@@ -5,6 +5,42 @@ first-party browser flow for a Pharos-issued, signed, declaration-bound setup
 intent. It does not add a value-bearing API, Warden method, Pharos method, CLI
 argument, JSON request, or agent tool.
 
+## Additive dynamic-environment ingress contract
+
+JANUS-392 defines the value-free Janus ingress contract for a future dynamic
+environment binding beneath a pre-approved service policy. It does not add or
+change a browser route. The existing v1 declared-slot flow described below
+remains the only production value-bearing path.
+
+The additive v2 handoff uses the schemas
+`inspr.janus.signed-managed-environment-setup-intent.v2` and
+`inspr.janus.managed-environment-setup-intent.v2`, with a distinct Ed25519
+signature domain. The producer-facing, value-free payload fixture is
+`contracts/managed-dynamic-env-setup-intent-v2.json`. Before any later boundary
+may ask for a value, Janus verifies
+the signing key, signature, version, opaque intent and nonce, human session,
+issuer, audience, bounded lifetime, and fixed Pharos return kind. It then
+re-resolves a root-owned `inspr.janus.managed-service-declaration.v2` and
+requires exact equality for:
+
+- host, service, declaration fingerprint, environment-policy reference, and
+  environment-policy fingerprint;
+- operation kind (`create` or `replace`) and one policy-allowed source;
+- the environment name, byte-for-byte, under `portable_secret_env_v1`, including
+  global execution-critical and service-specific reserved-name denial; and
+- the policy-owned delivery, reload, health, capacity, and source constraints.
+
+Strict JSON rejects unknown fields on the outer envelope, signed payload, and
+local declaration. In particular, the signed payload cannot carry a secret,
+ciphertext, path, command, callback URL, delivery/reload/health profile, or slot
+override. Policy absence and every target or generation mismatch fail closed.
+
+This slice stops after inspection. It does not fetch a v2 handoff over HTTP,
+admit a secret value, consume replay state, create custody records, materialize
+an environment file, contact a host, restart a service, expose a Pharos API, or
+enable production behavior. Those effects require separate reviewed slices;
+the contract exists first so they cannot invent authority-bearing inputs.
+
 ## Route and trust boundary
 
 The four UI-only routes are:

@@ -1,0 +1,24 @@
+{
+  "schema": "inspr.janus.managed-environment-setup-intent-fixture.v2",
+  "schema_version": 2,
+  "intent": {
+    "schema": "inspr.janus.managed-environment-setup-intent.v2",
+    "schema_version": 2,
+    "intent_ref": "intent_0f92b78c3d16",
+    "operation_kind": "create",
+    "source": "import",
+    "host_ref": "host_7f94a1c8e912",
+    "service_ref": "svc_24b7c8f0aa19",
+    "environment_policy_ref": "envpol_41e6720bc591",
+    "environment_policy_fingerprint": "envpf_3f8d9a061c42",
+    "declaration_fingerprint": "decl_51268e2b772a",
+    "environment_name": "HOME_ASSISTANT_TOKEN",
+    "human_session_ref": "hsn_489e126a70bf",
+    "issuer_ref": "sys_pharos_control_plane_v1",
+    "audience_ref": "sys_janus_secret_custody_v1",
+    "nonce_ref": "nonce_a280fd61b9ce",
+    "issued_at_unix_secs": 1785916800,
+    "expires_at_unix_secs": 1785917100,
+    "return_target": "pharos_service"
+  }
+}
