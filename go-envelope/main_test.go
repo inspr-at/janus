@@ -1402,6 +1402,11 @@ func TestAuthContinuationTargetIsExactAndSameOrigin(t *testing.T) {
 		{target: "/managed-service/setup?intent=intent_0123456789abcdef", kind: "managed_login", want: true},
 		{target: "/managed-service/setup?intent=intent_0123456789abcdef", kind: "managed_step_up", want: true},
 		{target: "/managed-service/setup?intent=intent_0123456789abcdef", kind: "managed_step_up_retry", want: true},
+		{target: "/managed-environment/setup?intent=intent_0123456789abcdef", kind: "dynamic_login", want: true},
+		{target: "/managed-environment/setup?intent=intent_0123456789abcdef", kind: "dynamic_step_up", want: true},
+		{target: "/managed-environment/setup?intent=intent_0123456789abcdef", kind: "dynamic_step_up_retry", want: true},
+		{target: "/managed-environment/setup?intent=intent_0123456789abcdef&next=/", kind: "dynamic_step_up", want: false},
+		{target: "/managed-service/setup?intent=intent_0123456789abcdef", kind: "dynamic_step_up", want: false},
 		{target: "/managed-service/setup?intent=intent_0123456789abcdef&next=/", kind: "managed_step_up", want: false},
 		{target: "/managed-service/setup?intent=intent_0123456789abcdef&next=/", kind: "managed_step_up_retry", want: false},
 		{target: "/managed-service/setup?intent=invalid", kind: "managed_step_up", want: false},
@@ -3146,6 +3151,7 @@ func assertCoreSecurityHeaders(t *testing.T, name string, out *httptest.Response
 
 func TestManagedSetupFormActionSourcesFailClosed(t *testing.T) {
 	setupRequest := httptest.NewRequest(http.MethodGet, "/managed-service/setup?intent=intent_0123456789abcdef", nil)
+	dynamicSetupRequest := httptest.NewRequest(http.MethodGet, "/managed-environment/setup?intent=intent_0123456789abcdef", nil)
 	postRequest := httptest.NewRequest(http.MethodPost, "/managed-service/setup/step-up", nil)
 	healthRequest := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	tests := []struct {
@@ -3156,6 +3162,7 @@ func TestManagedSetupFormActionSourcesFailClosed(t *testing.T) {
 		want    string
 	}{
 		{name: "configured HTTPS origin", request: setupRequest, authURL: "https://auth.example.test/oauth/v2/authorize", oauth: true, want: "'self' https://auth.example.test"},
+		{name: "dynamic HTTPS origin", request: dynamicSetupRequest, authURL: "https://auth.example.test/oauth/v2/authorize", oauth: true, want: "'self' https://auth.example.test"},
 		{name: "loopback HTTP origin", request: setupRequest, authURL: "http://127.0.0.1:18083/authorize", oauth: true, want: "'self' http://127.0.0.1:18083"},
 		{name: "nil request", request: nil, authURL: "https://auth.example.test/authorize", oauth: true, want: "'self'"},
 		{name: "nil OAuth config", request: setupRequest, want: "'self'"},
@@ -3378,6 +3385,8 @@ func TestRouteValueLeakSentinelCoversPublicAPIAndUI(t *testing.T) {
 		{name: "managed secret completion unavailable", pattern: "GET /managed-service/setup/complete/{operationRef}", method: http.MethodGet, path: "/managed-service/setup/complete/op_0123456789abcdef", status: http.StatusServiceUnavailable},
 		{name: "managed secret step-up unavailable", pattern: "POST /managed-service/setup/step-up", method: http.MethodPost, path: "/managed-service/setup/step-up", status: http.StatusServiceUnavailable},
 		{name: "managed secret execute unavailable", pattern: "POST /managed-service/setup/execute", method: http.MethodPost, path: "/managed-service/setup/execute", status: http.StatusServiceUnavailable},
+		{name: "managed environment setup unavailable", pattern: "GET /managed-environment/setup", method: http.MethodGet, path: "/managed-environment/setup?intent=intent_0123456789abcdef", status: http.StatusForbidden},
+		{name: "managed environment step-up unavailable", pattern: "POST /managed-environment/setup/step-up", method: http.MethodPost, path: "/managed-environment/setup/step-up", status: http.StatusServiceUnavailable},
 		{name: "managed host envelope unavailable", pattern: "GET /internal/managed-service-host-envelopes/{hostRef}/{operationRef}", method: http.MethodGet, path: "/internal/managed-service-host-envelopes/host_0123456789abcdef/op_0123456789abcdef", status: http.StatusNotFound},
 		{name: "managed host reconcile unavailable", pattern: "POST /internal/managed-service-operations/{operationRef}/reconcile", method: http.MethodPost, path: "/internal/managed-service-operations/op_0123456789abcdef/reconcile", status: http.StatusBadRequest},
 		{name: "browser missing", method: http.MethodGet, path: "/missing?ref=secret-cookie-secret", status: http.StatusNotFound},

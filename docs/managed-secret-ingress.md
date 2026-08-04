@@ -8,9 +8,10 @@ argument, JSON request, or agent tool.
 ## Additive dynamic-environment ingress contract
 
 JANUS-392 defines the value-free Janus ingress contract for a future dynamic
-environment binding beneath a pre-approved service policy. It does not add or
-change a browser route. The existing v1 declared-slot flow described below
-remains the only production value-bearing path.
+environment binding beneath a pre-approved service policy. JANUS-393 adds a
+separate, guarded review and fresh-passkey session for that exact v2 target.
+The existing v1 declared-slot flow described below remains unchanged and is
+still the only production value-bearing path.
 
 The additive v2 handoff uses the schemas
 `inspr.janus.signed-managed-environment-setup-intent.v2` and
@@ -35,15 +36,33 @@ local declaration. In particular, the signed payload cannot carry a secret,
 ciphertext, path, command, callback URL, delivery/reload/health profile, or slot
 override. Policy absence and every target or generation mismatch fail closed.
 
-This slice stops after inspection. It does not fetch a v2 handoff over HTTP,
-admit a secret value, consume replay state, create custody records, materialize
-an environment file, contact a host, restart a service, expose a Pharos API, or
-enable production behavior. Those effects require separate reviewed slices;
-the contract exists first so they cannot invent authority-bearing inputs.
+The v2 browser slice exposes only:
+
+- `GET /managed-environment/setup?intent=intent_…` to re-inspect and display
+  the exact signed host, service, policy, declaration, variable, source, and
+  operation; and
+- `POST /managed-environment/setup/step-up` to start a fresh passwordless OIDC
+  authorization-code + PKCE flow for that exact target.
+
+The dynamic flow, retry breadcrumb, and proof use distinct v2 signature
+domains and cookie names. Each carries the complete value-free signed intent
+identity and target, including issuer, audience, nonce, validity window, fixed
+return kind, and the one-way human-session reference. Janus re-inspects the authoritative signed
+intent before step-up, again at the OIDC callback before proof issuance, and on
+every review-page load before accepting the proof. Any field or policy drift,
+mixed v1/v2 flow state, stale assertion, different identity, or non-passkey AMR
+fails closed. The confirmed page remains value-free and has no execute form.
+
+Production construction does not yet provide a v2 intent authority, so these
+routes fail closed until a later reviewed fetcher is explicitly wired. This
+slice does not fetch a v2 handoff over HTTP, admit a secret value, consume
+intent replay state, create custody records, materialize an environment file,
+contact a host, restart a service, expose a Pharos API, or enable production
+behavior. Those effects require separate reviewed slices.
 
 ## Route and trust boundary
 
-The four UI-only routes are:
+The four v1 declared-slot UI-only routes are:
 
 - `GET /managed-service/setup?intent=intent_…` — inspect the signed intent and
   render value-free context.

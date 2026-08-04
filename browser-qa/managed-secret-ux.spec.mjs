@@ -203,6 +203,51 @@ test("passwordless import shows Check, forgets the value, and recovers navigatio
   ).toBe(false);
 });
 
+test("dynamic target is locked to a fresh passkey before any value field", async ({
+  page,
+}) => {
+  await page.goto("/__managed-browser/session?kind=dynamic");
+  await expect(
+    page.getByRole("heading", { name: "Add environment variable" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "DATABASE_PASSWORD" }),
+  ).toBeVisible();
+  await expect(page.getByText("host_0123456789abcdef")).toBeVisible();
+  await expect(page.getByText("svc_0123456789abcdef")).toBeVisible();
+  await expect(page.getByText("Target locked")).toBeVisible();
+  await expect(page.locator('input[name="secret_value"]')).toHaveCount(0);
+  await expect(page.locator('input[type="password"]')).toHaveCount(0);
+  await expect(
+    page.locator('form[action="/managed-environment/setup/execute"]'),
+  ).toHaveCount(0);
+
+  const callbackResponse = page.waitForResponse(
+    (response) => new URL(response.url()).pathname === "/oidc/callback",
+  );
+  await page.getByRole("button", { name: "Confirm with passkey" }).click();
+  const callback = await callbackResponse;
+  expect(callback.status()).toBe(200);
+  expect(callback.headers().refresh).toBe(
+    "0; url=/managed-environment/setup?intent=intent_13579bdf2468ace0",
+  );
+  await expect(
+    page.getByRole("heading", { name: "Exact target approved" }),
+  ).toBeVisible();
+  await expect(page.getByText(/No value accepted yet/)).toBeVisible();
+  await expect(page.locator('input[name="secret_value"]')).toHaveCount(0);
+  await expect(
+    page.locator('form[action="/managed-environment/setup/step-up"]'),
+  ).toHaveCount(0);
+
+  const accessibility = await new AxeBuilder({ page }).analyze();
+  expect(
+    accessibility.violations.filter(({ impact }) =>
+      ["serious", "critical"].includes(impact),
+    ),
+  ).toEqual([]);
+});
+
 test("compact generated flow works from the keyboard", async ({ page }) => {
   await page.goto("/__managed-browser/session?kind=create");
   await expect(
