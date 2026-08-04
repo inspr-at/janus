@@ -29,11 +29,13 @@ as `PATH`, `BASH_ENV`, `NODE_OPTIONS`, `PYTHONPATH`, `DYLD_`, `GIT_CONFIG_`,
 `JANUS_`, `LD_`, and `NIX_`, plus the service's sorted, unique reserved names.
 There is no case folding or other name normalization.
 
-This slice defines and validates the Janus contract only. It does not add a
-network route, browser flow, host materialization, deployment behavior, or a
-Pharos/nixcfg change. Its canonical fixture is
+The canonical fixture is
 `contracts/managed-service-dynamic-env-contract-v2.json`; the v1 parser and
-fixture remain unchanged.
+fixture remain unchanged. Janus's version 2 host-executor configuration may
+now carry root-owned dynamic policies and accept a signed `create` packet that
+matches one policy exactly. This is only the local host acceptance and private
+aggregate-file boundary: it adds no transport, reload, health, activation,
+replacement, removal, deployment enablement, or Pharos/nixcfg change.
 
 ## Authority and state
 
@@ -127,14 +129,22 @@ The executor is bound to one enrolled host and reviewed service/slot profiles.
 It may not choose paths, commands, secret refs, destinations, or health rules.
 Copying an operation or encrypted envelope to another host must fail.
 
-`janus-host-executor` accepts only `install`, `restore`, `commit`, `rollback`,
-and `status`. Install reads one bounded signed packet from standard input;
-commit and rollback read one strict value-free control document. The
-root-owned configuration fixes the host, scope, Janus producer verification
-keys, revocation epoch, declared slots, declaration fingerprints, generation
-floors, and rollback windows. Runtime paths are derived as
-`/run/janus-managed/<service_ref>/<slot_ref>.env`; neither a browser nor a
-Pharos request can select a path.
+`janus-host-executor` keeps the version 1 actions `install`, `restore`,
+`commit`, `rollback`, and `status` unchanged. With a strict version 2
+configuration it additionally accepts `install-dynamic` and
+`restore-dynamic`. Dynamic install reads one bounded signed packet from
+standard input and is create-only; dynamic restore rebuilds configured
+aggregates from the signed cache. These actions do not transport a packet,
+reload a service, inspect health, activate a binding, replace a value, or
+remove a binding. Commit and rollback read one strict value-free control
+document. The root-owned configuration fixes the host, scope, Janus producer
+verification keys, revocation epoch, declared slots, declaration fingerprints,
+generation floors, rollback windows, and—only in version 2—dynamic service
+policies.
+Runtime paths are derived as `/run/janus-managed/<service_ref>/<slot_ref>.env`
+for declared slots and `/run/janus-managed/<service_ref>/dynamic.env` for the
+complete dynamic aggregate; neither a browser nor a Pharos request can select
+a path.
 
 Every packet is Ed25519-signed by a pinned Janus producer over the exact Age
 ciphertext, then Age-encrypted to exactly one host recipient. Recipient
@@ -152,6 +162,15 @@ the cache, argv, environment, Nix store, Git, Pharos, status, or errors.
 Symlinked, hard-linked, partial, oversized, stale, downgraded, revoked,
 cross-host, cross-scope, cross-slot, and declaration-drift inputs fail closed.
 Expiry always blocks first installation and uncommitted recovery.
+
+Dynamic packets use a separate signature domain and cache namespace. The
+executor revalidates host, epoch, revocation, lifetime, service, policy and
+declaration fingerprints, profiles, source, portable environment name, value
+shape, capacity, and collision constraints. It serializes creates per service,
+stores ciphertext only, and atomically rewrites the complete mode-0400
+`dynamic.env` in sorted `NAME=value` order. A pending journal makes either
+side of an interrupted create deterministic on restore; unknown, partial,
+linked, corrupt, or policy-drifted cache objects block materialization.
 
 The current ciphertext restores the runtime file after reboot without central
 Janus. Once committed, delivery expiry does not destroy that offline recovery

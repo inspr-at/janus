@@ -7,7 +7,7 @@ use std::time::SystemTime;
 
 use janus_host::{
     maximum_control_bytes, maximum_packet_bytes, parse_control, parse_quarantine_control,
-    read_bounded_input, HostExecutor, HostExecutorOutcome,
+    read_bounded_input, DynamicHostExecutorOutcome, HostExecutor, HostExecutorOutcome,
 };
 
 fn main() {
@@ -24,6 +24,20 @@ fn run() -> Result<(), &'static str> {
     }
     let executor = HostExecutor::from_system().map_err(|error| error.reason_code())?;
     let now = SystemTime::now();
+    if args[0] == "install-dynamic" {
+        let packet = read_bounded_input(&mut io::stdin().lock(), maximum_packet_bytes())
+            .map_err(|error| error.reason_code())?;
+        let outcome = executor
+            .install_dynamic(&packet, now)
+            .map_err(|error| error.reason_code())?;
+        return emit_dynamic(&[outcome]).map_err(|_| "host_executor_output_failed");
+    }
+    if args[0] == "restore-dynamic" {
+        let outcomes = executor
+            .restore_dynamic_all(now)
+            .map_err(|error| error.reason_code())?;
+        return emit_dynamic(&outcomes).map_err(|_| "host_executor_output_failed");
+    }
     let outcomes = match args[0].as_str() {
         "install" => {
             let packet = read_bounded_input(&mut io::stdin().lock(), maximum_packet_bytes())
@@ -70,6 +84,13 @@ fn run() -> Result<(), &'static str> {
 }
 
 fn emit(outcomes: &[HostExecutorOutcome]) -> io::Result<()> {
+    let stdout = io::stdout();
+    let mut locked = stdout.lock();
+    serde_json::to_writer(&mut locked, outcomes)?;
+    locked.write_all(b"\n")
+}
+
+fn emit_dynamic(outcomes: &[DynamicHostExecutorOutcome]) -> io::Result<()> {
     let stdout = io::stdout();
     let mut locked = stdout.lock();
     serde_json::to_writer(&mut locked, outcomes)?;

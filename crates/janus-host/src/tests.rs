@@ -17,6 +17,11 @@ const SLOT_REF: &str = "slot_49c0e8a17d63";
 const SECRET_REF: &str = "sec_7a6fd9e3b521";
 const DECLARATION_REF: &str = "decl_a84f209c4b32";
 const KEY_REF: &str = "key_7f4a29c10e8d";
+const ENVIRONMENT_POLICY_REF: &str = "envpol_41e6720bc591";
+const ENVIRONMENT_POLICY_FINGERPRINT: &str = "envpf_3f8d9a061c42";
+const DELIVERY_PROFILE_REF: &str = "delivery_2ed71ad75c98";
+const RELOAD_PROFILE_REF: &str = "reload_5e776ec5d9a1";
+const HEALTH_PROFILE_REF: &str = "health_84c12f390b2a";
 
 struct Fixture {
     _temporary: TempDir,
@@ -93,6 +98,70 @@ impl Fixture {
     fn slot_cache(&self) -> PathBuf {
         self.cache_root.join(SLOT_REF)
     }
+
+    fn dynamic_executor(&self, maximum_bindings: u16) -> HostExecutor {
+        HostExecutor::new_v2(
+            dynamic_config(&self.signing_key, self.owner_uid, maximum_bindings),
+            ExecutorPaths {
+                identity: self.identity_path.clone(),
+                cache_root: self.cache_root.clone(),
+                runtime_root: self.runtime_root.clone(),
+                executor_uid: self.owner_uid,
+            },
+        )
+        .expect("dynamic executor")
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn dynamic_packet(
+        &self,
+        binding_suffix: &str,
+        operation_suffix: &str,
+        generation_suffix: &str,
+        environment_name: &str,
+        value: &[u8],
+        operation_kind: &str,
+        service_ref: &str,
+    ) -> Vec<u8> {
+        seal_dynamic_host_envelope(DynamicHostEnvelopeSealRequest {
+            binding: DynamicHostEnvelopeBindingV1 {
+                schema: DYNAMIC_PAYLOAD_SCHEMA.to_string(),
+                schema_version: SCHEMA_VERSION,
+                envelope_ref: format!("env_{binding_suffix}"),
+                operation_ref: format!("op_{operation_suffix}"),
+                operation_kind: operation_kind.to_string(),
+                source: "import".to_string(),
+                host_ref: HOST_REF.to_string(),
+                service_ref: service_ref.to_string(),
+                binding_ref: format!("bind_{binding_suffix}"),
+                secret_ref: format!("sec_{binding_suffix}"),
+                generation_ref: format!("gen_{generation_suffix}"),
+                environment_policy_ref: ENVIRONMENT_POLICY_REF.to_string(),
+                environment_policy_fingerprint: ENVIRONMENT_POLICY_FINGERPRINT.to_string(),
+                declaration_fingerprint: DECLARATION_REF.to_string(),
+                environment_name: environment_name.to_string(),
+                delivery_profile_ref: DELIVERY_PROFILE_REF.to_string(),
+                reload_profile_ref: RELOAD_PROFILE_REF.to_string(),
+                health_profile_ref: HEALTH_PROFILE_REF.to_string(),
+                revocation_epoch: 1,
+                issued_at_unix_secs: NOW - 10,
+                expires_at_unix_secs: NOW + 3600,
+            },
+            host_recipient: &self.recipient,
+            signing_key_id: KEY_REF,
+            signing_key: &self.signing_key,
+            value: SecretValue::new(value.to_vec()),
+        })
+        .expect("seal dynamic packet")
+    }
+
+    fn dynamic_runtime_target(&self) -> PathBuf {
+        self.runtime_root.join(SERVICE_REF).join("dynamic.env")
+    }
+
+    fn dynamic_cache(&self) -> PathBuf {
+        self.cache_root.join(".dynamic").join(SERVICE_REF)
+    }
 }
 
 fn config(signing_key: &SigningKey, owner_uid: u32) -> HostExecutorConfigV1 {
@@ -116,6 +185,42 @@ fn config(signing_key: &SigningKey, owner_uid: u32) -> HostExecutorConfigV1 {
             declaration_fingerprint: DECLARATION_REF.to_string(),
             minimum_generation: 1,
             rollback_window_seconds: 300,
+        }],
+    }
+}
+
+fn dynamic_config(
+    signing_key: &SigningKey,
+    owner_uid: u32,
+    maximum_bindings: u16,
+) -> HostExecutorConfigV2 {
+    let base = config(signing_key, owner_uid);
+    HostExecutorConfigV2 {
+        schema: CONFIG_V2_SCHEMA.to_string(),
+        schema_version: 2,
+        host_ref: base.host_ref,
+        scope_ref: base.scope_ref,
+        owner_uid: base.owner_uid,
+        minimum_revocation_epoch: base.minimum_revocation_epoch,
+        retired: base.retired,
+        producer_keys: base.producer_keys,
+        revoked_envelope_refs: base.revoked_envelope_refs,
+        slots: base.slots,
+        dynamic_environment_policies: vec![HostDynamicEnvironmentPolicyV1 {
+            schema: "inspr.janus.host-dynamic-environment-policy.v1".to_string(),
+            schema_version: 1,
+            service_ref: SERVICE_REF.to_string(),
+            environment_policy_ref: ENVIRONMENT_POLICY_REF.to_string(),
+            environment_policy_fingerprint: ENVIRONMENT_POLICY_FINGERPRINT.to_string(),
+            declaration_fingerprint: DECLARATION_REF.to_string(),
+            delivery_profile_ref: DELIVERY_PROFILE_REF.to_string(),
+            reload_profile_ref: RELOAD_PROFILE_REF.to_string(),
+            health_profile_ref: HEALTH_PROFILE_REF.to_string(),
+            allowed_sources: vec!["generated".to_string(), "import".to_string()],
+            name_policy: "portable_secret_env_v1".to_string(),
+            additional_reserved_names: vec!["DATABASE_URL".to_string()],
+            max_active_bindings: maximum_bindings,
+            runtime_owner_uid: owner_uid,
         }],
     }
 }
@@ -840,7 +945,7 @@ fn errors_status_and_persisted_metadata_never_echo_the_canary() {
 }
 
 #[test]
-fn dynamic_packet_is_separately_sealed_and_current_executor_rejects_it() {
+fn dynamic_packet_is_separately_sealed_and_v1_executor_rejects_it() {
     let fixture = Fixture::new();
     let canary = b"dynamic-host-package-canary";
     let packet = seal_dynamic_host_envelope(DynamicHostEnvelopeSealRequest {
@@ -879,4 +984,319 @@ fn dynamic_packet_is_separately_sealed_and_current_executor_rejects_it() {
         HostEnvelopeError::new("host_envelope_packet_invalid")
     );
     assert!(!fixture.runtime_target().exists());
+}
+
+#[test]
+fn dynamic_create_rebuilds_one_sorted_private_aggregate_without_caching_plaintext() {
+    let fixture = Fixture::new();
+    let executor = fixture.dynamic_executor(3);
+    let beta = fixture.dynamic_packet(
+        "dynamicbeta01",
+        "dynamicbeta01",
+        "dynamicbeta01",
+        "SERVICE_TOKEN",
+        b"beta-canary-value",
+        "create",
+        SERVICE_REF,
+    );
+    let alpha = fixture.dynamic_packet(
+        "dynamicalpha1",
+        "dynamicalpha1",
+        "dynamicalpha1",
+        "API_PASSWORD",
+        b"alpha-canary-value",
+        "create",
+        SERVICE_REF,
+    );
+
+    let first = executor
+        .install_dynamic(&beta, now())
+        .expect("first create");
+    assert_eq!(first.phase, "materialized");
+    assert_eq!(first.binding_count, 1);
+    assert!(!first.value_returned);
+    let second = executor
+        .install_dynamic(&alpha, now())
+        .expect("second create");
+    assert_eq!(second.binding_count, 2);
+    assert_eq!(
+        fs::read(fixture.dynamic_runtime_target()).expect("dynamic runtime"),
+        b"API_PASSWORD=alpha-canary-value\nSERVICE_TOKEN=beta-canary-value\n"
+    );
+    let metadata = fs::metadata(fixture.dynamic_runtime_target()).expect("runtime metadata");
+    assert_eq!(metadata.mode() & 0o777, 0o400);
+    assert_eq!(metadata.uid(), fixture.owner_uid);
+
+    for entry in fs::read_dir(fixture.dynamic_cache()).expect("dynamic cache") {
+        let entry = entry.expect("cache entry");
+        let bytes = fs::read(entry.path()).expect("cache bytes");
+        for canary in [b"alpha-canary-value".as_slice(), b"beta-canary-value"] {
+            assert!(!bytes.windows(canary.len()).any(|window| window == canary));
+        }
+    }
+
+    let repeated = executor
+        .install_dynamic(&alpha, now())
+        .expect("exact retry");
+    assert_eq!(
+        repeated.reason_code,
+        "dynamic_host_materialization_idempotent"
+    );
+    assert_eq!(repeated.binding_count, 2);
+}
+
+#[test]
+fn dynamic_restore_reconstructs_the_complete_aggregate_after_delivery_expiry() {
+    let fixture = Fixture::new();
+    let executor = fixture.dynamic_executor(2);
+    let packet = fixture.dynamic_packet(
+        "restorevalue01",
+        "restorevalue01",
+        "restorevalue01",
+        "SERVICE_TOKEN",
+        b"offline-restore-canary",
+        "create",
+        SERVICE_REF,
+    );
+    executor
+        .install_dynamic(&packet, now())
+        .expect("dynamic create");
+    fs::remove_file(fixture.dynamic_runtime_target()).expect("remove volatile runtime");
+
+    let restored = executor
+        .restore_dynamic_all(UNIX_EPOCH + Duration::from_secs(NOW + 7200))
+        .expect("offline restore after delivery expiry");
+    assert_eq!(restored.len(), 1);
+    assert_eq!(restored[0].phase, "materialized");
+    assert_eq!(restored[0].binding_count, 1);
+    assert_eq!(
+        fs::read(fixture.dynamic_runtime_target()).expect("restored runtime"),
+        b"SERVICE_TOKEN=offline-restore-canary\n"
+    );
+}
+
+#[test]
+fn dynamic_restore_reconciles_both_interrupted_create_boundaries() {
+    let fixture = Fixture::new();
+    let executor = fixture.dynamic_executor(2);
+    let packet = fixture.dynamic_packet(
+        "pendingpacket1",
+        "pendingpacket1",
+        "pendingpacket1",
+        "SERVICE_TOKEN",
+        b"pending-recovery-canary",
+        "create",
+        SERVICE_REF,
+    );
+    executor
+        .install_dynamic(&packet, now())
+        .expect("initial dynamic create");
+    executor
+        .test_move_dynamic_binding_to_pending(SERVICE_REF)
+        .expect("model post-cache crash");
+    fs::remove_file(fixture.dynamic_runtime_target()).expect("remove volatile runtime");
+
+    let restored = executor
+        .restore_dynamic_all(now())
+        .expect("complete pending create with packet");
+    assert_eq!(restored[0].binding_count, 1);
+    assert_eq!(
+        fs::read(fixture.dynamic_runtime_target()).expect("recovered aggregate"),
+        b"SERVICE_TOKEN=pending-recovery-canary\n"
+    );
+
+    let fixture = Fixture::new();
+    let executor = fixture.dynamic_executor(2);
+    let packet = fixture.dynamic_packet(
+        "missingpacket1",
+        "missingpacket1",
+        "missingpacket1",
+        "SERVICE_TOKEN",
+        b"discarded-pending-canary",
+        "create",
+        SERVICE_REF,
+    );
+    executor
+        .install_dynamic(&packet, now())
+        .expect("initial create before interrupted cache write");
+    let binding_ref = executor
+        .test_move_dynamic_binding_to_pending(SERVICE_REF)
+        .expect("model pre-cache crash");
+    fs::remove_file(
+        fixture
+            .dynamic_cache()
+            .join(format!("{binding_ref}.envelope")),
+    )
+    .expect("remove packet to model pre-create crash");
+    fs::remove_file(fixture.dynamic_runtime_target()).expect("remove volatile runtime");
+
+    let restored = executor
+        .restore_dynamic_all(now())
+        .expect("discard pending state without packet");
+    assert_eq!(restored[0].phase, "missing");
+    assert_eq!(restored[0].binding_count, 0);
+    assert!(!fixture.dynamic_runtime_target().exists());
+}
+
+#[test]
+fn dynamic_policy_collision_capacity_replace_and_invalid_values_fail_closed() {
+    let fixture = Fixture::new();
+    let executor = fixture.dynamic_executor(1);
+    let accepted = fixture.dynamic_packet(
+        "acceptedvalue1",
+        "acceptedvalue1",
+        "acceptedvalue1",
+        "SERVICE_TOKEN",
+        b"accepted-canary",
+        "create",
+        SERVICE_REF,
+    );
+    executor
+        .install_dynamic(&accepted, now())
+        .expect("accepted create");
+    let expected = fs::read(fixture.dynamic_runtime_target()).expect("accepted runtime");
+
+    let collision = fixture.dynamic_packet(
+        "collisionval1",
+        "collisionval1",
+        "collisionval1",
+        "SERVICE_TOKEN",
+        b"collision-canary",
+        "create",
+        SERVICE_REF,
+    );
+    assert_eq!(
+        executor.install_dynamic(&collision, now()).unwrap_err(),
+        HostEnvelopeError::new("dynamic_host_binding_collision")
+    );
+    let capacity = fixture.dynamic_packet(
+        "capacityvalue1",
+        "capacityvalue1",
+        "capacityvalue1",
+        "ANOTHER_TOKEN",
+        b"capacity-canary",
+        "create",
+        SERVICE_REF,
+    );
+    assert_eq!(
+        executor.install_dynamic(&capacity, now()).unwrap_err(),
+        HostEnvelopeError::new("dynamic_host_capacity_exhausted")
+    );
+    let replace = fixture.dynamic_packet(
+        "replacevalue01",
+        "replacevalue01",
+        "replacevalue01",
+        "SERVICE_TOKEN",
+        b"replace-canary",
+        "replace",
+        SERVICE_REF,
+    );
+    assert_eq!(
+        executor.install_dynamic(&replace, now()).unwrap_err(),
+        HostEnvelopeError::new("dynamic_host_operation_denied")
+    );
+    let reserved = fixture.dynamic_packet(
+        "reservedvalue1",
+        "reservedvalue1",
+        "reservedvalue1",
+        "DATABASE_URL",
+        b"reserved-canary",
+        "create",
+        SERVICE_REF,
+    );
+    assert_eq!(
+        executor.install_dynamic(&reserved, now()).unwrap_err(),
+        HostEnvelopeError::new("dynamic_host_policy_drift")
+    );
+    let multiline = fixture.dynamic_packet(
+        "multilineval1",
+        "multilineval1",
+        "multilineval1",
+        "ANOTHER_TOKEN",
+        b"not\nportable",
+        "create",
+        SERVICE_REF,
+    );
+    assert_eq!(
+        executor.install_dynamic(&multiline, now()).unwrap_err(),
+        HostEnvelopeError::new("dynamic_host_value_invalid")
+    );
+    assert_eq!(
+        fs::read(fixture.dynamic_runtime_target()).expect("unchanged runtime"),
+        expected
+    );
+}
+
+#[test]
+fn dynamic_cross_service_and_unsafe_cache_objects_fail_without_runtime_changes() {
+    let fixture = Fixture::new();
+    let executor = fixture.dynamic_executor(2);
+    let cross_service = fixture.dynamic_packet(
+        "crossservice01",
+        "crossservice01",
+        "crossservice01",
+        "SERVICE_TOKEN",
+        b"cross-service-canary",
+        "create",
+        "svc_other000001",
+    );
+    assert_eq!(
+        executor.install_dynamic(&cross_service, now()).unwrap_err(),
+        HostEnvelopeError::new("dynamic_host_policy_denied")
+    );
+    assert!(!fixture.dynamic_runtime_target().exists());
+
+    let accepted = fixture.dynamic_packet(
+        "safecachevalue",
+        "safecachevalue",
+        "safecachevalue",
+        "SERVICE_TOKEN",
+        b"safe-cache-canary",
+        "create",
+        SERVICE_REF,
+    );
+    executor
+        .install_dynamic(&accepted, now())
+        .expect("accepted create");
+    fs::remove_file(fixture.dynamic_runtime_target()).expect("remove runtime");
+    fs::write(fixture.dynamic_cache().join("orphan.tmp"), b"partial")
+        .expect("partial cache object");
+    fs::set_permissions(
+        fixture.dynamic_cache().join("orphan.tmp"),
+        fs::Permissions::from_mode(0o600),
+    )
+    .expect("partial permissions");
+    assert_eq!(
+        executor.restore_dynamic_all(now()).unwrap_err(),
+        HostEnvelopeError::new("dynamic_host_cache_partial_file")
+    );
+    assert!(!fixture.dynamic_runtime_target().exists());
+}
+
+#[test]
+fn dynamic_v2_configuration_is_strict_canonical_and_policy_bound() {
+    let fixture = Fixture::new();
+    let config = dynamic_config(&fixture.signing_key, fixture.owner_uid, 2);
+    let mut value = serde_json::to_value(&config).expect("config value");
+    value["unexpected"] = serde_json::json!(true);
+    assert!(serde_json::from_value::<HostExecutorConfigV2>(value).is_err());
+
+    let mut duplicate_source = config.clone();
+    duplicate_source.dynamic_environment_policies[0].allowed_sources =
+        vec!["import".to_string(), "import".to_string()];
+    let error = HostExecutor::new_v2(
+        duplicate_source,
+        ExecutorPaths {
+            identity: fixture.identity_path.clone(),
+            cache_root: fixture.cache_root.clone(),
+            runtime_root: fixture.runtime_root.clone(),
+            executor_uid: fixture.owner_uid,
+        },
+    )
+    .err()
+    .expect("duplicate source must be denied");
+    assert_eq!(
+        error,
+        HostEnvelopeError::new("host_executor_config_invalid")
+    );
 }

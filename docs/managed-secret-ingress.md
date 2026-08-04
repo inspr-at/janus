@@ -18,6 +18,12 @@ Unix socket into one independently Age-encrypted custody object and persists
 only opaque, value-free custody references. JANUS-398 then reopens that exact
 custody object inside a second private daemon, creates a separately signed Age
 packet for the declared host, and persists it in a private Janus outbox.
+JANUS-399 adds the corresponding local host acceptance boundary: a strict
+version 2 executor configuration may accept a `create` packet only for an
+exact root-owned dynamic service policy and atomically rebuild that service's
+private aggregate environment file. It still does not transport the outbox
+packet or perform reload, health, activation, replacement, removal, or
+deployment enablement.
 The existing v1 declared-slot flow described below remains unchanged and is
 still the only production value-bearing path.
 
@@ -110,11 +116,13 @@ successful new reservation. Concurrent intent or nonce reservation has one
 winner. A store that is missing after proof issuance, corrupt, unsafe, full,
 or unwritable fails closed; it never falls back to browser state.
 
-No current deployment configuration enables this capability. This slice
-creates encrypted Janus custody and a host-bound package in a Janus-only
-outbox, but does not materialize an environment file, contact a host, register
-an operation with Pharos, restart a service, or claim health. Transport and
-every host effect require separate reviewed slices.
+No current deployment configuration enables this capability. Janus can create
+encrypted custody and a host-bound package in its private outbox, and the
+version 2 host executor can locally validate that packet and materialize the
+pre-approved service's private aggregate. There is still no transport between
+those boundaries, no Pharos operation registration, and no service reload,
+health, activation, replacement, or removal claim. Each remains a separate
+reviewed slice.
 
 ## Dynamic value admission boundary
 

@@ -359,13 +359,33 @@
       "value_returned": false
     },
     {
-      "id": "dynamic-packet-current-executor-denied",
+      "id": "dynamic-packet-v1-executor-denied",
       "family": "intent-binding",
       "stack": "rust",
       "runner": "cargo",
       "working_directory": ".",
       "target": "janus-host",
-      "test_name": "tests::dynamic_packet_is_separately_sealed_and_current_executor_rejects_it",
+      "test_name": "tests::dynamic_packet_is_separately_sealed_and_v1_executor_rejects_it",
+      "value_returned": false
+    },
+    {
+      "id": "dynamic-host-create-private-aggregate",
+      "family": "host-custody",
+      "stack": "rust",
+      "runner": "cargo",
+      "working_directory": ".",
+      "target": "janus-host",
+      "test_name": "tests::dynamic_create_rebuilds_one_sorted_private_aggregate_without_caching_plaintext",
+      "value_returned": false
+    },
+    {
+      "id": "dynamic-host-interrupted-create-recovery",
+      "family": "workflow-recovery",
+      "stack": "rust",
+      "runner": "cargo",
+      "working_directory": ".",
+      "target": "janus-host",
+      "test_name": "tests::dynamic_restore_reconciles_both_interrupted_create_boundaries",
       "value_returned": false
     },
     {
