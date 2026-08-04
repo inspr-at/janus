@@ -7,6 +7,11 @@
 #![forbid(unsafe_code)]
 
 pub mod agent;
+mod dynamic;
+
+pub use dynamic::{
+    DynamicHostExecutorOutcome, HostDynamicEnvironmentPolicyV1, HostExecutorConfigV2,
+};
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -27,6 +32,7 @@ use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
 
 const CONFIG_SCHEMA: &str = "inspr.janus.host-executor-config.v1";
+const CONFIG_V2_SCHEMA: &str = "inspr.janus.host-executor-config.v2";
 const ENVELOPE_SCHEMA: &str = "inspr.janus.host-envelope.v1";
 const PAYLOAD_SCHEMA: &str = "inspr.janus.host-envelope-payload.v1";
 const STATE_SCHEMA: &str = "inspr.janus.host-envelope-state.v1";
@@ -119,11 +125,11 @@ pub struct SignedHostEnvelopeV1 {
     pub signature: String,
 }
 
-/// Exact binding encrypted into one not-yet-installable dynamic host package.
+/// Exact binding encrypted into one dynamic host package.
 ///
-/// The current host executor intentionally does not accept this schema. A
-/// later reviewed host slice must add explicit dynamic-policy enforcement
-/// before these packages can have a host effect.
+/// A version 2 host-executor configuration may accept `create` packets only
+/// when every binding matches a root-owned dynamic-environment policy. The
+/// version 1 executor continues to reject this separate schema.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct DynamicHostEnvelopeBindingV1 {
@@ -159,7 +165,7 @@ pub struct DynamicHostEnvelopeSealRequest<'a> {
     pub value: SecretValue,
 }
 
-/// A separately signed packet that no current host executor will install.
+/// A separately signed dynamic host packet.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SignedDynamicHostEnvelopeV1 {
@@ -204,6 +210,12 @@ pub struct HostExecutorConfigV1 {
     pub producer_keys: Vec<HostProducerKeyV1>,
     pub revoked_envelope_refs: Vec<String>,
     pub slots: Vec<HostSecretSlotV1>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct HostExecutorConfigProbe {
+    schema: String,
+    schema_version: u8,
 }
 
 /// Strict value-free request for commit or rollback.
@@ -420,6 +432,7 @@ pub struct HostExecutor {
     config: HostExecutorConfigV1,
     keys: BTreeMap<String, VerifyingKey>,
     paths: ExecutorPaths,
+    dynamic_policies: Vec<HostDynamicEnvironmentPolicyV1>,
 }
 
 impl HostExecutor {
@@ -431,25 +444,47 @@ impl HostExecutor {
             Some(0),
             "host_executor_config_unavailable",
         )?;
-        let config: HostExecutorConfigV1 =
+        let probe: HostExecutorConfigProbe =
             decode_strict_json(&raw, "host_executor_config_invalid")?;
-        Self::new(
-            config,
-            ExecutorPaths {
-                identity: PathBuf::from(SYSTEM_IDENTITY_PATH),
-                cache_root: PathBuf::from(SYSTEM_CACHE_ROOT),
-                runtime_root: PathBuf::from(SYSTEM_RUNTIME_ROOT),
-                executor_uid: 0,
-            },
-        )
+        let paths = ExecutorPaths {
+            identity: PathBuf::from(SYSTEM_IDENTITY_PATH),
+            cache_root: PathBuf::from(SYSTEM_CACHE_ROOT),
+            runtime_root: PathBuf::from(SYSTEM_RUNTIME_ROOT),
+            executor_uid: 0,
+        };
+        match (probe.schema.as_str(), probe.schema_version) {
+            (CONFIG_SCHEMA, SCHEMA_VERSION) => {
+                let config: HostExecutorConfigV1 =
+                    decode_strict_json(&raw, "host_executor_config_invalid")?;
+                Self::new(config, paths)
+            }
+            (CONFIG_V2_SCHEMA, 2) => {
+                let config: HostExecutorConfigV2 =
+                    decode_strict_json(&raw, "host_executor_config_invalid")?;
+                Self::new_v2(config, paths)
+            }
+            _ => Err(HostEnvelopeError::new("host_executor_config_invalid")),
+        }
     }
 
     fn new(config: HostExecutorConfigV1, paths: ExecutorPaths) -> HostResult<Self> {
-        let keys = validate_config(&config)?;
+        let keys = validate_config(&config, true)?;
         Ok(Self {
             config,
             keys,
             paths,
+            dynamic_policies: Vec::new(),
+        })
+    }
+
+    fn new_v2(config: HostExecutorConfigV2, paths: ExecutorPaths) -> HostResult<Self> {
+        let (config, dynamic_policies) = dynamic::validate_config_v2(config)?;
+        let keys = validate_config(&config, false)?;
+        Ok(Self {
+            config,
+            keys,
+            paths,
+            dynamic_policies,
         })
     }
 
@@ -1341,6 +1376,7 @@ impl HostExecutor {
         for slot in &self.config.slots {
             self.remove_runtime_file(slot)?;
         }
+        self.remove_dynamic_runtime_files()?;
         Ok(())
     }
 
@@ -1455,7 +1491,10 @@ impl HostExecutor {
     }
 }
 
-fn validate_config(config: &HostExecutorConfigV1) -> HostResult<BTreeMap<String, VerifyingKey>> {
+fn validate_config(
+    config: &HostExecutorConfigV1,
+    require_slot: bool,
+) -> HostResult<BTreeMap<String, VerifyingKey>> {
     if config.schema != CONFIG_SCHEMA
         || config.schema_version != SCHEMA_VERSION
         || !valid_ref("host_", &config.host_ref)
@@ -1463,7 +1502,7 @@ fn validate_config(config: &HostExecutorConfigV1) -> HostResult<BTreeMap<String,
         || config.owner_uid == u32::MAX
         || config.producer_keys.is_empty()
         || config.producer_keys.len() > MAX_KEYS
-        || config.slots.is_empty()
+        || require_slot && config.slots.is_empty()
         || config.slots.len() > MAX_SLOTS
         || config.revoked_envelope_refs.len() > 1024
     {

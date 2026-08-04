@@ -206,7 +206,8 @@ nix build .#janus-engine
 ```
 
 The package installs `janusd-use`, `janusd-admin`,
-`janusd-web-transactiond`, `janusd-dynamic-custodyd`, `janusd-dynamic-deliveryd`, `janus-warden`, and the
+`janusd-web-transactiond`, `janusd-dynamic-custodyd`,
+`janusd-dynamic-deliveryd`, `janus-host-executor`, `janus-warden`, and the
 non-operational `janusd` migration helper for supported Linux systems. The
 private daemons have no CLI operations and accept only their reviewed local
 socket protocols; the legacy helper cannot run either plane's commands.
@@ -228,6 +229,8 @@ It exercises:
 - a real reference-only Warden MCP session;
 - the hard use/admin process boundary and retired mixed entry point;
 - the approval-to-env-file operator flow;
+- create-only dynamic host acceptance, deterministic private aggregate
+  materialization, and interrupted-create recovery;
 - the private web-to-Rust lifecycle transaction, crash reconciliation, and
   value-free protocol flow;
 - the versioned approval-registry migration and rollback flow;
