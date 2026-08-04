@@ -1,0 +1,502 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Janus — Add a service secret</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --paper: #f5f1e8;
+      --paper-strong: #fffdf8;
+      --ink: #132c38;
+      --muted: #5e6d70;
+      --line: #d8d3c7;
+      --teal: #0f8d8c;
+      --teal-soft: #dceeed;
+      --amber: #f1a61f;
+      --amber-soft: #fff1d2;
+      --red: #b6493f;
+      --red-soft: #f9e5df;
+      --shadow: 0 20px 55px rgba(19, 44, 56, .11);
+    }
+
+    * { box-sizing: border-box; }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      margin: 0;
+      background:
+        radial-gradient(circle at 88% 7%, rgba(15, 141, 140, .13), transparent 25rem),
+        var(--paper);
+      color: var(--ink);
+      font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.5;
+    }
+
+    a { color: inherit; }
+
+    .shell {
+      width: min(1180px, calc(100% - 32px));
+      margin: 0 auto;
+    }
+
+    header {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: start;
+      gap: 28px;
+      padding: 72px 0 44px;
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 9px;
+      margin-bottom: 16px;
+      color: var(--teal);
+      font-size: .77rem;
+      font-weight: 800;
+      letter-spacing: .12em;
+      text-transform: uppercase;
+    }
+
+    .eyebrow::before {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--amber);
+      content: "";
+    }
+
+    h1, h2, h3, p { margin-top: 0; }
+
+    h1 {
+      max-width: 850px;
+      margin-bottom: 18px;
+      font-size: clamp(2.7rem, 7vw, 5.8rem);
+      font-weight: 750;
+      letter-spacing: -.065em;
+      line-height: .96;
+    }
+
+    .lede {
+      max-width: 770px;
+      margin-bottom: 0;
+      color: var(--muted);
+      font-size: clamp(1.05rem, 2vw, 1.35rem);
+    }
+
+    .mark {
+      display: grid;
+      width: 92px;
+      height: 92px;
+      place-items: center;
+      border-radius: 28px;
+      background: var(--ink);
+      box-shadow: var(--shadow);
+      color: var(--paper-strong);
+      font-size: 2.25rem;
+      font-weight: 800;
+      letter-spacing: -.1em;
+    }
+
+    nav {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 9px;
+      padding-bottom: 42px;
+    }
+
+    nav a, .chip {
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: rgba(255, 253, 248, .72);
+      padding: 8px 13px;
+      font-size: .82rem;
+      font-weight: 700;
+      text-decoration: none;
+    }
+
+    nav a:hover { border-color: var(--teal); }
+
+    section { margin-bottom: 80px; }
+
+    .section-head {
+      display: grid;
+      grid-template-columns: 70px minmax(0, 1fr);
+      gap: 18px;
+      align-items: start;
+      margin-bottom: 24px;
+    }
+
+    .number {
+      color: var(--teal);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: .92rem;
+      font-weight: 800;
+    }
+
+    h2 {
+      margin-bottom: 6px;
+      font-size: clamp(1.8rem, 4vw, 2.65rem);
+      letter-spacing: -.04em;
+      line-height: 1.05;
+    }
+
+    .section-head p {
+      max-width: 760px;
+      margin-bottom: 0;
+      color: var(--muted);
+    }
+
+    .board {
+      display: block;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 26px;
+      background: var(--paper-strong);
+      box-shadow: var(--shadow);
+      text-decoration: none;
+    }
+
+    .board img {
+      display: block;
+      width: 100%;
+      height: auto;
+    }
+
+    .board-meta {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 13px 18px;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      font-size: .78rem;
+      font-weight: 700;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 18px;
+    }
+
+    .card {
+      min-height: 170px;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: rgba(255, 253, 248, .78);
+      padding: 20px;
+    }
+
+    .card b {
+      display: block;
+      margin-bottom: 8px;
+      font-size: .92rem;
+    }
+
+    .card p {
+      margin-bottom: 0;
+      color: var(--muted);
+      font-size: .85rem;
+    }
+
+    .step {
+      display: inline-grid;
+      width: 28px;
+      height: 28px;
+      margin-bottom: 22px;
+      place-items: center;
+      border-radius: 50%;
+      background: var(--teal-soft);
+      color: var(--teal);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: .75rem;
+      font-weight: 800;
+    }
+
+    .decision-box {
+      display: grid;
+      grid-template-columns: 1.1fr .9fr;
+      gap: 28px;
+      border-radius: 26px;
+      background: var(--ink);
+      padding: clamp(24px, 5vw, 48px);
+      color: var(--paper-strong);
+    }
+
+    .decision-box h2 { margin-bottom: 12px; }
+
+    .decision-box p {
+      margin-bottom: 0;
+      color: #c4d0d1;
+    }
+
+    .contract-ref {
+      margin-top: 14px !important;
+      color: var(--paper-strong) !important;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: .78rem;
+    }
+
+    .chips {
+      display: flex;
+      flex-wrap: wrap;
+      align-content: start;
+      gap: 8px;
+    }
+
+    .decision-box .chip {
+      border-color: rgba(255, 255, 255, .17);
+      background: rgba(255, 255, 255, .08);
+      color: var(--paper-strong);
+    }
+
+    .catalog {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 18px;
+    }
+
+    .error {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr);
+      gap: 13px;
+      border: 1px solid #e7c9bf;
+      border-radius: 16px;
+      background: var(--red-soft);
+      padding: 16px;
+    }
+
+    .error .icon {
+      display: grid;
+      width: 29px;
+      height: 29px;
+      place-items: center;
+      border-radius: 50%;
+      background: var(--red);
+      color: white;
+      font-size: .76rem;
+      font-weight: 900;
+    }
+
+    .error b { display: block; margin-bottom: 3px; }
+
+    .error p {
+      margin-bottom: 0;
+      color: #74524c;
+      font-size: .83rem;
+    }
+
+    .rules {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .rule {
+      border-top: 3px solid var(--amber);
+      border-radius: 3px 3px 16px 16px;
+      background: var(--amber-soft);
+      padding: 18px;
+    }
+
+    .rule b { display: block; margin-bottom: 7px; }
+
+    .rule p {
+      margin-bottom: 0;
+      color: #715d32;
+      font-size: .83rem;
+    }
+
+    footer {
+      display: flex;
+      justify-content: space-between;
+      gap: 20px;
+      padding: 0 0 42px;
+      color: var(--muted);
+      font-size: .78rem;
+    }
+
+    @media (max-width: 850px) {
+      header { grid-template-columns: 1fr; padding-top: 46px; }
+      .mark { display: none; }
+      .grid, .rules { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .decision-box { grid-template-columns: 1fr; }
+    }
+
+    @media (max-width: 560px) {
+      .shell { width: min(100% - 20px, 1180px); }
+      .section-head { grid-template-columns: 1fr; gap: 4px; }
+      .grid, .catalog, .rules { grid-template-columns: 1fr; }
+      .card { min-height: 0; }
+      .board { border-radius: 16px; }
+      .board-meta span:last-child { display: none; }
+      footer { display: block; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <header>
+      <div>
+        <div class="eyebrow">Janus concept flow</div>
+        <h1>Add a secret without becoming a secrets expert.</h1>
+        <p class="lede">Choose the host and approved service, name the environment variable, paste its value, and confirm. Janus encrypts it, delivers it safely, restarts only that service, checks health, and rolls back if needed.</p>
+      </div>
+      <div class="mark" aria-label="Janus">J</div>
+    </header>
+
+    <nav aria-label="Page sections">
+      <a href="#happy-path">Happy path</a>
+      <a href="#entry-points">Dropdown behavior</a>
+      <a href="#errors">Errors</a>
+      <a href="#boundaries">Security boundaries</a>
+    </nav>
+
+    <main>
+      <section class="decision-box" aria-labelledby="decision-title">
+        <div>
+          <h2 id="decision-title">The product decision</h2>
+          <p>One small form, with context filled in whenever Janus already knows it. No Nix change for each new variable; only services explicitly approved in nixcfg may receive one.</p>
+          <p class="contract-ref">Implementation: JANUS-390 · Contract: guideline/dynamic-service-environment-bindings</p>
+        </div>
+        <div class="chips" aria-label="Decisions locked for this concept">
+          <span class="chip">Host-first</span>
+          <span class="chip">Eligible targets only</span>
+          <span class="chip">Approved services only</span>
+          <span class="chip">Environment variables</span>
+          <span class="chip">Age encrypted</span>
+          <span class="chip">Passkey confirm</span>
+          <span class="chip">No reveal</span>
+          <span class="chip">Automatic rollback</span>
+        </div>
+      </section>
+
+      <section id="happy-path">
+        <div class="section-head">
+          <div class="number">01</div>
+          <div>
+            <h2>The complete happy path</h2>
+            <p>Four screens from intent to a healthy service. Click the board to inspect the full-size ImageGen concept.</p>
+          </div>
+        </div>
+        <a class="board" href="01-happy-path.png" target="_blank" rel="noreferrer">
+          <img src="01-happy-path.png" alt="Four Janus interface screens showing target selection, variable entry, passkey confirmation, and successful delivery">
+          <div class="board-meta"><span>ImageGen flow board</span><span>Open full size ↗</span></div>
+        </a>
+        <div class="grid" aria-label="Exact happy path">
+          <article class="card">
+            <span class="step">1</span>
+            <b>Choose target</b>
+            <p>Select one eligible host and one pre-approved service. From a host or service page, Janus locks the context it already knows.</p>
+          </article>
+          <article class="card">
+            <span class="step">2</span>
+            <b>Add variable</b>
+            <p>Enter the environment-variable name and secret value. Janus suggests a readable alias such as <code>hsb1-home-assistant-long-lived-token.age</code>.</p>
+          </article>
+          <article class="card">
+            <span class="step">3</span>
+            <b>Confirm</b>
+            <p>Review host, service, and variable name—never the value—and approve the operation with a passkey.</p>
+          </article>
+          <article class="card">
+            <span class="step">4</span>
+            <b>Verify</b>
+            <p>Janus reports encrypted, delivered, restarted, and healthy. If restart or health fails, the previous version is restored.</p>
+          </article>
+        </div>
+      </section>
+
+      <section id="entry-points">
+        <div class="section-head">
+          <div class="number">02</div>
+          <div>
+            <h2>Minimal typing, wherever you start</h2>
+            <p>The same secure form adapts to its entry point. Dropdowns remain searchable, constrained, and free of invalid choices.</p>
+          </div>
+        </div>
+        <a class="board" href="02-entry-and-dropdowns.png" target="_blank" rel="noreferrer">
+          <img src="02-entry-and-dropdowns.png" alt="Janus interface concept comparing Fleet, Service, and global Add entry points with locked context and dropdowns">
+          <div class="board-meta"><span>ImageGen entry-point board</span><span>Open full size ↗</span></div>
+        </a>
+        <div class="grid">
+          <article class="card">
+            <span class="step">A</span>
+            <b>From Fleet</b>
+            <p>The selected host is locked; choose only from its approved services.</p>
+          </article>
+          <article class="card">
+            <span class="step">B</span>
+            <b>From a service</b>
+            <p>Host and service are both locked; type only the variable name and value.</p>
+          </article>
+          <article class="card">
+            <span class="step">C</span>
+            <b>From global Add</b>
+            <p>Searchable host and service dropdowns; selecting a host narrows the services.</p>
+          </article>
+          <article class="card">
+            <span class="step">D</span>
+            <b>Naming assistance</b>
+            <p>Normalize the variable name, preview the friendly alias, and clearly offer safe replacement when the variable exists.</p>
+          </article>
+        </div>
+      </section>
+
+      <section id="errors">
+        <div class="section-head">
+          <div class="number">03</div>
+          <div>
+            <h2>Every important failure has one next action</h2>
+            <p>Errors say what happened, protect the existing service, and offer the smallest safe recovery.</p>
+          </div>
+        </div>
+        <a class="board" href="03-error-and-recovery.png" target="_blank" rel="noreferrer">
+          <img src="03-error-and-recovery.png" alt="Eight Janus error-state cards covering unavailable targets, invalid names, replacement, authentication, delivery, restart, and health failures">
+          <div class="board-meta"><span>ImageGen recovery board</span><span>Open full size ↗</span></div>
+        </a>
+        <div class="catalog" aria-label="Exact error catalog">
+          <article class="error"><span class="icon">!</span><div><b>Host unavailable</b><p>Keep the draft; choose another eligible host or refresh target state.</p></div></article>
+          <article class="error"><span class="icon">!</span><div><b>Service not approved</b><p>Do not allow delivery. Link to the nixcfg approval requirement.</p></div></article>
+          <article class="error"><span class="icon">!</span><div><b>Name not allowed</b><p>Explain the rule and reject unsafe names such as <code>LD_PRELOAD</code>.</p></div></article>
+          <article class="error"><span class="icon">!</span><div><b>Variable already exists</b><p>Offer “Replace safely”; retain the old encrypted version for rollback.</p></div></article>
+          <article class="error"><span class="icon">!</span><div><b>Passkey expired or cancelled</b><p>Preserve the form locally and let the user confirm again.</p></div></article>
+          <article class="error"><span class="icon">!</span><div><b>Host went offline</b><p>Store the encrypted record safely, mark delivery pending, and retry explicitly.</p></div></article>
+          <article class="error"><span class="icon">!</span><div><b>Restart failed</b><p>Restore the prior environment file and prior service state; show the diagnostic.</p></div></article>
+          <article class="error"><span class="icon">!</span><div><b>Health check failed</b><p>Rollback automatically, verify the old version is healthy, and report both outcomes.</p></div></article>
+        </div>
+      </section>
+
+      <section id="boundaries">
+        <div class="section-head">
+          <div class="number">04</div>
+          <div>
+            <h2>The safety contract beneath the simple form</h2>
+            <p>The UI stays small because Janus enforces the complex rules underneath it.</p>
+          </div>
+        </div>
+        <div class="rules">
+          <article class="rule"><b>Allowlisted delivery</b><p>Only known hosts and nixcfg-approved services appear. Dynamic variables need no per-variable nixcfg edit.</p></article>
+          <article class="rule"><b>Encrypted source</b><p>Each variable is stored as its own Age-encrypted record. Friendly filenames are aliases or suggestions; canonical storage remains opaque.</p></article>
+          <article class="rule"><b>Private materialization</b><p>The host builds a service-specific runtime <code>.env</code> file privately and replaces it atomically.</p></article>
+          <article class="rule"><b>Scoped activation</b><p>Only the selected service is restarted. Janus then runs the service’s defined health check.</p></article>
+          <article class="rule"><b>Safe rollback</b><p>The previous encrypted value and runtime file remain available until the new service state is proven healthy.</p></article>
+          <article class="rule"><b>No secret retrieval</b><p>The value can be submitted or replaced, but never revealed or copied back through the Janus interface.</p></article>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <span>Janus · Dynamic service environment flow · JANUS-390</span>
+      <span>Concept mockup — not production UI</span>
+    </footer>
+  </div>
+</body>
+</html>
