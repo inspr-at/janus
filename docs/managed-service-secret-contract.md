@@ -34,8 +34,11 @@ The canonical fixture is
 fixture remain unchanged. Janus's version 2 host-executor configuration may
 now carry root-owned dynamic policies and accept a signed `create` packet that
 matches one policy exactly. This is only the local host acceptance and private
-aggregate-file boundary: it adds no transport, reload, health, activation,
-replacement, removal, deployment enablement, or Pharos/nixcfg change.
+aggregate-file boundary. A separate transport daemon and the existing enrolled
+host agent can now carry that still-encrypted packet to the exact host and
+record value-free materialization evidence. They add no reload, health,
+activation, replacement, removal, deployment enablement, or Pharos/nixcfg
+change.
 
 ## Authority and state
 
@@ -171,6 +174,17 @@ stores ciphertext only, and atomically rewrites the complete mode-0400
 `dynamic.env` in sorted `NAME=value` order. A pending journal makes either
 side of an interrupted create deterministic on restore; unknown, partial,
 linked, corrupt, or policy-drifted cache objects block materialization.
+
+The enrolled host agent checks its existing v1 Pharos lease first. Only when
+no v1 work is pending may it claim one dynamic package through Janus using the
+token bound to its exact host reference. Janus's separate transport daemon
+revalidates the private outbox record and never decrypts it. After
+`install-dynamic`, the agent accepts only an exact, value-free materialized or
+idempotent outcome and submits matching value-free evidence. Lost responses
+retry safely; cross-host claims, invalid earlier outbox state, mismatched
+executor outcomes, and conflicting receipts fail closed. This transport slice
+does not reload or inspect the service and therefore cannot claim healthy or
+active.
 
 The current ciphertext restores the runtime file after reboot without central
 Janus. Once committed, delivery expiry does not destroy that offline recovery

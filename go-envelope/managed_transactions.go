@@ -348,7 +348,11 @@ func readManagedTransactionResponse(conn net.Conn, request managedTransactionReq
 }
 
 func writeManagedTransactionFrame(writer io.Writer, body []byte) error {
-	if len(body) == 0 || len(body) > managedTransactionMaxFrameBytes {
+	return writeManagedTransactionFrameBounded(writer, body, managedTransactionMaxFrameBytes)
+}
+
+func writeManagedTransactionFrameBounded(writer io.Writer, body []byte, maximum int) error {
+	if maximum <= 0 || len(body) == 0 || len(body) > maximum {
 		return errors.New("managed transaction frame length denied")
 	}
 	var header [4]byte
@@ -374,12 +378,19 @@ func writeManagedTransactionBytes(writer io.Writer, body []byte) error {
 }
 
 func readManagedTransactionFrame(reader io.Reader) ([]byte, error) {
+	return readManagedTransactionFrameBounded(reader, managedTransactionMaxFrameBytes)
+}
+
+func readManagedTransactionFrameBounded(reader io.Reader, maximum int) ([]byte, error) {
+	if maximum <= 0 {
+		return nil, errors.New("managed transaction frame length denied")
+	}
 	var header [4]byte
 	if _, err := io.ReadFull(reader, header[:]); err != nil {
 		return nil, err
 	}
 	length := int(binary.BigEndian.Uint32(header[:]))
-	if length <= 0 || length > managedTransactionMaxFrameBytes {
+	if length <= 0 || length > maximum {
 		return nil, errors.New("managed transaction frame length denied")
 	}
 	body := make([]byte, length)

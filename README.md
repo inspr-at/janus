@@ -207,7 +207,8 @@ nix build .#janus-engine
 
 The package installs `janusd-use`, `janusd-admin`,
 `janusd-web-transactiond`, `janusd-dynamic-custodyd`,
-`janusd-dynamic-deliveryd`, `janus-host-executor`, `janus-warden`, and the
+`janusd-dynamic-deliveryd`, `janusd-dynamic-transportd`, `janus-host-executor`,
+`janus-managed-host-agent`, `janus-warden`, and the
 non-operational `janusd` migration helper for supported Linux systems. The
 private daemons have no CLI operations and accept only their reviewed local
 socket protocols; the legacy helper cannot run either plane's commands.

@@ -21,17 +21,21 @@ const (
 	managedDynamicSetupPathsEnv      = "JANUS_MANAGED_DYNAMIC_SETUP_DECLARATION_PATHS"
 	managedDynamicCustodySocketEnv   = "JANUS_MANAGED_DYNAMIC_CUSTODY_SOCKET"
 	managedDynamicDeliverySocketEnv  = "JANUS_MANAGED_DYNAMIC_DELIVERY_SOCKET"
+	managedDynamicTransportSocketEnv = "JANUS_MANAGED_DYNAMIC_TRANSPORT_SOCKET"
+	managedDynamicHostTokensEnv      = "JANUS_MANAGED_DYNAMIC_HOST_TOKEN_GENERATION_DIR"
 )
 
 // managedDynamicSetupRuntimeConfig is a separate, explicit capability gate.
 // Existing v1 managed setup configuration never enables the v2 route.
 type managedDynamicSetupRuntimeConfig struct {
-	ControlPlaneOrigin string
-	InternalToken      string
-	Keyring            managedIntentKeyring
-	DeclarationPaths   []string
-	CustodySocket      string
-	DeliverySocket     string
+	ControlPlaneOrigin     string
+	InternalToken          string
+	Keyring                managedIntentKeyring
+	DeclarationPaths       []string
+	CustodySocket          string
+	DeliverySocket         string
+	TransportSocket        string
+	HostTokenGenerationDir string
 }
 
 func loadManagedDynamicSetupRuntimeConfigFromEnv() (*managedDynamicSetupRuntimeConfig, error) {
@@ -42,6 +46,8 @@ func loadManagedDynamicSetupRuntimeConfigFromEnv() (*managedDynamicSetupRuntimeC
 	declarationRaw := strings.TrimSpace(os.Getenv(managedDynamicSetupPathsEnv))
 	custodySocket := strings.TrimSpace(os.Getenv(managedDynamicCustodySocketEnv))
 	deliverySocket := strings.TrimSpace(os.Getenv(managedDynamicDeliverySocketEnv))
+	transportSocket := strings.TrimSpace(os.Getenv(managedDynamicTransportSocketEnv))
+	hostTokenGenerationDir := strings.TrimSpace(os.Getenv(managedDynamicHostTokensEnv))
 
 	enabled := false
 	switch enabledRaw {
@@ -51,17 +57,17 @@ func loadManagedDynamicSetupRuntimeConfigFromEnv() (*managedDynamicSetupRuntimeC
 	default:
 		return nil, errors.New("managed dynamic setup enable flag is invalid")
 	}
-	configured := origin != "" || tokenFile != "" || keyFile != "" || declarationRaw != "" || custodySocket != "" || deliverySocket != ""
+	configured := origin != "" || tokenFile != "" || keyFile != "" || declarationRaw != "" || custodySocket != "" || deliverySocket != "" || transportSocket != "" || hostTokenGenerationDir != ""
 	if !enabled {
 		if configured {
 			return nil, errors.New("managed dynamic setup configuration requires the explicit enable flag")
 		}
 		return nil, nil
 	}
-	if origin == "" || tokenFile == "" || keyFile == "" || declarationRaw == "" || custodySocket == "" || deliverySocket == "" {
+	if origin == "" || tokenFile == "" || keyFile == "" || declarationRaw == "" || custodySocket == "" || deliverySocket == "" || transportSocket == "" || hostTokenGenerationDir == "" {
 		return nil, errors.New("managed dynamic setup configuration is partial")
 	}
-	if !managedDynamicCleanAbsolutePath(tokenFile) || !managedDynamicCleanAbsolutePath(keyFile) || !managedDynamicCleanAbsolutePath(custodySocket) || !managedDynamicCleanAbsolutePath(deliverySocket) || custodySocket == deliverySocket {
+	if !managedDynamicCleanAbsolutePath(tokenFile) || !managedDynamicCleanAbsolutePath(keyFile) || !managedDynamicCleanAbsolutePath(custodySocket) || !managedDynamicCleanAbsolutePath(deliverySocket) || !managedDynamicCleanAbsolutePath(transportSocket) || !managedDynamicCleanAbsolutePath(hostTokenGenerationDir) || custodySocket == deliverySocket || custodySocket == transportSocket || deliverySocket == transportSocket {
 		return nil, errors.New("managed dynamic setup configuration file path is invalid")
 	}
 	parsedOrigin, err := parseManagedOrigin(origin)
@@ -85,12 +91,14 @@ func loadManagedDynamicSetupRuntimeConfigFromEnv() (*managedDynamicSetupRuntimeC
 		return nil, err
 	}
 	return &managedDynamicSetupRuntimeConfig{
-		ControlPlaneOrigin: parsedOrigin.String(),
-		InternalToken:      token,
-		Keyring:            keyring,
-		DeclarationPaths:   declarationPaths,
-		CustodySocket:      custodySocket,
-		DeliverySocket:     deliverySocket,
+		ControlPlaneOrigin:     parsedOrigin.String(),
+		InternalToken:          token,
+		Keyring:                keyring,
+		DeclarationPaths:       declarationPaths,
+		CustodySocket:          custodySocket,
+		DeliverySocket:         deliverySocket,
+		TransportSocket:        transportSocket,
+		HostTokenGenerationDir: hostTokenGenerationDir,
 	}, nil
 }
 

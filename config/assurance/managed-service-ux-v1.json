@@ -389,6 +389,36 @@
       "value_returned": false
     },
     {
+      "id": "dynamic-exact-host-transport-receipt",
+      "family": "host-custody",
+      "stack": "rust",
+      "runner": "cargo",
+      "working_directory": ".",
+      "target": "janusd",
+      "test_name": "runtime::lifecycle_entry::dynamic_transport::tests::exact_host_claim_and_idempotent_receipt_are_value_free",
+      "value_returned": false
+    },
+    {
+      "id": "dynamic-host-agent-exact-outcome-receipt",
+      "family": "workflow-recovery",
+      "stack": "rust",
+      "runner": "cargo",
+      "working_directory": ".",
+      "target": "janus-host",
+      "test_name": "agent::tests::dynamic_receipt_requires_exact_value_free_materialization",
+      "value_returned": false
+    },
+    {
+      "id": "dynamic-host-token-route-binding",
+      "family": "intent-binding",
+      "stack": "go",
+      "runner": "go",
+      "working_directory": "go-envelope",
+      "target": "./...",
+      "test_name": "TestManagedDynamicHostRoutesBindTokenHostAndReceipt",
+      "value_returned": false
+    },
+    {
       "id": "typed-web-request-rejects-values-paths",
       "family": "intent-binding",
       "stack": "rust",

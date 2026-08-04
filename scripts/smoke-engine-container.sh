@@ -42,7 +42,7 @@ try:
 finally:
     subprocess.run(["docker", "rm", "-f", container], check=False, capture_output=True)
 
-for binary in ("janusd", "janusd-use", "janusd-admin", "janusd-web-transactiond", "janusd-dynamic-custodyd", "janusd-dynamic-deliveryd", "janus-host-executor", "janus-warden"):
+for binary in ("janusd", "janusd-use", "janusd-admin", "janusd-web-transactiond", "janusd-dynamic-custodyd", "janusd-dynamic-deliveryd", "janusd-dynamic-transportd", "janus-host-executor", "janus-warden"):
     path = f"/usr/local/bin/{binary}"
     member = members.get(path)
     if member is None or not member.isfile() or member.mode & 0o111 == 0:
@@ -60,7 +60,7 @@ policy = members.get("/etc/janus/release-channels-v1.json")
 if policy is None or not policy.isfile() or policy.mode & 0o022:
     raise SystemExit("release policy is absent or group/world writable")
 
-print("engine image filesystem ok user=65532:65532 binaries=8 runtime_packages=0 shell=none")
+print("engine image filesystem ok user=65532:65532 binaries=9 runtime_packages=0 shell=none")
 PY
 
 runtime=(
@@ -91,6 +91,11 @@ fi
 if "${runtime[@]}" --entrypoint /usr/local/bin/janusd-dynamic-deliveryd \
   "${image}" --help >/dev/null 2>&1; then
   echo "janusd-dynamic-deliveryd unexpectedly accepted argv" >&2
+  exit 1
+fi
+if "${runtime[@]}" --entrypoint /usr/local/bin/janusd-dynamic-transportd \
+  "${image}" --help >/dev/null 2>&1; then
+  echo "janusd-dynamic-transportd unexpectedly accepted argv" >&2
   exit 1
 fi
 if "${runtime[@]}" --entrypoint /usr/local/bin/janus-host-executor \
