@@ -29,10 +29,12 @@ type managedDynamicReplayDocument struct {
 }
 
 type managedDynamicReplayRecord struct {
-	OperationRef         string `json:"operation_ref"`
-	TargetFingerprint    string `json:"target_fingerprint"`
-	ReservedAtUnixSecond int64  `json:"reserved_at_unix_secs"`
-	ExpiresAtUnixSecond  int64  `json:"expires_at_unix_secs"`
+	OperationRef                    string `json:"operation_ref"`
+	TargetFingerprint               string `json:"target_fingerprint"`
+	ReservedAtUnixSecond            int64  `json:"reserved_at_unix_secs"`
+	ValueAdmissionStartedUnixSecond int64  `json:"value_admission_started_at_unix_secs,omitempty"`
+	ValueAdmissionDoneUnixSecond    int64  `json:"value_admission_done_at_unix_secs,omitempty"`
+	ExpiresAtUnixSecond             int64  `json:"expires_at_unix_secs"`
 }
 
 func newManagedDynamicReplayStore(path string) (*managedDynamicReplayStore, error) {
@@ -142,28 +144,90 @@ func (store *managedDynamicReplayStore) reserve(intent managedDynamicSetupIntent
 	return operationRef, nil
 }
 
-func (store *managedDynamicReplayStore) recover(intent managedDynamicSetupIntent, operationRef string, now int64) error {
+func (store *managedDynamicReplayStore) recover(intent managedDynamicSetupIntent, operationRef string, now int64) (managedDynamicReplayRecord, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 
 	durable, err := readManagedDynamicReplayDocument(store.path)
 	if err != nil {
-		return managedIntentError("managed_intent_recovery_unavailable")
+		return managedDynamicReplayRecord{}, managedIntentError("managed_intent_recovery_unavailable")
 	}
 	store.document = durable
 	targetFingerprint, err := managedDynamicIntentFingerprint(intent)
 	if err != nil {
-		return managedIntentError("managed_intent_recovery_unavailable")
+		return managedDynamicReplayRecord{}, managedIntentError("managed_intent_recovery_unavailable")
 	}
 	record, exists := store.document.Reservations[intent.IntentRef]
 	if !exists ||
+		now < record.ReservedAtUnixSecond ||
 		record.ExpiresAtUnixSecond <= now ||
 		record.OperationRef != operationRef ||
 		record.TargetFingerprint != targetFingerprint ||
 		store.document.Nonces[intent.NonceRef] != intent.IntentRef {
-		return managedIntentError("managed_intent_recovery_unavailable")
+		return managedDynamicReplayRecord{}, managedIntentError("managed_intent_recovery_unavailable")
 	}
-	return nil
+	return record, nil
+}
+
+func (store *managedDynamicReplayStore) beginValueAdmission(intent managedDynamicSetupIntent, operationRef string, now int64) (managedDynamicReplayRecord, error) {
+	return store.updateValueAdmission(intent, operationRef, now, false)
+}
+
+func (store *managedDynamicReplayStore) completeValueAdmission(intent managedDynamicSetupIntent, operationRef string, now int64) (managedDynamicReplayRecord, error) {
+	return store.updateValueAdmission(intent, operationRef, now, true)
+}
+
+func (store *managedDynamicReplayStore) updateValueAdmission(intent managedDynamicSetupIntent, operationRef string, now int64, complete bool) (managedDynamicReplayRecord, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+
+	durable, err := readManagedDynamicReplayDocument(store.path)
+	if err != nil {
+		return managedDynamicReplayRecord{}, managedIntentError("managed_intent_value_admission_unavailable")
+	}
+	store.document = durable
+	if validateManagedDynamicSetupIntent(intent) != nil || !validManagedRef("op_", operationRef) {
+		return managedDynamicReplayRecord{}, managedIntentError("managed_intent_payload_invalid")
+	}
+	targetFingerprint, err := managedDynamicIntentFingerprint(intent)
+	if err != nil {
+		return managedDynamicReplayRecord{}, managedIntentError("managed_intent_value_admission_unavailable")
+	}
+	record, exists := store.document.Reservations[intent.IntentRef]
+	if !exists ||
+		now < record.ReservedAtUnixSecond ||
+		record.ExpiresAtUnixSecond <= now ||
+		record.OperationRef != operationRef ||
+		record.TargetFingerprint != targetFingerprint ||
+		store.document.Nonces[intent.NonceRef] != intent.IntentRef {
+		return managedDynamicReplayRecord{}, managedIntentError("managed_intent_value_admission_unavailable")
+	}
+	if complete {
+		if record.ValueAdmissionStartedUnixSecond == 0 ||
+			now < record.ValueAdmissionStartedUnixSecond ||
+			record.ValueAdmissionDoneUnixSecond != 0 {
+			return managedDynamicReplayRecord{}, managedIntentError("managed_intent_value_admission_unavailable")
+		}
+		record.ValueAdmissionDoneUnixSecond = now
+	} else {
+		if record.ValueAdmissionStartedUnixSecond != 0 {
+			return record, managedIntentError("managed_intent_value_replayed")
+		}
+		record.ValueAdmissionStartedUnixSecond = now
+	}
+	candidate := cloneManagedDynamicReplayDocument(store.document)
+	candidate.Reservations[intent.IntentRef] = record
+	if validateManagedDynamicReplayDocument(candidate) != nil {
+		return managedDynamicReplayRecord{}, managedIntentError("managed_intent_value_admission_unavailable")
+	}
+	if err := atomicWriteManagedJSON(store.path, candidate); err != nil {
+		if managedFinalFileReplaced(err) {
+			store.document = candidate
+		}
+		return managedDynamicReplayRecord{}, managedIntentError("managed_intent_value_admission_unavailable")
+	}
+	store.document = candidate
+	return record, nil
 }
 
 func managedDynamicIntentFingerprint(intent managedDynamicSetupIntent) (string, error) {
@@ -226,6 +290,15 @@ func validateManagedDynamicReplayDocument(document managedDynamicReplayDocument)
 			!isLowerHexString(strings.TrimPrefix(record.TargetFingerprint, "intentfp_"), sha256.Size*2) ||
 			record.ReservedAtUnixSecond <= 0 ||
 			record.ExpiresAtUnixSecond <= record.ReservedAtUnixSecond ||
+			record.ValueAdmissionStartedUnixSecond < 0 ||
+			record.ValueAdmissionStartedUnixSecond != 0 &&
+				(record.ValueAdmissionStartedUnixSecond < record.ReservedAtUnixSecond ||
+					record.ValueAdmissionStartedUnixSecond >= record.ExpiresAtUnixSecond) ||
+			record.ValueAdmissionDoneUnixSecond < 0 ||
+			record.ValueAdmissionDoneUnixSecond != 0 &&
+				(record.ValueAdmissionStartedUnixSecond == 0 ||
+					record.ValueAdmissionDoneUnixSecond < record.ValueAdmissionStartedUnixSecond ||
+					record.ValueAdmissionDoneUnixSecond >= record.ExpiresAtUnixSecond) ||
 			intentNonces[intentRef] != 1 ||
 			operationRefs[record.OperationRef] {
 			return errors.New("managed_intent_replay_store_invalid")

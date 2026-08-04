@@ -1226,6 +1226,9 @@ form.managed-action-form .managed-source-choice {
   font-size: 11.5px;
   font-weight: 400;
 }
+.managed-generation-summary small {
+  color: var(--ink);
+}
 .managed-generation-summary {
   display: grid;
   grid-template-columns: 28px minmax(0, 1fr);

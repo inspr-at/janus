@@ -26,7 +26,7 @@ func TestManagedDynamicReservationIsDurableSingleUseAndTargetBound(t *testing.T)
 	if err != nil || info.Mode().Perm() != 0600 {
 		t.Fatalf("replay state must be a private regular file: info=%#v err=%v", info, err)
 	}
-	if err := store.recover(intent, operationRef, now); err != nil {
+	if _, err := store.recover(intent, operationRef, now); err != nil {
 		t.Fatalf("fresh exact reservation was not recoverable: %v", err)
 	}
 	if _, err := store.reserve(intent, now); err == nil || err.Error() != "managed_intent_replayed" {
@@ -43,24 +43,24 @@ func TestManagedDynamicReservationIsDurableSingleUseAndTargetBound(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := restarted.recover(intent, operationRef, now); err != nil {
+	if _, err := restarted.recover(intent, operationRef, now); err != nil {
 		t.Fatalf("reservation did not survive restart: %v", err)
 	}
 	changed := intent
 	changed.EnvironmentName = "ROTATED_DATABASE_PASSWORD"
-	if err := restarted.recover(changed, operationRef, now); err == nil || err.Error() != "managed_intent_recovery_unavailable" {
+	if _, err := restarted.recover(changed, operationRef, now); err == nil || err.Error() != "managed_intent_recovery_unavailable" {
 		t.Fatalf("changed target recovered an existing operation: %v", err)
 	}
-	if err := restarted.recover(intent, "op_fedcba9876543210", now); err == nil || err.Error() != "managed_intent_recovery_unavailable" {
+	if _, err := restarted.recover(intent, "op_fedcba9876543210", now); err == nil || err.Error() != "managed_intent_recovery_unavailable" {
 		t.Fatalf("wrong operation recovered an existing reservation: %v", err)
 	}
-	if err := restarted.recover(intent, operationRef, intent.ExpiresAtUnixSeconds); err == nil || err.Error() != "managed_intent_recovery_unavailable" {
+	if _, err := restarted.recover(intent, operationRef, intent.ExpiresAtUnixSeconds); err == nil || err.Error() != "managed_intent_recovery_unavailable" {
 		t.Fatalf("expired reservation remained recoverable: %v", err)
 	}
 	if err := os.Remove(path); err != nil {
 		t.Fatal(err)
 	}
-	if err := restarted.recover(intent, operationRef, now); err == nil || err.Error() != "managed_intent_recovery_unavailable" {
+	if _, err := restarted.recover(intent, operationRef, now); err == nil || err.Error() != "managed_intent_recovery_unavailable" {
 		t.Fatalf("missing durable state fell back to memory: %v", err)
 	}
 }
@@ -88,6 +88,127 @@ func TestManagedDynamicReservationAllowsOnlyOneConcurrentWinner(t *testing.T) {
 	workers.Wait()
 	if successes.Load() != 1 || unexpected.Load() != 0 {
 		t.Fatalf("concurrent reservation winners=%d unexpected=%d", successes.Load(), unexpected.Load())
+	}
+}
+
+func TestManagedDynamicValueAdmissionIsDurableSingleUseAndRestartSafe(t *testing.T) {
+	path := filepath.Join(t.TempDir(), managedDynamicReplayStoreFile)
+	store, err := newManagedDynamicReplayStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	intent := managedDynamicTestIntent()
+	now := managedDynamicTestNow + 1
+	operationRef, err := store.reserve(intent, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started, err := store.beginValueAdmission(intent, operationRef, now+1)
+	if err != nil || started.ValueAdmissionStartedUnixSecond == 0 || started.ValueAdmissionDoneUnixSecond != 0 {
+		t.Fatalf("value admission did not begin durably: record=%#v err=%v", started, err)
+	}
+	if _, err := store.beginValueAdmission(intent, operationRef, now+1); err == nil || err.Error() != "managed_intent_value_replayed" {
+		t.Fatalf("duplicate value admission began: %v", err)
+	}
+
+	restarted, err := newManagedDynamicReplayStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := restarted.recover(intent, operationRef, now+1)
+	if err != nil || recovered.ValueAdmissionStartedUnixSecond == 0 || recovered.ValueAdmissionDoneUnixSecond != 0 {
+		t.Fatalf("started admission did not survive restart: record=%#v err=%v", recovered, err)
+	}
+	completed, err := restarted.completeValueAdmission(intent, operationRef, now+2)
+	if err != nil || completed.ValueAdmissionDoneUnixSecond == 0 {
+		t.Fatalf("value-free admission receipt did not complete: record=%#v err=%v", completed, err)
+	}
+
+	again, err := newManagedDynamicReplayStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recovered, err = again.recover(intent, operationRef, now+2)
+	if err != nil || recovered.ValueAdmissionDoneUnixSecond == 0 {
+		t.Fatalf("completed admission did not survive restart: record=%#v err=%v", recovered, err)
+	}
+	if _, err := again.completeValueAdmission(intent, operationRef, now+2); err == nil || err.Error() != "managed_intent_value_admission_unavailable" {
+		t.Fatalf("value admission completed twice: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"secret_value", "plaintext", "ciphertext", "value_digest"} {
+		if strings.Contains(string(raw), forbidden) {
+			t.Fatalf("replay receipt contains forbidden field %q: %s", forbidden, raw)
+		}
+	}
+}
+
+func TestManagedDynamicValueAdmissionAllowsOnlyOneConcurrentWinner(t *testing.T) {
+	store, err := newManagedDynamicReplayStore(filepath.Join(t.TempDir(), managedDynamicReplayStoreFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	intent := managedDynamicTestIntent()
+	operationRef, err := store.reserve(intent, managedDynamicTestNow+1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var successes atomic.Int32
+	var replays atomic.Int32
+	var unexpected atomic.Int32
+	var workers sync.WaitGroup
+	for range 24 {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			if _, err := store.beginValueAdmission(intent, operationRef, managedDynamicTestNow+2); err == nil {
+				successes.Add(1)
+			} else if err.Error() == "managed_intent_value_replayed" {
+				replays.Add(1)
+			} else {
+				unexpected.Add(1)
+			}
+		}()
+	}
+	workers.Wait()
+	if successes.Load() != 1 || replays.Load() != 23 || unexpected.Load() != 0 {
+		t.Fatalf("concurrent value admissions successes=%d replays=%d unexpected=%d", successes.Load(), replays.Load(), unexpected.Load())
+	}
+}
+
+func TestManagedDynamicValueAdmissionRejectsImpossibleTimestampsWithoutMutation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), managedDynamicReplayStoreFile)
+	store, err := newManagedDynamicReplayStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	intent := managedDynamicTestIntent()
+	reservedAt := managedDynamicTestNow + 2
+	operationRef, err := store.reserve(intent, reservedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.beginValueAdmission(intent, operationRef, reservedAt-1); err == nil || err.Error() != "managed_intent_value_admission_unavailable" {
+		t.Fatalf("admission began before its reservation: %v", err)
+	}
+	recovered, err := store.recover(intent, operationRef, reservedAt)
+	if err != nil || recovered.ValueAdmissionStartedUnixSecond != 0 {
+		t.Fatalf("rejected early admission mutated replay state: record=%#v err=%v", recovered, err)
+	}
+
+	started, err := store.beginValueAdmission(intent, operationRef, reservedAt+1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.completeValueAdmission(intent, operationRef, started.ValueAdmissionStartedUnixSecond-1); err == nil || err.Error() != "managed_intent_value_admission_unavailable" {
+		t.Fatalf("admission completed before it began: %v", err)
+	}
+	recovered, err = store.recover(intent, operationRef, reservedAt+1)
+	if err != nil || recovered.ValueAdmissionDoneUnixSecond != 0 {
+		t.Fatalf("rejected early completion mutated replay state: record=%#v err=%v", recovered, err)
 	}
 }
 
@@ -167,7 +288,7 @@ func TestManagedDynamicReplayStoreFailsClosedOnCorruptionPermissionsCapacityAndW
 		if err := os.WriteFile(path, []byte(`{"schema":"corrupt"}`), 0600); err != nil {
 			t.Fatal(err)
 		}
-		if err := store.recover(intent, operationRef, managedDynamicTestNow+1); err == nil || err.Error() != "managed_intent_recovery_unavailable" {
+		if _, err := store.recover(intent, operationRef, managedDynamicTestNow+1); err == nil || err.Error() != "managed_intent_recovery_unavailable" {
 			t.Fatalf("corrupt durable state fell back to memory: %v", err)
 		}
 	})

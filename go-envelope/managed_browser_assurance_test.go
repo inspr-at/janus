@@ -71,9 +71,10 @@ func (authority *managedBrowserDynamicAuthority) Inspect(_ context.Context, inte
 	return authority.inspection, nil
 }
 
-func (authority *managedBrowserDynamicAuthority) reset() {
+func (authority *managedBrowserDynamicAuthority) reset(source string) {
 	authority.mu.Lock()
 	defer authority.mu.Unlock()
+	authority.inspection.Intent.Source = source
 	authority.reserved = nil
 }
 
@@ -99,6 +100,31 @@ func (authority *managedBrowserDynamicAuthority) RecoverReservation(ctx context.
 	if err != nil || authority.reserved == nil || authority.reserved.OperationRef != operationRef || authority.reserved.Inspection.Intent != inspection.Intent {
 		return managedDynamicSetupReservation{}, managedIntentError("managed_intent_recovery_unavailable")
 	}
+	return *authority.reserved, nil
+}
+
+func (authority *managedBrowserDynamicAuthority) BeginValueAdmission(ctx context.Context, expected managedDynamicStepUpTarget, operationRef string) (managedDynamicSetupReservation, error) {
+	authority.mu.Lock()
+	defer authority.mu.Unlock()
+	inspection, err := authority.Inspect(ctx, expected.IntentRef, expected.HumanSessionRef)
+	if err != nil || managedDynamicTargetFromInspection(inspection) != expected || authority.reserved == nil || authority.reserved.OperationRef != operationRef {
+		return managedDynamicSetupReservation{}, managedIntentError("managed_intent_value_admission_unavailable")
+	}
+	if authority.reserved.ValueAdmissionStarted {
+		return *authority.reserved, managedIntentError("managed_intent_value_replayed")
+	}
+	authority.reserved.ValueAdmissionStarted = true
+	return *authority.reserved, nil
+}
+
+func (authority *managedBrowserDynamicAuthority) CompleteValueAdmission(ctx context.Context, expected managedDynamicStepUpTarget, operationRef string) (managedDynamicSetupReservation, error) {
+	authority.mu.Lock()
+	defer authority.mu.Unlock()
+	inspection, err := authority.Inspect(ctx, expected.IntentRef, expected.HumanSessionRef)
+	if err != nil || managedDynamicTargetFromInspection(inspection) != expected || authority.reserved == nil || authority.reserved.OperationRef != operationRef || !authority.reserved.ValueAdmissionStarted || authority.reserved.ValueAdmissionComplete {
+		return managedDynamicSetupReservation{}, managedIntentError("managed_intent_value_admission_unavailable")
+	}
+	authority.reserved.ValueAdmissionComplete = true
 	return *authority.reserved, nil
 }
 
@@ -417,8 +443,13 @@ func (harness *managedBrowserHarness) ServeHTTP(response http.ResponseWriter, re
 }
 
 func (harness *managedBrowserHarness) session(response http.ResponseWriter, request *http.Request) {
-	if request.URL.Query().Get("kind") == "dynamic" {
-		harness.dynamicAuthority.reset()
+	kind := request.URL.Query().Get("kind")
+	if kind == "dynamic" || kind == "dynamic-generated" {
+		source := "import"
+		if kind == "dynamic-generated" {
+			source = "generated"
+		}
+		harness.dynamicAuthority.reset(source)
 		harness.executor.reset()
 		harness.writeSession(response)
 		response.Header().Set("Cache-Control", "no-store")

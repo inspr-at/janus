@@ -25,11 +25,15 @@ type managedDynamicSetupIntentAuthority interface {
 	Inspect(context.Context, string, string) (managedDynamicSetupInspection, error)
 	Reserve(context.Context, string, string) (managedDynamicSetupReservation, error)
 	RecoverReservation(context.Context, string, string, string) (managedDynamicSetupReservation, error)
+	BeginValueAdmission(context.Context, managedDynamicStepUpTarget, string) (managedDynamicSetupReservation, error)
+	CompleteValueAdmission(context.Context, managedDynamicStepUpTarget, string) (managedDynamicSetupReservation, error)
 }
 
 type managedDynamicSetupReservation struct {
-	Inspection   managedDynamicSetupInspection
-	OperationRef string
+	Inspection             managedDynamicSetupInspection
+	OperationRef           string
+	ValueAdmissionStarted  bool
+	ValueAdmissionComplete bool
 }
 
 // managedDynamicStepUpTarget contains every authority-bearing choice that a
@@ -104,6 +108,8 @@ type managedDynamicSetupPageData struct {
 	ConsumerLabel                string
 	DeliveryLabel                string
 	StepUpReady                  bool
+	ValueAdmissionStarted        bool
+	ValueAdmissionComplete       bool
 	OperationRef                 string
 	RequestID                    string
 }
@@ -126,6 +132,8 @@ func (app *App) handleManagedDynamicSetup(w http.ResponseWriter, r *http.Request
 	target := managedDynamicTargetFromInspection(inspection)
 	proof, proofOK := app.readManagedDynamicStepUpProof(r)
 	stepUpReady := false
+	valueAdmissionStarted := false
+	valueAdmissionComplete := false
 	if proofOK && proof.Target == target {
 		reservation, reservationErr := app.managedDynamicSetup.RecoverReservation(
 			r.Context(),
@@ -136,6 +144,10 @@ func (app *App) handleManagedDynamicSetup(w http.ResponseWriter, r *http.Request
 		stepUpReady = reservationErr == nil &&
 			reservation.OperationRef == proof.OperationRef &&
 			managedDynamicTargetFromInspection(reservation.Inspection) == target
+		if stepUpReady {
+			valueAdmissionStarted = reservation.ValueAdmissionStarted
+			valueAdmissionComplete = reservation.ValueAdmissionComplete
+		}
 	}
 	if proofOK && !stepUpReady {
 		app.clearManagedDynamicStepUpProofCookies(w)
@@ -162,6 +174,8 @@ func (app *App) handleManagedDynamicSetup(w http.ResponseWriter, r *http.Request
 		ConsumerLabel:                managedConsumerLabel(inspection.Context.ConsumerKind),
 		DeliveryLabel:                managedDeliveryLabel(inspection.Context.DeliveryKind),
 		StepUpReady:                  stepUpReady,
+		ValueAdmissionStarted:        valueAdmissionStarted,
+		ValueAdmissionComplete:       valueAdmissionComplete,
 		OperationRef:                 proof.OperationRef,
 		RequestID:                    requestID(r),
 	})

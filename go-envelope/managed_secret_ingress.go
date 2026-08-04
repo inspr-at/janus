@@ -740,9 +740,9 @@ func managedIntentHTTPStatus(err error) int {
 		switch managed {
 		case "managed_intent_unknown":
 			return http.StatusNotFound
-		case "managed_intent_expired", "managed_intent_replayed", "managed_intent_cancelled", "managed_intent_declaration_drift":
+		case "managed_intent_expired", "managed_intent_replayed", "managed_intent_value_replayed", "managed_intent_cancelled", "managed_intent_declaration_drift":
 			return http.StatusConflict
-		case "managed_intent_pharos_unavailable", "managed_intent_declaration_unavailable", "managed_intent_replay_store_unavailable":
+		case "managed_intent_pharos_unavailable", "managed_intent_declaration_unavailable", "managed_intent_replay_store_unavailable", "managed_intent_value_admission_unavailable":
 			return http.StatusServiceUnavailable
 		}
 	}
