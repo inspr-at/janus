@@ -232,7 +232,7 @@ test("dynamic target is locked to a fresh passkey before any value field", async
     "0; url=/managed-environment/setup?intent=intent_13579bdf2468ace0",
   );
   await expect(
-    page.getByRole("heading", { name: "Exact target approved" }),
+    page.getByRole("heading", { name: "Exact request reserved" }),
   ).toBeVisible();
   await expect(page.getByText(/No value accepted yet/)).toBeVisible();
   await expect(page.locator('input[name="secret_value"]')).toHaveCount(0);

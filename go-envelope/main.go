@@ -701,7 +701,7 @@ func NewApp(ctx context.Context, cfg Config, store *Store) (*App, error) {
 		go bridge.Run(ctx)
 	}
 	if cfg.DynamicSetup != nil {
-		dynamicSetup, err := newManagedDynamicSetupAuthority(*cfg.DynamicSetup, nil)
+		dynamicSetup, err := newManagedDynamicSetupAuthority(*cfg.DynamicSetup, cfg.DataDir, nil)
 		if err != nil {
 			return nil, fmt.Errorf("managed dynamic setup authority: %w", err)
 		}

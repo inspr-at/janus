@@ -16,6 +16,11 @@ type fakeManagedDynamicIntentAuthority struct {
 	inspection   managedDynamicSetupInspection
 	inspectErr   error
 	inspectCount int
+	reservation  *managedDynamicSetupReservation
+	reserveErr   error
+	recoverErr   error
+	reserveCount int
+	recoverCount int
 }
 
 func (fake *fakeManagedDynamicIntentAuthority) Inspect(_ context.Context, intentRef, humanSessionRef string) (managedDynamicSetupInspection, error) {
@@ -27,6 +32,38 @@ func (fake *fakeManagedDynamicIntentAuthority) Inspect(_ context.Context, intent
 		return managedDynamicSetupInspection{}, managedIntentError("managed_intent_wrong_user")
 	}
 	return fake.inspection, nil
+}
+
+func (fake *fakeManagedDynamicIntentAuthority) Reserve(ctx context.Context, intentRef, humanSessionRef string) (managedDynamicSetupReservation, error) {
+	fake.reserveCount++
+	if fake.reserveErr != nil {
+		return managedDynamicSetupReservation{}, fake.reserveErr
+	}
+	inspection, err := fake.Inspect(ctx, intentRef, humanSessionRef)
+	if err != nil {
+		return managedDynamicSetupReservation{}, err
+	}
+	if fake.reservation != nil {
+		return managedDynamicSetupReservation{}, managedIntentError("managed_intent_replayed")
+	}
+	reservation := managedDynamicSetupReservation{
+		Inspection:   inspection,
+		OperationRef: "op_0123456789abcdef",
+	}
+	fake.reservation = &reservation
+	return reservation, nil
+}
+
+func (fake *fakeManagedDynamicIntentAuthority) RecoverReservation(ctx context.Context, intentRef, humanSessionRef, operationRef string) (managedDynamicSetupReservation, error) {
+	fake.recoverCount++
+	if fake.recoverErr != nil {
+		return managedDynamicSetupReservation{}, fake.recoverErr
+	}
+	inspection, err := fake.Inspect(ctx, intentRef, humanSessionRef)
+	if err != nil || fake.reservation == nil || fake.reservation.OperationRef != operationRef || fake.reservation.Inspection.Intent != inspection.Intent {
+		return managedDynamicSetupReservation{}, managedIntentError("managed_intent_recovery_unavailable")
+	}
+	return *fake.reservation, nil
 }
 
 func managedDynamicSessionFixture(t *testing.T) (*App, *fakeManagedDynamicIntentAuthority, Session, *http.Cookie, managedDynamicStepUpTarget) {
@@ -132,10 +169,15 @@ func TestManagedDynamicSetupCarriesOnlyIntentAcrossOrdinaryLogin(t *testing.T) {
 
 func TestManagedDynamicSetupAcceptsOnlyProofForCurrentExactTarget(t *testing.T) {
 	app, authority, _, sessionCookie, target := managedDynamicSessionFixture(t)
+	reservation, err := authority.Reserve(t.Context(), target.IntentRef, target.HumanSessionRef)
+	if err != nil {
+		t.Fatal(err)
+	}
 	now := time.Now().UTC()
 	proofWriter := httptest.NewRecorder()
 	app.writeManagedDynamicStepUpProof(proofWriter, managedDynamicStepUpProof{
 		Schema: managedDynamicStepUpProofDomain, Target: target,
+		OperationRef:    reservation.OperationRef,
 		AuthenticatedAt: now.Unix(), ExpiresAt: now.Add(managedStepUpProofTTL).Unix(),
 	})
 	proofCookie := cookieByName(t, proofWriter.Result().Cookies(), hostDynamicProofCookie)
@@ -146,8 +188,11 @@ func TestManagedDynamicSetupAcceptsOnlyProofForCurrentExactTarget(t *testing.T) 
 	response := httptest.NewRecorder()
 	app.routes().ServeHTTP(response, request)
 	body := response.Body.String()
-	if response.Code != http.StatusOK || !strings.Contains(body, "Exact target approved") || !strings.Contains(body, "No value accepted yet") || strings.Contains(body, "Confirm with passkey") {
+	if response.Code != http.StatusOK || !strings.Contains(body, "Exact request reserved") || !strings.Contains(body, "No value accepted yet") || !strings.Contains(body, reservation.OperationRef) || strings.Contains(body, "Confirm with passkey") {
 		t.Fatalf("exact proof should unlock only value-free readiness: status=%d body=%s", response.Code, body)
+	}
+	if authority.recoverCount != 1 {
+		t.Fatalf("refresh did not recover the durable reservation exactly once: %d", authority.recoverCount)
 	}
 
 	authority.inspection.Intent.EnvironmentName = "ROTATED_DATABASE_PASSWORD"
@@ -229,7 +274,7 @@ func TestManagedDynamicStepUpCompletionReinspectsBeforeProof(t *testing.T) {
 		}
 	}
 	proof, ok := app.readManagedDynamicStepUpProof(proofRequest)
-	if !ok || proof.Target != target {
+	if !ok || proof.Target != target || !validManagedRef("op_", proof.OperationRef) {
 		t.Fatalf("completion should mint an exact-target proof: %#v", proof)
 	}
 
@@ -237,6 +282,50 @@ func TestManagedDynamicStepUpCompletionReinspectsBeforeProof(t *testing.T) {
 	response = httptest.NewRecorder()
 	if app.completeManagedDynamicStepUpCallback(response, request, session, flow, state, now.Unix(), []string{"user", "mfa"}) || response.Code != http.StatusForbidden {
 		t.Fatalf("policy drift during passkey round-trip must fail closed: status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestManagedDynamicStepUpCompletionReservesOnceBeforeIssuingProof(t *testing.T) {
+	app, authority, session, _, target := managedDynamicSessionFixture(t)
+	state := "single-use-dynamic-state"
+	now := time.Now().UTC()
+	flow := managedDynamicStepUpFlow{
+		Schema: managedDynamicStepUpFlowDomain, Target: target, StateHash: managedStateHash(state),
+		IssuedAt: now.Unix(), ExpiresAt: now.Add(managedStepUpFlowTTL).Unix(),
+	}
+	request := httptest.NewRequest(http.MethodGet, "/oidc/callback", nil)
+	first := httptest.NewRecorder()
+	if !app.completeManagedDynamicStepUpCallback(first, request, session, flow, state, now.Unix(), []string{"user", "mfa"}) {
+		t.Fatalf("first exact passkey callback did not reserve: status=%d body=%s", first.Code, first.Body.String())
+	}
+	if authority.reserveCount != 1 || authority.reservation == nil {
+		t.Fatalf("proof was issued without one durable reservation: reserve=%d reservation=%#v", authority.reserveCount, authority.reservation)
+	}
+
+	duplicate := httptest.NewRecorder()
+	if app.completeManagedDynamicStepUpCallback(duplicate, request, session, flow, state, now.Unix(), []string{"user", "mfa"}) || duplicate.Code != http.StatusConflict {
+		t.Fatalf("duplicate passkey callback was accepted: status=%d body=%s", duplicate.Code, duplicate.Body.String())
+	}
+	if authority.reserveCount != 2 || !strings.Contains(duplicate.Body.String(), "already used") {
+		t.Fatalf("duplicate did not fail at single-use reservation: reserve=%d body=%s", authority.reserveCount, duplicate.Body.String())
+	}
+}
+
+func TestManagedDynamicStepUpDenialNeverReservesIntent(t *testing.T) {
+	app, authority, session, _, target := managedDynamicSessionFixture(t)
+	state := "denied-dynamic-state"
+	now := time.Now().UTC()
+	flow := managedDynamicStepUpFlow{
+		Schema: managedDynamicStepUpFlowDomain, Target: target, StateHash: managedStateHash(state),
+		IssuedAt: now.Unix(), ExpiresAt: now.Add(managedStepUpFlowTTL).Unix(),
+	}
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/oidc/callback", nil)
+	if app.completeManagedDynamicStepUpCallback(response, request, session, flow, state, now.Unix(), []string{"pwd"}) || response.Code != http.StatusForbidden {
+		t.Fatalf("non-passkey assertion was accepted: status=%d body=%s", response.Code, response.Body.String())
+	}
+	if authority.reserveCount != 0 || authority.reservation != nil {
+		t.Fatalf("denied assertion consumed replay budget: reserve=%d reservation=%#v", authority.reserveCount, authority.reservation)
 	}
 }
 
@@ -266,7 +355,7 @@ func TestManagedDynamicStepUpCompletionRejectsEveryTargetSubstitution(t *testing
 	}
 	for _, test := range mutations {
 		t.Run(test.name, func(t *testing.T) {
-			app, _, session, _, target := managedDynamicSessionFixture(t)
+			app, authority, session, _, target := managedDynamicSessionFixture(t)
 			test.mutate(&target)
 			now := time.Now().UTC()
 			state := "substitution-state"
@@ -278,6 +367,9 @@ func TestManagedDynamicStepUpCompletionRejectsEveryTargetSubstitution(t *testing
 			response := httptest.NewRecorder()
 			if app.completeManagedDynamicStepUpCallback(response, request, session, flow, state, now.Unix(), []string{"user", "mfa"}) || response.Code != http.StatusForbidden {
 				t.Fatalf("%s substitution must fail closed: status=%d body=%s", test.name, response.Code, response.Body.String())
+			}
+			if authority.reserveCount != 0 {
+				t.Fatalf("%s substitution consumed replay budget", test.name)
 			}
 		})
 	}

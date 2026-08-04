@@ -23,6 +23,13 @@ const (
 // v2 runtime configuration. Existing v1 setup never enables this capability.
 type managedDynamicSetupIntentAuthority interface {
 	Inspect(context.Context, string, string) (managedDynamicSetupInspection, error)
+	Reserve(context.Context, string, string) (managedDynamicSetupReservation, error)
+	RecoverReservation(context.Context, string, string, string) (managedDynamicSetupReservation, error)
+}
+
+type managedDynamicSetupReservation struct {
+	Inspection   managedDynamicSetupInspection
+	OperationRef string
 }
 
 // managedDynamicStepUpTarget contains every authority-bearing choice that a
@@ -57,6 +64,7 @@ type managedDynamicStepUpFlow struct {
 type managedDynamicStepUpProof struct {
 	Schema          string                     `json:"schema"`
 	Target          managedDynamicStepUpTarget `json:"target"`
+	OperationRef    string                     `json:"operation_ref"`
 	AuthenticatedAt int64                      `json:"authenticated_at"`
 	ExpiresAt       int64                      `json:"expires_at"`
 }
@@ -96,6 +104,7 @@ type managedDynamicSetupPageData struct {
 	ConsumerLabel                string
 	DeliveryLabel                string
 	StepUpReady                  bool
+	OperationRef                 string
 	RequestID                    string
 }
 
@@ -116,10 +125,21 @@ func (app *App) handleManagedDynamicSetup(w http.ResponseWriter, r *http.Request
 	}
 	target := managedDynamicTargetFromInspection(inspection)
 	proof, proofOK := app.readManagedDynamicStepUpProof(r)
-	stepUpReady := proofOK && proof.Target == target
+	stepUpReady := false
+	if proofOK && proof.Target == target {
+		reservation, reservationErr := app.managedDynamicSetup.RecoverReservation(
+			r.Context(),
+			target.IntentRef,
+			target.HumanSessionRef,
+			proof.OperationRef,
+		)
+		stepUpReady = reservationErr == nil &&
+			reservation.OperationRef == proof.OperationRef &&
+			managedDynamicTargetFromInspection(reservation.Inspection) == target
+	}
 	if proofOK && !stepUpReady {
 		app.clearManagedDynamicStepUpProofCookies(w)
-		app.audit(r, "managed_environment.step_up.proof", "denied", session.Subject, "target drift")
+		app.audit(r, "managed_environment.step_up.proof", "denied", session.Subject, "proof or reservation invalid")
 	}
 	app.audit(r, "managed_environment.setup.view", "allowed", session.Subject, "value-free dynamic setup context")
 	renderTemplateStatus(w, app.templates, "managed_dynamic_setup", http.StatusOK, managedDynamicSetupPageData{
@@ -142,6 +162,7 @@ func (app *App) handleManagedDynamicSetup(w http.ResponseWriter, r *http.Request
 		ConsumerLabel:                managedConsumerLabel(inspection.Context.ConsumerKind),
 		DeliveryLabel:                managedDeliveryLabel(inspection.Context.DeliveryKind),
 		StepUpReady:                  stepUpReady,
+		OperationRef:                 proof.OperationRef,
 		RequestID:                    requestID(r),
 	})
 }
@@ -334,6 +355,7 @@ func (app *App) readManagedDynamicStepUpProof(r *http.Request) (managedDynamicSt
 	if !app.decodeManagedSignedCookie(cookie.Value, managedDynamicStepUpProofDomain, &proof) ||
 		proof.Schema != managedDynamicStepUpProofDomain ||
 		!validManagedDynamicStepUpTarget(proof.Target) ||
+		!validManagedRef("op_", proof.OperationRef) ||
 		!validManagedStepUpTimes(proof.AuthenticatedAt, proof.ExpiresAt, managedStepUpProofTTL, time.Now().UTC()) {
 		return managedDynamicStepUpProof{}, false
 	}
@@ -401,9 +423,21 @@ func (app *App) completeManagedDynamicStepUpCallback(w http.ResponseWriter, r *h
 		app.renderAuthError(w, r, http.StatusForbidden, "passwordless_step_up_failed", "A fresh passwordless passkey confirmation is required for this exact environment change.")
 		return false
 	}
+	reservation, err := app.managedDynamicSetup.Reserve(r.Context(), currentTarget.IntentRef, humanSessionRef)
+	if err != nil ||
+		!validManagedRef("op_", reservation.OperationRef) ||
+		managedDynamicTargetFromInspection(reservation.Inspection) != currentTarget {
+		app.clearOIDCLoginCookies(w)
+		app.clearManagedDynamicStepUpProofCookies(w)
+		app.clearManagedDynamicStepUpRetryCookies(w)
+		app.audit(r, "managed_environment.step_up.complete", "denied", session.Subject, "intent reservation denied")
+		app.renderAuthError(w, r, http.StatusConflict, "setup_request_already_used", "This setup request was already used or could not be reserved. Start again from Pharos.")
+		return false
+	}
 	app.writeSession(w, session)
 	app.writeManagedDynamicStepUpProof(w, managedDynamicStepUpProof{
 		Schema: managedDynamicStepUpProofDomain, Target: currentTarget,
+		OperationRef:    reservation.OperationRef,
 		AuthenticatedAt: authTime,
 		ExpiresAt:       time.Unix(authTime, 0).UTC().Add(managedStepUpProofTTL).Unix(),
 	})
@@ -411,7 +445,7 @@ func (app *App) completeManagedDynamicStepUpCallback(w http.ResponseWriter, r *h
 	app.clearManagedDynamicStepUpRetryCookies(w)
 	app.clearOIDCLoginAttemptCookie(w)
 	app.clearManagedDynamicLoginIntentCookies(w)
-	app.audit(r, "managed_environment.step_up.complete", "allowed", session.Subject, "fresh passwordless assertion bound to exact dynamic target")
+	app.audit(r, "managed_environment.step_up.complete", "allowed", session.Subject, "fresh passwordless assertion reserved exact dynamic target")
 	app.renderAuthContinuation(w, r, "/managed-environment/setup?intent="+url.QueryEscape(flow.Target.IntentRef), "dynamic_step_up")
 	return true
 }

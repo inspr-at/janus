@@ -10,6 +10,8 @@ argument, JSON request, or agent tool.
 JANUS-392 defines the value-free Janus ingress contract for a future dynamic
 environment binding beneath a pre-approved service policy. JANUS-393 adds a
 separate, guarded review and fresh-passkey session for that exact v2 target.
+JANUS-395 adds the durable, single-use reservation that burns the exact intent
+and nonce only after the passkey and current target have been revalidated.
 The existing v1 declared-slot flow described below remains unchanged and is
 still the only production value-bearing path.
 
@@ -48,10 +50,14 @@ The dynamic flow, retry breadcrumb, and proof use distinct v2 signature
 domains and cookie names. Each carries the complete value-free signed intent
 identity and target, including issuer, audience, nonce, validity window, fixed
 return kind, and the one-way human-session reference. Janus re-inspects the authoritative signed
-intent before step-up, again at the OIDC callback before proof issuance, and on
-every review-page load before accepting the proof. Any field or policy drift,
-mixed v1/v2 flow state, stale assertion, different identity, or non-passkey AMR
-fails closed. The confirmed page remains value-free and has no execute form.
+intent before step-up and again at the OIDC callback. Only after the fresh
+passkey and exact current target pass does Janus atomically reserve the intent
+and nonce, then bind the resulting opaque operation reference into the signed
+proof. Every confirmed-page load re-inspects the target and recovers that same
+durable reservation before accepting the proof. Any field or policy drift,
+mixed v1/v2 flow state, stale assertion, different identity, non-passkey AMR,
+copied link, replayed nonce, missing reservation, or changed operation fails
+closed. The confirmed page remains value-free and has no execute form.
 
 JANUS-394 provides the production construction seam for the v2 intent
 authority, but it is a separate capability that defaults off. Existing v1
@@ -82,10 +88,19 @@ signed v2 envelope or the strict value-free
 performs the existing signature, identity, lifetime, and local declaration
 resolution before returning an inspection to the passkey flow.
 
+The enabled authority stores reservations separately from v1 in
+`<JANUS_DATA_DIR>/managed-dynamic-setup-replays.json`. The strict v2 document
+contains only intent, nonce, opaque operation, exact-target fingerprint, and
+bounded timestamps. It is private, size- and entry-bounded, atomically replaced,
+validated on restart, and prunes expired entries only as part of a successful
+new reservation. Concurrent intent or nonce reservation has one winner. A
+store that is missing after proof issuance, corrupt, unsafe, full, or
+unwritable fails closed; it never falls back to browser state.
+
 No current deployment configuration enables this capability. This slice does
-not admit a secret value, consume intent replay state, create custody records,
-materialize an environment file, contact a host, restart a service, or expose a
-Pharos API. Those effects require separate reviewed slices.
+not admit a secret value, create custody records, materialize an environment
+file, contact a host, restart a service, or expose a Pharos API. Those effects
+require separate reviewed slices.
 
 ## Route and trust boundary
 

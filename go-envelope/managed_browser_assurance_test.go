@@ -34,7 +34,9 @@ const (
 )
 
 type managedBrowserDynamicAuthority struct {
+	mu         sync.Mutex
 	inspection managedDynamicSetupInspection
+	reserved   *managedDynamicSetupReservation
 }
 
 func newManagedBrowserDynamicAuthority(issuer string) *managedBrowserDynamicAuthority {
@@ -67,6 +69,37 @@ func (authority *managedBrowserDynamicAuthority) Inspect(_ context.Context, inte
 		return managedDynamicSetupInspection{}, managedIntentError("managed_intent_wrong_user")
 	}
 	return authority.inspection, nil
+}
+
+func (authority *managedBrowserDynamicAuthority) reset() {
+	authority.mu.Lock()
+	defer authority.mu.Unlock()
+	authority.reserved = nil
+}
+
+func (authority *managedBrowserDynamicAuthority) Reserve(ctx context.Context, intentRef, humanSessionRef string) (managedDynamicSetupReservation, error) {
+	authority.mu.Lock()
+	defer authority.mu.Unlock()
+	inspection, err := authority.Inspect(ctx, intentRef, humanSessionRef)
+	if err != nil {
+		return managedDynamicSetupReservation{}, err
+	}
+	if authority.reserved != nil {
+		return managedDynamicSetupReservation{}, managedIntentError("managed_intent_replayed")
+	}
+	reservation := managedDynamicSetupReservation{Inspection: inspection, OperationRef: "op_13579bdf2468ace0"}
+	authority.reserved = &reservation
+	return reservation, nil
+}
+
+func (authority *managedBrowserDynamicAuthority) RecoverReservation(ctx context.Context, intentRef, humanSessionRef, operationRef string) (managedDynamicSetupReservation, error) {
+	authority.mu.Lock()
+	defer authority.mu.Unlock()
+	inspection, err := authority.Inspect(ctx, intentRef, humanSessionRef)
+	if err != nil || authority.reserved == nil || authority.reserved.OperationRef != operationRef || authority.reserved.Inspection.Intent != inspection.Intent {
+		return managedDynamicSetupReservation{}, managedIntentError("managed_intent_recovery_unavailable")
+	}
+	return *authority.reserved, nil
 }
 
 type managedBrowserAuthority struct {
@@ -292,14 +325,15 @@ type managedBrowserAuthorization struct {
 }
 
 type managedBrowserHarness struct {
-	app            *App
-	routes         http.Handler
-	authority      *managedBrowserAuthority
-	executor       *managedBrowserExecutor
-	privateKey     *rsa.PrivateKey
-	baseURL        string
-	authorizations map[string]managedBrowserAuthorization
-	mu             sync.Mutex
+	app              *App
+	routes           http.Handler
+	authority        *managedBrowserAuthority
+	dynamicAuthority *managedBrowserDynamicAuthority
+	executor         *managedBrowserExecutor
+	privateKey       *rsa.PrivateKey
+	baseURL          string
+	authorizations   map[string]managedBrowserAuthorization
+	mu               sync.Mutex
 }
 
 func newManagedBrowserHarness(t *testing.T, baseURL, authBaseURL string) *managedBrowserHarness {
@@ -348,13 +382,14 @@ func newManagedBrowserHarness(t *testing.T, baseURL, authBaseURL string) *manage
 	app.managedTxn = executor
 	app.managedDynamicSetup = dynamicAuthority
 	return &managedBrowserHarness{
-		app:            app,
-		routes:         app.routes(),
-		authority:      authority,
-		executor:       executor,
-		privateKey:     privateKey,
-		baseURL:        baseURL,
-		authorizations: make(map[string]managedBrowserAuthorization),
+		app:              app,
+		routes:           app.routes(),
+		authority:        authority,
+		dynamicAuthority: dynamicAuthority,
+		executor:         executor,
+		privateKey:       privateKey,
+		baseURL:          baseURL,
+		authorizations:   make(map[string]managedBrowserAuthorization),
 	}
 }
 
@@ -383,6 +418,7 @@ func (harness *managedBrowserHarness) ServeHTTP(response http.ResponseWriter, re
 
 func (harness *managedBrowserHarness) session(response http.ResponseWriter, request *http.Request) {
 	if request.URL.Query().Get("kind") == "dynamic" {
+		harness.dynamicAuthority.reset()
 		harness.executor.reset()
 		harness.writeSession(response)
 		response.Header().Set("Cache-Control", "no-store")

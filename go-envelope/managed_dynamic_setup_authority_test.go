@@ -142,7 +142,7 @@ func newManagedDynamicHTTPAuthorityForTest(
 		InternalToken:      strings.Repeat("a", 32),
 		Keyring:            keyring,
 		DeclarationPaths:   []string{declarationPath},
-	}, server.Client().Transport)
+	}, t.TempDir(), server.Client().Transport)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -258,6 +258,52 @@ func TestManagedDynamicHTTPAuthorityAcceptsOnlyReviewedValueFreeDenial(t *testin
 	if _, err := authority.Inspect(t.Context(), intent.IntentRef, intent.HumanSessionRef); err == nil ||
 		err.Error() != "managed_intent_expired" {
 		t.Fatalf("reviewed denial was not preserved: %v", err)
+	}
+}
+
+func TestManagedDynamicHTTPAuthorityReservesAndRecoversAcrossRestart(t *testing.T) {
+	intent := managedDynamicTestIntent()
+	envelope, publicKey := signManagedDynamicTestIntent(t, intent)
+	rawEnvelope, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		response.Header().Set("Content-Type", "application/json")
+		_, _ = response.Write(rawEnvelope)
+	}))
+	t.Cleanup(server.Close)
+	_, _, declarationPath, _ := writeManagedDynamicSetupConfigFiles(t)
+	config := managedDynamicSetupRuntimeConfig{
+		ControlPlaneOrigin: server.URL,
+		InternalToken:      strings.Repeat("a", 32),
+		Keyring:            managedIntentKeyring{"key_dynamic0001": publicKey},
+		DeclarationPaths:   []string{declarationPath},
+	}
+	dataDir := t.TempDir()
+	authority, err := newManagedDynamicSetupAuthority(config, dataDir, server.Client().Transport)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authority.consumer.now = func() time.Time { return time.Unix(managedDynamicTestNow+1, 0) }
+	reservation, err := authority.Reserve(t.Context(), intent.IntentRef, intent.HumanSessionRef)
+	if err != nil || !validManagedRef("op_", reservation.OperationRef) {
+		t.Fatalf("authority did not reserve exact signed intent: %#v %v", reservation, err)
+	}
+	if _, err := authority.Reserve(t.Context(), intent.IntentRef, intent.HumanSessionRef); err == nil || err.Error() != "managed_intent_replayed" {
+		t.Fatalf("authority accepted a duplicate reservation: %v", err)
+	}
+	if recovered, err := authority.RecoverReservation(t.Context(), intent.IntentRef, intent.HumanSessionRef, reservation.OperationRef); err != nil || recovered.OperationRef != reservation.OperationRef {
+		t.Fatalf("authority did not recover exact reservation: %#v %v", recovered, err)
+	}
+
+	restarted, err := newManagedDynamicSetupAuthority(config, dataDir, server.Client().Transport)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restarted.consumer.now = func() time.Time { return time.Unix(managedDynamicTestNow+1, 0) }
+	if recovered, err := restarted.RecoverReservation(t.Context(), intent.IntentRef, intent.HumanSessionRef, reservation.OperationRef); err != nil || recovered.Inspection.Intent != intent {
+		t.Fatalf("authority restart lost exact reservation: %#v %v", recovered, err)
 	}
 }
 
