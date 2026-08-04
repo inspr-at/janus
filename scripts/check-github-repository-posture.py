@@ -267,7 +267,7 @@ def fixture() -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]
     return repository, rulesets, []
 
 
-def expect_denied(action: object) -> None:
+def expect_denied(action: Callable[[], object]) -> None:
     try:
         action()
     except PostureError:
@@ -275,7 +275,7 @@ def expect_denied(action: object) -> None:
     raise PostureError("repository_posture_negative_fixture")
 
 
-def expect_api_failure(action: object, expected: str) -> None:
+def expect_api_failure(action: Callable[[], object], expected: str) -> None:
     try:
         action()
     except PostureError as error:

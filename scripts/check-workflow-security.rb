@@ -43,6 +43,15 @@ def active_step!(job, name)
   step
 end
 
+def action!(job, repository)
+  prefix = "#{repository}@"
+  matches = job.fetch("steps").select do |step|
+    step.is_a?(Hash) && step["uses"].is_a?(String) && step["uses"].start_with?(prefix)
+  end
+  require_gate(matches.length == 1, "workflow_action_missing_or_duplicate:#{repository}")
+  matches.first
+end
+
 def command_lines(step)
   step.fetch("run").lines.map(&:strip).reject do |line|
     line.empty? || line.start_with?("#")
@@ -147,6 +156,99 @@ def validate(workflows)
   command!(gitleaks_verify, "--check-installed-tools --tool gitleaks")
   active_step!(gitleaks, "scan history and prove the negative fixture")
   before!(gitleaks, "verify installed scanner version", "scan history and prove the negative fixture")
+
+  rehearsal_workflow = workflows.fetch(:rehearsal)
+  require_gate(
+    rehearsal_workflow[true] == { "workflow_dispatch" => nil },
+    "release_rehearsal_trigger_invalid"
+  )
+  require_gate(
+    rehearsal_workflow["permissions"] == { "contents" => "read", "packages" => "read" },
+    "release_rehearsal_permissions_invalid"
+  )
+  rehearsal = job!(rehearsal_workflow, "rehearse-release-tools")
+  require_gate(!rehearsal.key?("permissions"), "release_rehearsal_job_permissions_override")
+  require_gate(rehearsal["timeout-minutes"] == 15, "release_rehearsal_timeout_invalid")
+
+  [
+    "docker/setup-buildx-action",
+    "docker/login-action",
+    "docker/metadata-action",
+    "aquasecurity/setup-trivy",
+    "sigstore/cosign-installer"
+  ].each do |repository|
+    require_gate(
+      action!(go_image, repository)["uses"] == action!(rust_image, repository)["uses"],
+      "release_action_drift:#{repository}"
+    )
+  end
+
+  {
+    "actions/checkout" => action!(rust_check, "actions/checkout")["uses"],
+    "docker/setup-qemu-action" => action!(rust_image, "docker/setup-qemu-action")["uses"],
+    "docker/setup-buildx-action" => action!(rust_image, "docker/setup-buildx-action")["uses"],
+    "docker/login-action" => action!(rust_image, "docker/login-action")["uses"],
+    "docker/metadata-action" => action!(rust_image, "docker/metadata-action")["uses"],
+    "aquasecurity/setup-trivy" => action!(rust_image, "aquasecurity/setup-trivy")["uses"],
+    "sigstore/cosign-installer" => action!(rust_image, "sigstore/cosign-installer")["uses"]
+  }.each do |repository, expected|
+    require_gate(
+      action!(rehearsal, repository)["uses"] == expected,
+      "release_rehearsal_action_drift:#{repository}"
+    )
+  end
+
+  login = action!(rehearsal, "docker/login-action")
+  require_gate(
+    login["with"] == {
+      "registry" => "ghcr.io",
+      "username" => "${{ github.actor }}",
+      "password" => "${{ secrets.GITHUB_TOKEN }}"
+    },
+    "release_rehearsal_login_invalid"
+  )
+  metadata = action!(rehearsal, "docker/metadata-action")
+  require_gate(
+    metadata["with"] == {
+      "images" => "ghcr.io/${{ github.repository }}/release-rehearsal",
+      "tags" => "type=raw,value=rehearsal"
+    },
+    "release_rehearsal_metadata_invalid"
+  )
+
+  arm = active_step!(rehearsal, "verify ARM emulation")
+  command!(arm, 'docker run --rm --platform linux/arm64 "${runtime_image}"')
+  active_step!(rehearsal, "verify Buildx")
+  active_step!(rehearsal, "verify release metadata")
+  scanner = active_step!(rehearsal, "verify installed release scanner version")
+  command!(scanner, "--check-installed-tools --tool trivy")
+  signature = active_step!(rehearsal, "sign and verify disposable local blob")
+  command!(signature, "cosign sign-blob --yes --key cosign.key")
+  command!(signature, "--bundle payload.sigstore.json payload.txt")
+  command!(signature, "cosign verify-blob --key cosign.pub")
+  before!(rehearsal, "install QEMU emulation", "verify ARM emulation")
+  before!(rehearsal, "install Buildx", "verify Buildx")
+  before!(rehearsal, "derive release metadata", "verify release metadata")
+  before!(rehearsal, "install Trivy", "verify installed release scanner version")
+  before!(rehearsal, "install Cosign", "sign and verify disposable local blob")
+
+  serialized_rehearsal = rehearsal_workflow.inspect
+  [
+    "packages\"=>\"write",
+    "contents\"=>\"write",
+    "id-token\"=>\"write",
+    "docker push",
+    "--push",
+    "gh release",
+    "cosign sign ",
+    "actions/upload-artifact",
+    "actions/attest"
+  ].each do |forbidden|
+    require_gate(
+      !serialized_rehearsal.include?(forbidden),
+      "release_rehearsal_publish_path:#{forbidden}"
+    )
+  end
 end
 
 def deep_copy(value)
@@ -207,12 +309,38 @@ def self_test(workflows)
     "upload mode-specific admission receipts"
   )["run"] = 'gh release upload "$TAG" rust-engine-admission.json --clobber'
   expect_denied(missing_enterprise_receipt, "missing_enterprise_receipt") {}
+
+  rehearsal_write = deep_copy(workflows)
+  rehearsal_write[:rehearsal]["permissions"]["packages"] = "write"
+  expect_denied(rehearsal_write, "release_rehearsal_write_permission") {}
+
+  rehearsal_drift = deep_copy(workflows)
+  action!(
+    job!(rehearsal_drift[:rehearsal], "rehearse-release-tools"),
+    "sigstore/cosign-installer"
+  )["uses"] = "sigstore/cosign-installer@0000000000000000000000000000000000000000"
+  expect_denied(rehearsal_drift, "release_rehearsal_action_drift") {}
+
+  release_drift = deep_copy(workflows)
+  action!(
+    job!(release_drift[:go], "image"),
+    "docker/metadata-action"
+  )["uses"] = "docker/metadata-action@0000000000000000000000000000000000000000"
+  expect_denied(release_drift, "release_action_drift") {}
+
+  rehearsal_publish = deep_copy(workflows)
+  step!(
+    job!(rehearsal_publish[:rehearsal], "rehearse-release-tools"),
+    "verify Buildx"
+  )["run"] = "docker push ghcr.io/inspr-at/janus/rehearsal"
+  expect_denied(rehearsal_publish, "release_rehearsal_publish_path") {}
 end
 
 workflows = {
   go: load_workflow(File.join(ROOT, ".github/workflows/go-envelope.yml")),
   rust: load_workflow(File.join(ROOT, ".github/workflows/rust.yml")),
-  security: load_workflow(File.join(ROOT, ".github/workflows/security.yml"))
+  security: load_workflow(File.join(ROOT, ".github/workflows/security.yml")),
+  rehearsal: load_workflow(File.join(ROOT, ".github/workflows/release-tools-rehearsal.yml"))
 }
 
 begin
