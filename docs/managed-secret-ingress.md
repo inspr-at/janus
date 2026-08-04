@@ -53,12 +53,39 @@ every review-page load before accepting the proof. Any field or policy drift,
 mixed v1/v2 flow state, stale assertion, different identity, or non-passkey AMR
 fails closed. The confirmed page remains value-free and has no execute form.
 
-Production construction does not yet provide a v2 intent authority, so these
-routes fail closed until a later reviewed fetcher is explicitly wired. This
-slice does not fetch a v2 handoff over HTTP, admit a secret value, consume
-intent replay state, create custody records, materialize an environment file,
-contact a host, restart a service, expose a Pharos API, or enable production
-behavior. Those effects require separate reviewed slices.
+JANUS-394 provides the production construction seam for the v2 intent
+authority, but it is a separate capability that defaults off. Existing v1
+managed-setup configuration cannot enable it. The v2 authority is constructed
+only when all of the following are present:
+
+| Environment variable | Contract |
+| --- | --- |
+| `JANUS_MANAGED_DYNAMIC_SETUP_ENABLED` | Must be exactly `true`; unset or `false` keeps the capability off. |
+| `JANUS_MANAGED_DYNAMIC_SETUP_CONTROL_PLANE_ORIGIN` | One origin-only HTTPS URL. |
+| `JANUS_MANAGED_DYNAMIC_SETUP_INTERNAL_TOKEN_FILE` | Absolute deployment-selected file containing a whitespace-free token of at least 32 bytes; the file is bounded and must not be group/world accessible. |
+| `JANUS_MANAGED_DYNAMIC_SETUP_VERIFICATION_KEYS_FILE` | Absolute path to a bounded strict verification-key document used for Ed25519 key rotation. |
+| `JANUS_MANAGED_DYNAMIC_SETUP_DECLARATION_PATHS` | Comma-separated, unique absolute paths to the root-owned v2 service declarations. |
+
+Detail configuration without the exact enable flag, an invalid flag, partial
+configuration, a non-HTTPS origin, an unsafe token file, an invalid key
+document, or an invalid declaration-path set fails startup. This is deliberate:
+operators cannot mistake staged detail configuration for an enabled
+capability.
+
+When enabled, Janus derives a fixed
+`/internal/managed-environment-setup-intents/<intent_ref>` path only from the
+validated opaque reference. The fetch is bearer-authenticated, requests JSON
+with identity encoding and no storage, times out after five seconds, refuses
+redirects, and bounds the response to 64 KiB. Janus accepts only the strict
+signed v2 envelope or the strict value-free
+`inspr.pharos.managed-environment-setup-intent-delivery.v2` denial. It then
+performs the existing signature, identity, lifetime, and local declaration
+resolution before returning an inspection to the passkey flow.
+
+No current deployment configuration enables this capability. This slice does
+not admit a secret value, consume intent replay state, create custody records,
+materialize an environment file, contact a host, restart a service, or expose a
+Pharos API. Those effects require separate reviewed slices.
 
 ## Route and trust boundary
 

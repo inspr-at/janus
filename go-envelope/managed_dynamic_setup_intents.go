@@ -100,34 +100,16 @@ type managedDynamicDeclarationResolver struct {
 }
 
 func (resolver managedDynamicDeclarationResolver) Resolve(intent managedDynamicSetupIntent) (managedDynamicDeclarationContext, error) {
-	if len(resolver.paths) == 0 || len(resolver.paths) > 64 {
-		return managedDynamicDeclarationContext{}, managedIntentError("managed_intent_declaration_unavailable")
+	declarations, err := loadManagedDynamicDeclarations(resolver.paths)
+	if err != nil {
+		return managedDynamicDeclarationContext{}, err
 	}
 	var found *managedDynamicDeclarationContext
-	seenServices := map[string]bool{}
-	seenPolicies := map[string]bool{}
-	for _, path := range resolver.paths {
-		raw, err := readBoundedFile(path, managedManifestMaxBytes)
-		if err != nil {
-			return managedDynamicDeclarationContext{}, managedIntentError("managed_intent_declaration_unavailable")
-		}
-		var declaration managedDynamicDeclaration
-		if decodeStrictJSON(raw, &declaration) != nil || validateManagedDynamicDeclaration(declaration) != nil {
-			return managedDynamicDeclarationContext{}, managedIntentError("managed_intent_declaration_unavailable")
-		}
-		serviceKey := declaration.HostRef + "\x00" + declaration.ServiceRef
-		if seenServices[serviceKey] {
-			return managedDynamicDeclarationContext{}, managedIntentError("managed_intent_declaration_unavailable")
-		}
-		seenServices[serviceKey] = true
+	for _, declaration := range declarations {
 		policy := declaration.DynamicEnvironmentPolicy
 		if policy == nil {
 			continue
 		}
-		if seenPolicies[policy.EnvironmentPolicyRef] {
-			return managedDynamicDeclarationContext{}, managedIntentError("managed_intent_declaration_unavailable")
-		}
-		seenPolicies[policy.EnvironmentPolicyRef] = true
 		if declaration.HostRef != intent.HostRef ||
 			declaration.ServiceRef != intent.ServiceRef ||
 			declaration.DeclarationFingerprint != intent.DeclarationFingerprint ||
@@ -160,6 +142,41 @@ func (resolver managedDynamicDeclarationResolver) Resolve(intent managedDynamicS
 		return managedDynamicDeclarationContext{}, managedIntentError("managed_intent_declaration_drift")
 	}
 	return *found, nil
+}
+
+func loadManagedDynamicDeclarations(paths []string) ([]managedDynamicDeclaration, error) {
+	if len(paths) == 0 || len(paths) > 64 {
+		return nil, managedIntentError("managed_intent_declaration_unavailable")
+	}
+	declarations := make([]managedDynamicDeclaration, 0, len(paths))
+	seenServices := map[string]bool{}
+	seenPolicies := map[string]bool{}
+	for _, path := range paths {
+		raw, err := readBoundedFile(path, managedManifestMaxBytes)
+		if err != nil {
+			return nil, managedIntentError("managed_intent_declaration_unavailable")
+		}
+		var declaration managedDynamicDeclaration
+		if decodeStrictJSON(raw, &declaration) != nil || validateManagedDynamicDeclaration(declaration) != nil {
+			return nil, managedIntentError("managed_intent_declaration_unavailable")
+		}
+		serviceKey := declaration.HostRef + "\x00" + declaration.ServiceRef
+		if seenServices[serviceKey] {
+			return nil, managedIntentError("managed_intent_declaration_unavailable")
+		}
+		seenServices[serviceKey] = true
+		policy := declaration.DynamicEnvironmentPolicy
+		if policy == nil {
+			declarations = append(declarations, declaration)
+			continue
+		}
+		if seenPolicies[policy.EnvironmentPolicyRef] {
+			return nil, managedIntentError("managed_intent_declaration_unavailable")
+		}
+		seenPolicies[policy.EnvironmentPolicyRef] = true
+		declarations = append(declarations, declaration)
+	}
+	return declarations, nil
 }
 
 type managedDynamicSetupInspection struct {

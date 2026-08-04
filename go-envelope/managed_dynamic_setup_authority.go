@@ -1,0 +1,173 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+	"unicode"
+)
+
+const (
+	managedDynamicIntentDenialSchema = "inspr.pharos.managed-environment-setup-intent-delivery.v2"
+	managedDynamicSetupEndpoint      = "/internal/managed-environment-setup-intents/"
+	managedDynamicSetupEnabledEnv    = "JANUS_MANAGED_DYNAMIC_SETUP_ENABLED"
+	managedDynamicSetupOriginEnv     = "JANUS_MANAGED_DYNAMIC_SETUP_CONTROL_PLANE_ORIGIN"
+	managedDynamicSetupTokenFileEnv  = "JANUS_MANAGED_DYNAMIC_SETUP_INTERNAL_TOKEN_FILE"
+	managedDynamicSetupKeyFileEnv    = "JANUS_MANAGED_DYNAMIC_SETUP_VERIFICATION_KEYS_FILE"
+	managedDynamicSetupPathsEnv      = "JANUS_MANAGED_DYNAMIC_SETUP_DECLARATION_PATHS"
+)
+
+// managedDynamicSetupRuntimeConfig is a separate, explicit capability gate.
+// Existing v1 managed setup configuration never enables the v2 route.
+type managedDynamicSetupRuntimeConfig struct {
+	ControlPlaneOrigin string
+	InternalToken      string
+	Keyring            managedIntentKeyring
+	DeclarationPaths   []string
+}
+
+func loadManagedDynamicSetupRuntimeConfigFromEnv() (*managedDynamicSetupRuntimeConfig, error) {
+	enabledRaw := strings.TrimSpace(os.Getenv(managedDynamicSetupEnabledEnv))
+	origin := strings.TrimSpace(os.Getenv(managedDynamicSetupOriginEnv))
+	tokenFile := strings.TrimSpace(os.Getenv(managedDynamicSetupTokenFileEnv))
+	keyFile := strings.TrimSpace(os.Getenv(managedDynamicSetupKeyFileEnv))
+	declarationRaw := strings.TrimSpace(os.Getenv(managedDynamicSetupPathsEnv))
+
+	enabled := false
+	switch enabledRaw {
+	case "", "false":
+	case "true":
+		enabled = true
+	default:
+		return nil, errors.New("managed dynamic setup enable flag is invalid")
+	}
+	configured := origin != "" || tokenFile != "" || keyFile != "" || declarationRaw != ""
+	if !enabled {
+		if configured {
+			return nil, errors.New("managed dynamic setup configuration requires the explicit enable flag")
+		}
+		return nil, nil
+	}
+	if origin == "" || tokenFile == "" || keyFile == "" || declarationRaw == "" {
+		return nil, errors.New("managed dynamic setup configuration is partial")
+	}
+	if !managedDynamicCleanAbsolutePath(tokenFile) || !managedDynamicCleanAbsolutePath(keyFile) {
+		return nil, errors.New("managed dynamic setup configuration file path is invalid")
+	}
+	parsedOrigin, err := parseManagedOrigin(origin)
+	if err != nil || parsedOrigin.Scheme != "https" {
+		return nil, errors.New("managed dynamic setup control-plane origin is invalid")
+	}
+	tokenBytes, err := readBoundedPrivateFile(tokenFile, managedInternalTokenMaxBytes)
+	if err != nil {
+		return nil, errors.New("managed dynamic setup internal token is unavailable")
+	}
+	token := strings.TrimSpace(string(tokenBytes))
+	if len(token) < 32 || strings.IndexFunc(token, unicode.IsSpace) >= 0 {
+		return nil, errors.New("managed dynamic setup internal token contract is invalid")
+	}
+	keyring, err := loadManagedIntentKeyring(keyFile)
+	if err != nil {
+		return nil, err
+	}
+	declarationPaths, err := parseManagedDynamicDeclarationPaths(declarationRaw)
+	if err != nil {
+		return nil, err
+	}
+	return &managedDynamicSetupRuntimeConfig{
+		ControlPlaneOrigin: parsedOrigin.String(),
+		InternalToken:      token,
+		Keyring:            keyring,
+		DeclarationPaths:   declarationPaths,
+	}, nil
+}
+
+func parseManagedDynamicDeclarationPaths(raw string) ([]string, error) {
+	var paths []string
+	for _, item := range strings.Split(raw, ",") {
+		paths = append(paths, strings.TrimSpace(item))
+	}
+	if validateManagedDynamicDeclarationPaths(paths) != nil {
+		return nil, errors.New("managed dynamic setup declaration path contract is invalid")
+	}
+	return paths, nil
+}
+
+func validateManagedDynamicDeclarationPaths(paths []string) error {
+	if len(paths) == 0 || len(paths) > 64 {
+		return errors.New("managed dynamic setup declaration path contract is invalid")
+	}
+	seen := map[string]bool{}
+	for _, path := range paths {
+		if !managedDynamicCleanAbsolutePath(path) || seen[path] {
+			return errors.New("managed dynamic setup declaration path contract is invalid")
+		}
+		seen[path] = true
+	}
+	return nil
+}
+
+func managedDynamicCleanAbsolutePath(path string) bool {
+	return path != "" && filepath.IsAbs(path) && filepath.Clean(path) == path
+}
+
+type managedDynamicHTTPAuthority struct {
+	fetcher  *managedHTTPIntentFetcher
+	consumer managedDynamicSetupIntentConsumer
+}
+
+func newManagedDynamicSetupAuthority(
+	config managedDynamicSetupRuntimeConfig,
+	transport http.RoundTripper,
+) (*managedDynamicHTTPAuthority, error) {
+	parsedOrigin, err := parseManagedOrigin(config.ControlPlaneOrigin)
+	if err != nil || parsedOrigin.Scheme != "https" {
+		return nil, errors.New("managed_dynamic_setup_config_invalid")
+	}
+	fetcher, err := newManagedHTTPIntentFetcher(config.ControlPlaneOrigin, config.InternalToken, transport)
+	if err != nil {
+		return nil, err
+	}
+	if len(config.Keyring) == 0 ||
+		validateManagedDynamicDeclarationPaths(config.DeclarationPaths) != nil {
+		return nil, errors.New("managed_dynamic_setup_config_invalid")
+	}
+	if _, err := loadManagedDynamicDeclarations(config.DeclarationPaths); err != nil {
+		return nil, errors.New("managed_dynamic_setup_config_invalid")
+	}
+	return &managedDynamicHTTPAuthority{
+		fetcher: fetcher,
+		consumer: managedDynamicSetupIntentConsumer{
+			keyring:     config.Keyring,
+			declaration: managedDynamicDeclarationResolver{paths: append([]string(nil), config.DeclarationPaths...)},
+			issuerRef:   managedSetupExpectedIssuerRef,
+			audienceRef: managedSetupExpectedAudienceRef,
+			now:         time.Now,
+		},
+	}, nil
+}
+
+func (authority *managedDynamicHTTPAuthority) Inspect(
+	ctx context.Context,
+	intentRef string,
+	humanSessionRef string,
+) (managedDynamicSetupInspection, error) {
+	if authority == nil || authority.fetcher == nil || authority.consumer.declaration == nil {
+		return managedDynamicSetupInspection{}, managedIntentError("managed_intent_internal_failure")
+	}
+	envelope, err := authority.fetcher.fetch(
+		ctx,
+		intentRef,
+		managedDynamicSetupEndpoint,
+		managedDynamicIntentDenialSchema,
+		managedDynamicContractVersion,
+	)
+	if err != nil {
+		return managedDynamicSetupInspection{}, normalizeManagedIntentError(err)
+	}
+	return authority.consumer.Inspect(envelope, intentRef, humanSessionRef)
+}
