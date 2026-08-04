@@ -26,7 +26,7 @@ type managedDynamicSetupIntentAuthority interface {
 	Reserve(context.Context, string, string) (managedDynamicSetupReservation, error)
 	RecoverReservation(context.Context, string, string, string) (managedDynamicSetupReservation, error)
 	BeginValueAdmission(context.Context, managedDynamicStepUpTarget, string) (managedDynamicSetupReservation, error)
-	CompleteValueAdmission(context.Context, managedDynamicStepUpTarget, string) (managedDynamicSetupReservation, error)
+	CompleteValueAdmission(context.Context, managedDynamicStepUpTarget, string, managedDynamicCustodyResult) (managedDynamicSetupReservation, error)
 }
 
 type managedDynamicSetupReservation struct {
@@ -34,6 +34,9 @@ type managedDynamicSetupReservation struct {
 	OperationRef           string
 	ValueAdmissionStarted  bool
 	ValueAdmissionComplete bool
+	BindingRef             string
+	SecretRef              string
+	GenerationRef          string
 }
 
 // managedDynamicStepUpTarget contains every authority-bearing choice that a
@@ -110,6 +113,9 @@ type managedDynamicSetupPageData struct {
 	StepUpReady                  bool
 	ValueAdmissionStarted        bool
 	ValueAdmissionComplete       bool
+	BindingRef                   string
+	SecretRef                    string
+	GenerationRef                string
 	OperationRef                 string
 	RequestID                    string
 }
@@ -134,6 +140,9 @@ func (app *App) handleManagedDynamicSetup(w http.ResponseWriter, r *http.Request
 	stepUpReady := false
 	valueAdmissionStarted := false
 	valueAdmissionComplete := false
+	bindingRef := ""
+	secretRef := ""
+	generationRef := ""
 	if proofOK && proof.Target == target {
 		reservation, reservationErr := app.managedDynamicSetup.RecoverReservation(
 			r.Context(),
@@ -147,6 +156,9 @@ func (app *App) handleManagedDynamicSetup(w http.ResponseWriter, r *http.Request
 		if stepUpReady {
 			valueAdmissionStarted = reservation.ValueAdmissionStarted
 			valueAdmissionComplete = reservation.ValueAdmissionComplete
+			bindingRef = reservation.BindingRef
+			secretRef = reservation.SecretRef
+			generationRef = reservation.GenerationRef
 		}
 	}
 	if proofOK && !stepUpReady {
@@ -176,6 +188,9 @@ func (app *App) handleManagedDynamicSetup(w http.ResponseWriter, r *http.Request
 		StepUpReady:                  stepUpReady,
 		ValueAdmissionStarted:        valueAdmissionStarted,
 		ValueAdmissionComplete:       valueAdmissionComplete,
+		BindingRef:                   bindingRef,
+		SecretRef:                    secretRef,
+		GenerationRef:                generationRef,
 		OperationRef:                 proof.OperationRef,
 		RequestID:                    requestID(r),
 	})

@@ -203,7 +203,7 @@ test("passwordless import shows Check, forgets the value, and recovers navigatio
   ).toBe(false);
 });
 
-test("dynamic import is passkey-bound, admitted once, and forgotten", async ({
+test("dynamic import is passkey-bound and encrypted once", async ({
   page,
 }) => {
   await page.goto("/__managed-browser/session?kind=dynamic");
@@ -234,7 +234,7 @@ test("dynamic import is passkey-bound, admitted once, and forgotten", async ({
   await expect(
     page.getByRole("heading", { name: "Add one value" }),
   ).toBeVisible();
-  await expect(page.getByText(/Validation only/)).toBeVisible();
+  await expect(page.getByText(/Encrypted custody only/)).toBeVisible();
   await expect(page.locator('input[name="secret_value"]')).toBeVisible();
   await expect(page.locator('input[name="secret_value"]')).toHaveAttribute(
     "type",
@@ -271,9 +271,9 @@ test("dynamic import is passkey-bound, admitted once, and forgotten", async ({
     }
   }, canary);
   await expect(
-    page.getByRole("heading", { name: "Value checked and forgotten" }),
+    page.getByRole("heading", { name: "Encrypted custody confirmed" }),
   ).toBeVisible();
-  await expect(page.getByRole("status")).toContainText("No value retained");
+  await expect(page.getByRole("status")).toContainText("No value returned");
   await expect(page.locator('input[name="secret_value"]')).toHaveCount(0);
   await expectCanariesAbsent(page, [canary]);
 
@@ -298,7 +298,7 @@ test("dynamic import is passkey-bound, admitted once, and forgotten", async ({
   expect(await duplicate.text()).not.toContain(canary);
   await page.reload();
   await expect(
-    page.getByRole("heading", { name: "Value checked and forgotten" }),
+    page.getByRole("heading", { name: "Encrypted custody confirmed" }),
   ).toBeVisible();
   await expectCanariesAbsent(page, [canary]);
 });
@@ -318,7 +318,7 @@ test("dynamic generation accepts no browser value", async ({ page }) => {
     "hidden",
   );
   await expect(
-    page.getByText(/Fresh URL-safe bytes are created and erased/),
+    page.getByText(/Fresh URL-safe bytes are created, encrypted, and erased/),
   ).toBeVisible();
 
   const accessibility = await new AxeBuilder({ page }).analyze();
@@ -328,12 +328,12 @@ test("dynamic generation accepts no browser value", async ({ page }) => {
     ),
   ).toEqual([]);
   await page
-    .getByRole("button", { name: "Generate and check once" })
+    .getByRole("button", { name: "Generate and encrypt once" })
     .click();
   await expect(
-    page.getByRole("heading", { name: "Value checked and forgotten" }),
+    page.getByRole("heading", { name: "Encrypted custody confirmed" }),
   ).toBeVisible();
-  await expect(page.getByRole("status")).toContainText("No value retained");
+  await expect(page.getByRole("status")).toContainText("No value returned");
   await expect(page.locator('input[name="secret_value"]')).toHaveCount(0);
 });
 

@@ -81,13 +81,16 @@ func (fake *fakeManagedDynamicIntentAuthority) BeginValueAdmission(ctx context.C
 	return *fake.reservation, nil
 }
 
-func (fake *fakeManagedDynamicIntentAuthority) CompleteValueAdmission(ctx context.Context, expected managedDynamicStepUpTarget, operationRef string) (managedDynamicSetupReservation, error) {
+func (fake *fakeManagedDynamicIntentAuthority) CompleteValueAdmission(ctx context.Context, expected managedDynamicStepUpTarget, operationRef string, custody managedDynamicCustodyResult) (managedDynamicSetupReservation, error) {
 	fake.completeCount++
 	inspection, err := fake.Inspect(ctx, expected.IntentRef, expected.HumanSessionRef)
 	if err != nil || managedDynamicTargetFromInspection(inspection) != expected || fake.reservation == nil || fake.reservation.OperationRef != operationRef || !fake.reservation.ValueAdmissionStarted || fake.reservation.ValueAdmissionComplete {
 		return managedDynamicSetupReservation{}, managedIntentError("managed_intent_value_admission_unavailable")
 	}
 	fake.reservation.ValueAdmissionComplete = true
+	fake.reservation.BindingRef = custody.BindingRef
+	fake.reservation.SecretRef = custody.SecretRef
+	fake.reservation.GenerationRef = custody.GenerationRef
 	return *fake.reservation, nil
 }
 
@@ -213,7 +216,7 @@ func TestManagedDynamicSetupAcceptsOnlyProofForCurrentExactTarget(t *testing.T) 
 	response := httptest.NewRecorder()
 	app.routes().ServeHTTP(response, request)
 	body := response.Body.String()
-	if response.Code != http.StatusOK || !strings.Contains(body, "Add one value") || !strings.Contains(body, "Validation only") || !strings.Contains(body, `name="secret_value"`) || !strings.Contains(body, reservation.OperationRef) || strings.Contains(body, "Confirm with passkey") {
+	if response.Code != http.StatusOK || !strings.Contains(body, "Add one value") || !strings.Contains(body, "Encrypted custody only") || !strings.Contains(body, `name="secret_value"`) || !strings.Contains(body, reservation.OperationRef) || strings.Contains(body, "Confirm with passkey") {
 		t.Fatalf("exact proof should unlock only the bounded admission form: status=%d body=%s", response.Code, body)
 	}
 	if authority.recoverCount != 1 {

@@ -201,6 +201,14 @@ pub async fn run_web_transaction_service() -> Result<()> {
     lifecycle_entry::web_transaction::run_from_env().await
 }
 
+/// Run the private dynamic-environment custody boundary.
+///
+/// This entry point can only encrypt an exact declaration-bound value and
+/// persist value-free custody metadata. It has no host-delivery integration.
+pub async fn run_dynamic_custody_service() -> Result<()> {
+    lifecycle_entry::dynamic_custody::run_from_env().await
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Command {
     Help,

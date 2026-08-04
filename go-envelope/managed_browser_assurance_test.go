@@ -117,7 +117,7 @@ func (authority *managedBrowserDynamicAuthority) BeginValueAdmission(ctx context
 	return *authority.reserved, nil
 }
 
-func (authority *managedBrowserDynamicAuthority) CompleteValueAdmission(ctx context.Context, expected managedDynamicStepUpTarget, operationRef string) (managedDynamicSetupReservation, error) {
+func (authority *managedBrowserDynamicAuthority) CompleteValueAdmission(ctx context.Context, expected managedDynamicStepUpTarget, operationRef string, custody managedDynamicCustodyResult) (managedDynamicSetupReservation, error) {
 	authority.mu.Lock()
 	defer authority.mu.Unlock()
 	inspection, err := authority.Inspect(ctx, expected.IntentRef, expected.HumanSessionRef)
@@ -125,6 +125,9 @@ func (authority *managedBrowserDynamicAuthority) CompleteValueAdmission(ctx cont
 		return managedDynamicSetupReservation{}, managedIntentError("managed_intent_value_admission_unavailable")
 	}
 	authority.reserved.ValueAdmissionComplete = true
+	authority.reserved.BindingRef = custody.BindingRef
+	authority.reserved.SecretRef = custody.SecretRef
+	authority.reserved.GenerationRef = custody.GenerationRef
 	return *authority.reserved, nil
 }
 
@@ -407,6 +410,7 @@ func newManagedBrowserHarness(t *testing.T, baseURL, authBaseURL string) *manage
 	app.managedSetup = authority
 	app.managedTxn = executor
 	app.managedDynamicSetup = dynamicAuthority
+	app.managedDynamicCustody = &fakeManagedDynamicCustodyExecutor{}
 	return &managedBrowserHarness{
 		app:              app,
 		routes:           app.routes(),

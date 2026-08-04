@@ -319,6 +319,36 @@
       "value_returned": false
     },
     {
+      "id": "dynamic-custody-lost-response-recovery",
+      "family": "workflow-recovery",
+      "stack": "go",
+      "runner": "go",
+      "working_directory": "go-envelope",
+      "target": "./...",
+      "test_name": "TestManagedDynamicLostCustodyResponseRecoversWithoutReadingValueAgain",
+      "value_returned": false
+    },
+    {
+      "id": "dynamic-age-custody-create-new",
+      "family": "host-custody",
+      "stack": "rust",
+      "runner": "cargo",
+      "working_directory": ".",
+      "target": "janus-provider-age",
+      "test_name": "tests::dynamic_custody_encrypts_once_and_never_overwrites",
+      "value_returned": false
+    },
+    {
+      "id": "dynamic-custody-preflight-idempotency",
+      "family": "intent-binding",
+      "stack": "rust",
+      "runner": "cargo",
+      "working_directory": ".",
+      "target": "janusd",
+      "test_name": "runtime::lifecycle_entry::dynamic_custody::tests::connection_encrypts_once_then_recovers_without_another_value_frame",
+      "value_returned": false
+    },
+    {
       "id": "typed-web-request-rejects-values-paths",
       "family": "intent-binding",
       "stack": "rust",

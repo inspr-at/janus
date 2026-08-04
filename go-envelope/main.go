@@ -435,18 +435,19 @@ type AuditEntry struct {
 }
 
 type App struct {
-	cfg                 Config
-	store               *Store
-	broker              *Broker
-	permits             *PermitStore
-	limiter             *RateLimiter
-	oauth               *oauth2.Config
-	verifier            *oidc.IDTokenVerifier
-	templates           *template.Template
-	managedSetup        managedSetupIntentAuthority
-	managedTxn          managedTransactionExecutor
-	managedBridge       *managedOperationBridge
-	managedDynamicSetup managedDynamicSetupIntentAuthority
+	cfg                   Config
+	store                 *Store
+	broker                *Broker
+	permits               *PermitStore
+	limiter               *RateLimiter
+	oauth                 *oauth2.Config
+	verifier              *oidc.IDTokenVerifier
+	templates             *template.Template
+	managedSetup          managedSetupIntentAuthority
+	managedTxn            managedTransactionExecutor
+	managedBridge         *managedOperationBridge
+	managedDynamicSetup   managedDynamicSetupIntentAuthority
+	managedDynamicCustody managedDynamicCustodyExecutor
 }
 
 type Session struct {
@@ -706,6 +707,7 @@ func NewApp(ctx context.Context, cfg Config, store *Store) (*App, error) {
 			return nil, fmt.Errorf("managed dynamic setup authority: %w", err)
 		}
 		app.managedDynamicSetup = dynamicSetup
+		app.managedDynamicCustody = newManagedDynamicCustodyClient(cfg.DynamicSetup.CustodySocket)
 	}
 
 	if cfg.OIDCConfigured() {

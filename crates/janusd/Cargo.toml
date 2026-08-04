@@ -32,6 +32,11 @@ name = "janusd-web-transactiond"
 path = "src/bin/janusd-web-transactiond.rs"
 test = false
 
+[[bin]]
+name = "janusd-dynamic-custodyd"
+path = "src/bin/janusd-dynamic-custodyd.rs"
+test = false
+
 [dependencies]
 anyhow = "=1.0.103"
 async-trait = "0.1"
@@ -55,6 +60,7 @@ toml = "0.8"
 zeroize = "1"
 
 [dev-dependencies]
+age = { version = "=0.12.1", default-features = false, features = ["ssh"] }
 janus-mock = { path = "../janus-mock" }
 proptest = "=1.5.0"
 tempfile = "3"
