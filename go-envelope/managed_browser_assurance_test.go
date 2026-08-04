@@ -30,7 +30,44 @@ const (
 	managedBrowserAuthAddr      = "127.0.0.1:18083"
 	managedBrowserRemoveIntent  = "intent_abcdef0123456789"
 	managedBrowserRemoveOp      = "op_abcdef0123456789"
+	managedBrowserDynamicIntent = "intent_13579bdf2468ace0"
 )
+
+type managedBrowserDynamicAuthority struct {
+	inspection managedDynamicSetupInspection
+}
+
+func newManagedBrowserDynamicAuthority(issuer string) *managedBrowserDynamicAuthority {
+	now := time.Now().UTC()
+	intent := managedDynamicSetupIntent{
+		Schema: managedDynamicSetupIntentSchema, SchemaVersion: managedDynamicContractVersion,
+		IntentRef: managedBrowserDynamicIntent, OperationKind: "create", Source: "import",
+		HostRef: "host_0123456789abcdef", ServiceRef: "svc_0123456789abcdef",
+		EnvironmentPolicyRef: "envpol_0123456789abcdef", EnvironmentPolicyFingerprint: "envpf_0123456789abcdef",
+		DeclarationFingerprint: "decl_0123456789abcdef", EnvironmentName: "DATABASE_PASSWORD",
+		HumanSessionRef: managedHumanSessionRef(issuer, managedTestSubject),
+		IssuerRef:       managedSetupExpectedIssuerRef, AudienceRef: managedSetupExpectedAudienceRef,
+		NonceRef: "nonce_13579bdf2468ace0", IssuedAtUnixSeconds: now.Add(-time.Minute).Unix(),
+		ExpiresAtUnixSeconds: now.Add(10 * time.Minute).Unix(), ReturnTarget: "pharos_service",
+	}
+	return &managedBrowserDynamicAuthority{inspection: managedDynamicSetupInspection{
+		Intent: intent,
+		Context: managedDynamicDeclarationContext{
+			ConsumerKind: "managed_service", DeliveryKind: "private_env_file",
+			DeliveryProfileRef: "delivery_0123456789abcdef", ReloadProfileRef: "reload_0123456789abcdef",
+			HealthProfileRef: "health_0123456789abcdef", AllowedSources: []string{"generated", "import"},
+			NamePolicy: "portable_secret_env_v1", MaxActiveBindings: 16, AdditionalReservedNames: []string{},
+			EnvironmentPolicyRef: intent.EnvironmentPolicyRef, EnvironmentPolicyFingerprint: intent.EnvironmentPolicyFingerprint,
+		},
+	}}
+}
+
+func (authority *managedBrowserDynamicAuthority) Inspect(_ context.Context, intentRef, humanSessionRef string) (managedDynamicSetupInspection, error) {
+	if authority.inspection.Intent.IntentRef != intentRef || authority.inspection.Intent.HumanSessionRef != humanSessionRef {
+		return managedDynamicSetupInspection{}, managedIntentError("managed_intent_wrong_user")
+	}
+	return authority.inspection, nil
+}
 
 type managedBrowserAuthority struct {
 	mu       sync.Mutex
@@ -274,6 +311,7 @@ func newManagedBrowserHarness(t *testing.T, baseURL, authBaseURL string) *manage
 		t.Fatal(err)
 	}
 	authority := newManagedBrowserAuthority(issuer)
+	dynamicAuthority := newManagedBrowserDynamicAuthority(issuer)
 	executor := &managedBrowserExecutor{}
 	authOrigin, err := url.Parse(authBaseURL)
 	if err != nil || authOrigin.Port() == "" {
@@ -308,6 +346,7 @@ func newManagedBrowserHarness(t *testing.T, baseURL, authBaseURL string) *manage
 	)
 	app.managedSetup = authority
 	app.managedTxn = executor
+	app.managedDynamicSetup = dynamicAuthority
 	return &managedBrowserHarness{
 		app:            app,
 		routes:         app.routes(),
@@ -343,6 +382,13 @@ func (harness *managedBrowserHarness) ServeHTTP(response http.ResponseWriter, re
 }
 
 func (harness *managedBrowserHarness) session(response http.ResponseWriter, request *http.Request) {
+	if request.URL.Query().Get("kind") == "dynamic" {
+		harness.executor.reset()
+		harness.writeSession(response)
+		response.Header().Set("Cache-Control", "no-store")
+		http.Redirect(response, request, "/managed-environment/setup?intent="+url.QueryEscape(managedBrowserDynamicIntent), http.StatusFound)
+		return
+	}
 	intentRef := managedTestIntentRef
 	if request.URL.Query().Get("kind") == "remove" {
 		intentRef = managedBrowserRemoveIntent
