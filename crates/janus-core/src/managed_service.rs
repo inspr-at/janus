@@ -20,8 +20,17 @@ pub const MANAGED_SERVICE_OPERATION_SCHEMA: &str = "inspr.janus.managed-service-
 pub const MANAGED_SERVICE_EVIDENCE_SCHEMA: &str = "inspr.janus.managed-service-evidence.v1";
 pub const MANAGED_SERVICE_FIXTURE_SCHEMA: &str =
     "inspr.janus.managed-service-secret-contract-fixture.v1";
+pub const MANAGED_SERVICE_DYNAMIC_CONTRACT_VERSION: u16 = 2;
+pub const MANAGED_SERVICE_DECLARATION_V2_SCHEMA: &str =
+    "inspr.janus.managed-service-declaration.v2";
+pub const MANAGED_ENVIRONMENT_BINDING_V2_SCHEMA: &str =
+    "inspr.janus.managed-environment-binding.v2";
+pub const MANAGED_DYNAMIC_ENV_FIXTURE_SCHEMA: &str =
+    "inspr.janus.managed-dynamic-env-contract-fixture.v2";
 pub const MAX_SETUP_INTENT_TTL_SECS: u64 = 300;
 pub const MAX_MANAGED_SERVICE_CONTRACT_BYTES: usize = 64 * 1024;
+pub const MAX_MANAGED_DYNAMIC_BINDINGS: u16 = 64;
+pub const MAX_MANAGED_RESERVED_ENV_NAMES: usize = 64;
 
 fn invalid_contract(detail: &'static str) -> JanusError {
     JanusError::InvalidManifest {
@@ -171,6 +180,84 @@ managed_ref_type!(
     "managed_declaration_fingerprint",
     "decl_"
 );
+managed_ref_type!(
+    /// Opaque reference to one reviewed service-level environment policy.
+    ManagedEnvironmentPolicyRef,
+    "managed_environment_policy_ref",
+    "envpol_"
+);
+managed_ref_type!(
+    /// Opaque fingerprint of one reviewed environment policy generation.
+    ManagedEnvironmentPolicyFingerprint,
+    "managed_environment_policy_fingerprint",
+    "envpf_"
+);
+managed_ref_type!(
+    /// Opaque reference to one Janus-owned dynamic environment binding.
+    ManagedEnvironmentBindingRef,
+    "managed_environment_binding_ref",
+    "bind_"
+);
+
+const RESERVED_ENV_NAMES: &[&str] = &[
+    "BASHOPTS",
+    "BASH_ENV",
+    "CDPATH",
+    "ENV",
+    "GLOBIGNORE",
+    "HOME",
+    "HOSTALIASES",
+    "IFS",
+    "JAVA_TOOL_OPTIONS",
+    "NODE_OPTIONS",
+    "OLDPWD",
+    "PATH",
+    "PERL5LIB",
+    "PERL5OPT",
+    "PROMPT_COMMAND",
+    "PS4",
+    "PWD",
+    "PYTHONHOME",
+    "PYTHONPATH",
+    "PYTHONSTARTUP",
+    "RUBYOPT",
+    "SHELL",
+    "SHELLOPTS",
+    "USER",
+    "ZDOTDIR",
+];
+const RESERVED_ENV_PREFIXES: &[&str] = &["DYLD_", "GIT_CONFIG_", "JANUS_", "LD_", "NIX_"];
+
+/// One exact portable environment-variable name admitted by the v2 policy.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ManagedEnvironmentName(String);
+
+impl ManagedEnvironmentName {
+    pub fn new(value: impl Into<String>) -> JanusResult<Self> {
+        let value = value.into();
+        let bytes = value.as_bytes();
+        let valid_shape = !bytes.is_empty()
+            && bytes.len() <= 128
+            && bytes[0].is_ascii_uppercase()
+            && bytes[1..]
+                .iter()
+                .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || *byte == b'_');
+        let reserved = RESERVED_ENV_NAMES.binary_search(&value.as_str()).is_ok()
+            || RESERVED_ENV_PREFIXES
+                .iter()
+                .any(|prefix| value.starts_with(prefix));
+        if !valid_shape || reserved {
+            return Err(JanusError::InvalidIdentifier {
+                kind: "managed_environment_name",
+            });
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
 
 fn validate_safe_text(
     kind: &'static str,
@@ -219,6 +306,23 @@ pub enum ManagedDeliveryKind {
 pub enum ManagedSecretSource {
     Generated,
     Import,
+}
+
+/// The exact environment-name grammar enforced by the v2 contract.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ManagedEnvironmentNamePolicy {
+    PortableSecretEnvV1,
+}
+
+/// Value-free lifecycle state for one dynamic environment binding.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ManagedEnvironmentBindingState {
+    Active,
+    Detached,
+    Quarantined,
+    Destroyed,
 }
 
 /// Managed secret lifecycle actions exposed to the workflow.
@@ -435,45 +539,7 @@ impl ManagedServiceDeclarationV1 {
                 "managed service declaration schema is unsupported",
             ));
         }
-        if wire.slots.is_empty() || wire.slots.len() > 64 {
-            return Err(invalid_contract(
-                "managed service declaration slot count is invalid",
-            ));
-        }
-        let mut slot_refs = BTreeSet::new();
-        let mut slots = Vec::with_capacity(wire.slots.len());
-        for mut slot in wire.slots {
-            let slot_ref = ManagedSecretSlotRef::new(slot.slot_ref)?;
-            if !slot_refs.insert(slot_ref.clone()) {
-                return Err(invalid_contract(
-                    "managed service declaration contains a duplicate slot",
-                ));
-            }
-            if slot.allowed_sources.is_empty() || slot.allowed_sources.len() > 2 {
-                return Err(invalid_contract(
-                    "managed service slot source policy is invalid",
-                ));
-            }
-            let mut sources = BTreeSet::new();
-            for source in &slot.allowed_sources {
-                if !sources.insert(*source) {
-                    return Err(invalid_contract(
-                        "managed service slot contains a duplicate source",
-                    ));
-                }
-            }
-            slot.allowed_sources.sort_unstable();
-            slots.push(ManagedSecretSlotV1 {
-                slot_ref,
-                safe_label: validate_safe_text("managed_slot_safe_label", slot.safe_label, 120)?,
-                consumer_kind: slot.consumer_kind,
-                delivery_kind: slot.delivery_kind,
-                delivery_profile_ref: ManagedDeliveryProfileRef::new(slot.delivery_profile_ref)?,
-                reload_profile_ref: ManagedReloadProfileRef::new(slot.reload_profile_ref)?,
-                health_profile_ref: ManagedHealthProfileRef::new(slot.health_profile_ref)?,
-                allowed_sources: slot.allowed_sources,
-            });
-        }
+        let slots = parse_slot_wires(wire.slots, false)?;
         Ok(Self {
             host_ref: ManagedHostRef::new(wire.host_ref)?,
             service_ref: ManagedServiceRef::new(wire.service_ref)?,
@@ -503,6 +569,396 @@ impl ManagedServiceDeclarationV1 {
 
     pub fn slots(&self) -> &[ManagedSecretSlotV1] {
         &self.slots
+    }
+}
+
+fn parse_slot_wires(
+    slots: Vec<SlotWire>,
+    allow_empty: bool,
+) -> JanusResult<Vec<ManagedSecretSlotV1>> {
+    if (!allow_empty && slots.is_empty()) || slots.len() > 64 {
+        return Err(invalid_contract(
+            "managed service declaration slot count is invalid",
+        ));
+    }
+    let mut slot_refs = BTreeSet::new();
+    let mut parsed = Vec::with_capacity(slots.len());
+    for mut slot in slots {
+        let slot_ref = ManagedSecretSlotRef::new(slot.slot_ref)?;
+        if !slot_refs.insert(slot_ref.clone()) {
+            return Err(invalid_contract(
+                "managed service declaration contains a duplicate slot",
+            ));
+        }
+        if slot.allowed_sources.is_empty() || slot.allowed_sources.len() > 2 {
+            return Err(invalid_contract(
+                "managed service slot source policy is invalid",
+            ));
+        }
+        let mut sources = BTreeSet::new();
+        for source in &slot.allowed_sources {
+            if !sources.insert(*source) {
+                return Err(invalid_contract(
+                    "managed service slot contains a duplicate source",
+                ));
+            }
+        }
+        slot.allowed_sources.sort_unstable();
+        parsed.push(ManagedSecretSlotV1 {
+            slot_ref,
+            safe_label: validate_safe_text("managed_slot_safe_label", slot.safe_label, 120)?,
+            consumer_kind: slot.consumer_kind,
+            delivery_kind: slot.delivery_kind,
+            delivery_profile_ref: ManagedDeliveryProfileRef::new(slot.delivery_profile_ref)?,
+            reload_profile_ref: ManagedReloadProfileRef::new(slot.reload_profile_ref)?,
+            health_profile_ref: ManagedHealthProfileRef::new(slot.health_profile_ref)?,
+            allowed_sources: slot.allowed_sources,
+        });
+    }
+    Ok(parsed)
+}
+
+/// Reviewed, value-free permission for Janus to add environment bindings to a service.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ManagedDynamicEnvironmentPolicyV2 {
+    environment_policy_ref: ManagedEnvironmentPolicyRef,
+    environment_policy_fingerprint: ManagedEnvironmentPolicyFingerprint,
+    consumer_kind: ManagedConsumerKind,
+    delivery_kind: ManagedDeliveryKind,
+    delivery_profile_ref: ManagedDeliveryProfileRef,
+    reload_profile_ref: ManagedReloadProfileRef,
+    health_profile_ref: ManagedHealthProfileRef,
+    allowed_sources: Vec<ManagedSecretSource>,
+    name_policy: ManagedEnvironmentNamePolicy,
+    max_active_bindings: u16,
+    additional_reserved_names: Vec<ManagedEnvironmentName>,
+}
+
+impl ManagedDynamicEnvironmentPolicyV2 {
+    fn from_wire(mut wire: DynamicEnvironmentPolicyWire) -> JanusResult<Self> {
+        if wire.allowed_sources.is_empty() || wire.allowed_sources.len() > 2 {
+            return Err(invalid_contract(
+                "managed environment policy source policy is invalid",
+            ));
+        }
+        let source_count = wire
+            .allowed_sources
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>()
+            .len();
+        if source_count != wire.allowed_sources.len() {
+            return Err(invalid_contract(
+                "managed environment policy contains a duplicate source",
+            ));
+        }
+        if wire.max_active_bindings == 0 || wire.max_active_bindings > MAX_MANAGED_DYNAMIC_BINDINGS
+        {
+            return Err(invalid_contract(
+                "managed environment policy binding capacity is invalid",
+            ));
+        }
+        if wire.additional_reserved_names.len() > MAX_MANAGED_RESERVED_ENV_NAMES {
+            return Err(invalid_contract(
+                "managed environment policy reserved-name count is invalid",
+            ));
+        }
+        let mut reserved_names = BTreeSet::new();
+        for name in wire.additional_reserved_names {
+            let name = ManagedEnvironmentName::new(name)?;
+            if !reserved_names.insert(name) {
+                return Err(invalid_contract(
+                    "managed environment policy contains a duplicate reserved name",
+                ));
+            }
+        }
+        wire.allowed_sources.sort_unstable();
+        Ok(Self {
+            environment_policy_ref: ManagedEnvironmentPolicyRef::new(wire.environment_policy_ref)?,
+            environment_policy_fingerprint: ManagedEnvironmentPolicyFingerprint::new(
+                wire.environment_policy_fingerprint,
+            )?,
+            consumer_kind: wire.consumer_kind,
+            delivery_kind: wire.delivery_kind,
+            delivery_profile_ref: ManagedDeliveryProfileRef::new(wire.delivery_profile_ref)?,
+            reload_profile_ref: ManagedReloadProfileRef::new(wire.reload_profile_ref)?,
+            health_profile_ref: ManagedHealthProfileRef::new(wire.health_profile_ref)?,
+            allowed_sources: wire.allowed_sources,
+            name_policy: wire.name_policy,
+            max_active_bindings: wire.max_active_bindings,
+            additional_reserved_names: reserved_names.into_iter().collect(),
+        })
+    }
+
+    pub fn environment_policy_ref(&self) -> &ManagedEnvironmentPolicyRef {
+        &self.environment_policy_ref
+    }
+
+    pub fn environment_policy_fingerprint(&self) -> &ManagedEnvironmentPolicyFingerprint {
+        &self.environment_policy_fingerprint
+    }
+
+    pub fn consumer_kind(&self) -> ManagedConsumerKind {
+        self.consumer_kind
+    }
+
+    pub fn delivery_kind(&self) -> ManagedDeliveryKind {
+        self.delivery_kind
+    }
+
+    pub fn delivery_profile_ref(&self) -> &ManagedDeliveryProfileRef {
+        &self.delivery_profile_ref
+    }
+
+    pub fn reload_profile_ref(&self) -> &ManagedReloadProfileRef {
+        &self.reload_profile_ref
+    }
+
+    pub fn health_profile_ref(&self) -> &ManagedHealthProfileRef {
+        &self.health_profile_ref
+    }
+
+    pub fn allowed_sources(&self) -> &[ManagedSecretSource] {
+        &self.allowed_sources
+    }
+
+    pub fn name_policy(&self) -> ManagedEnvironmentNamePolicy {
+        self.name_policy
+    }
+
+    pub fn max_active_bindings(&self) -> u16 {
+        self.max_active_bindings
+    }
+
+    pub fn additional_reserved_names(&self) -> &[ManagedEnvironmentName] {
+        &self.additional_reserved_names
+    }
+
+    pub fn admits_name(&self, name: &ManagedEnvironmentName) -> bool {
+        self.additional_reserved_names.binary_search(name).is_err()
+    }
+}
+
+/// Additive v2 declaration: fixed slots may coexist with an optional dynamic policy.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ManagedServiceDeclarationV2 {
+    host_ref: ManagedHostRef,
+    service_ref: ManagedServiceRef,
+    declaration_fingerprint: ManagedDeclarationFingerprint,
+    slots: Vec<ManagedSecretSlotV1>,
+    dynamic_environment_policy: Option<ManagedDynamicEnvironmentPolicyV2>,
+}
+
+impl ManagedServiceDeclarationV2 {
+    pub fn parse_json(input: &str) -> JanusResult<Self> {
+        let wire: DeclarationV2Wire = parse_json(
+            input,
+            "managed service v2 declaration JSON is invalid or oversized",
+        )?;
+        Self::from_wire(wire)
+    }
+
+    fn from_wire(wire: DeclarationV2Wire) -> JanusResult<Self> {
+        if wire.schema != MANAGED_SERVICE_DECLARATION_V2_SCHEMA
+            || wire.schema_version != MANAGED_SERVICE_DYNAMIC_CONTRACT_VERSION
+        {
+            return Err(invalid_contract(
+                "managed service v2 declaration schema is unsupported",
+            ));
+        }
+        if wire.slots.is_empty() && wire.dynamic_environment_policy.is_none() {
+            return Err(invalid_contract(
+                "managed service v2 declaration contains no secret capability",
+            ));
+        }
+        Ok(Self {
+            host_ref: ManagedHostRef::new(wire.host_ref)?,
+            service_ref: ManagedServiceRef::new(wire.service_ref)?,
+            declaration_fingerprint: ManagedDeclarationFingerprint::new(
+                wire.declaration_fingerprint,
+            )?,
+            slots: parse_slot_wires(wire.slots, true)?,
+            dynamic_environment_policy: wire
+                .dynamic_environment_policy
+                .map(ManagedDynamicEnvironmentPolicyV2::from_wire)
+                .transpose()?,
+        })
+    }
+
+    pub fn to_json(&self) -> JanusResult<String> {
+        serde_json::to_string_pretty(&DeclarationV2Wire::from(self))
+            .map_err(|_| invalid_contract("managed service v2 declaration serialization failed"))
+    }
+
+    pub fn host_ref(&self) -> &ManagedHostRef {
+        &self.host_ref
+    }
+
+    pub fn service_ref(&self) -> &ManagedServiceRef {
+        &self.service_ref
+    }
+
+    pub fn declaration_fingerprint(&self) -> &ManagedDeclarationFingerprint {
+        &self.declaration_fingerprint
+    }
+
+    pub fn slots(&self) -> &[ManagedSecretSlotV1] {
+        &self.slots
+    }
+
+    pub fn dynamic_environment_policy(&self) -> Option<&ManagedDynamicEnvironmentPolicyV2> {
+        self.dynamic_environment_policy.as_ref()
+    }
+}
+
+/// One value-free dynamic environment binding owned by Janus.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ManagedEnvironmentBindingV2 {
+    binding_ref: ManagedEnvironmentBindingRef,
+    host_ref: ManagedHostRef,
+    service_ref: ManagedServiceRef,
+    environment_policy_ref: ManagedEnvironmentPolicyRef,
+    environment_policy_fingerprint: ManagedEnvironmentPolicyFingerprint,
+    declaration_fingerprint: ManagedDeclarationFingerprint,
+    secret_ref: ManagedSecretRef,
+    generation_ref: ManagedGenerationRef,
+    environment_name: ManagedEnvironmentName,
+    source: ManagedSecretSource,
+    state: ManagedEnvironmentBindingState,
+    created_at_unix_secs: u64,
+    updated_at_unix_secs: u64,
+    retired_at_unix_secs: Option<u64>,
+}
+
+impl ManagedEnvironmentBindingV2 {
+    pub fn parse_json(input: &str) -> JanusResult<Self> {
+        let wire: EnvironmentBindingWire = parse_json(
+            input,
+            "managed environment binding JSON is invalid or oversized",
+        )?;
+        Self::from_wire(wire)
+    }
+
+    fn from_wire(wire: EnvironmentBindingWire) -> JanusResult<Self> {
+        if wire.schema != MANAGED_ENVIRONMENT_BINDING_V2_SCHEMA
+            || wire.schema_version != MANAGED_SERVICE_DYNAMIC_CONTRACT_VERSION
+        {
+            return Err(invalid_contract(
+                "managed environment binding schema is unsupported",
+            ));
+        }
+        if wire.value_returned
+            || wire.created_at_unix_secs == 0
+            || wire.updated_at_unix_secs < wire.created_at_unix_secs
+        {
+            return Err(invalid_contract(
+                "managed environment binding metadata is invalid",
+            ));
+        }
+        match (wire.state, wire.retired_at_unix_secs) {
+            (ManagedEnvironmentBindingState::Active, None) => {}
+            (ManagedEnvironmentBindingState::Active, Some(_)) | (_, None) => {
+                return Err(invalid_contract(
+                    "managed environment binding lifecycle is invalid",
+                ));
+            }
+            (_, Some(retired_at))
+                if retired_at < wire.created_at_unix_secs
+                    || retired_at > wire.updated_at_unix_secs =>
+            {
+                return Err(invalid_contract(
+                    "managed environment binding lifecycle is invalid",
+                ));
+            }
+            (_, Some(_)) => {}
+        }
+        Ok(Self {
+            binding_ref: ManagedEnvironmentBindingRef::new(wire.binding_ref)?,
+            host_ref: ManagedHostRef::new(wire.host_ref)?,
+            service_ref: ManagedServiceRef::new(wire.service_ref)?,
+            environment_policy_ref: ManagedEnvironmentPolicyRef::new(wire.environment_policy_ref)?,
+            environment_policy_fingerprint: ManagedEnvironmentPolicyFingerprint::new(
+                wire.environment_policy_fingerprint,
+            )?,
+            declaration_fingerprint: ManagedDeclarationFingerprint::new(
+                wire.declaration_fingerprint,
+            )?,
+            secret_ref: ManagedSecretRef::new(wire.secret_ref)?,
+            generation_ref: ManagedGenerationRef::new(wire.generation_ref)?,
+            environment_name: ManagedEnvironmentName::new(wire.environment_name)?,
+            source: wire.source,
+            state: wire.state,
+            created_at_unix_secs: wire.created_at_unix_secs,
+            updated_at_unix_secs: wire.updated_at_unix_secs,
+            retired_at_unix_secs: wire.retired_at_unix_secs,
+        })
+    }
+
+    pub fn to_json(&self) -> JanusResult<String> {
+        serde_json::to_string_pretty(&EnvironmentBindingWire::from(self))
+            .map_err(|_| invalid_contract("managed environment binding serialization failed"))
+    }
+
+    pub fn validate_against(&self, declaration: &ManagedServiceDeclarationV2) -> JanusResult<()> {
+        let policy = declaration.dynamic_environment_policy().ok_or_else(|| {
+            invalid_contract("managed environment binding has no declared dynamic policy")
+        })?;
+        if self.host_ref != declaration.host_ref
+            || self.service_ref != declaration.service_ref
+            || self.declaration_fingerprint != declaration.declaration_fingerprint
+            || self.environment_policy_ref != policy.environment_policy_ref
+            || self.environment_policy_fingerprint != policy.environment_policy_fingerprint
+            || !policy.allowed_sources.contains(&self.source)
+            || !policy.admits_name(&self.environment_name)
+        {
+            return Err(invalid_contract(
+                "managed environment binding does not match its declaration",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn binding_ref(&self) -> &ManagedEnvironmentBindingRef {
+        &self.binding_ref
+    }
+    pub fn host_ref(&self) -> &ManagedHostRef {
+        &self.host_ref
+    }
+    pub fn service_ref(&self) -> &ManagedServiceRef {
+        &self.service_ref
+    }
+    pub fn environment_policy_ref(&self) -> &ManagedEnvironmentPolicyRef {
+        &self.environment_policy_ref
+    }
+    pub fn environment_policy_fingerprint(&self) -> &ManagedEnvironmentPolicyFingerprint {
+        &self.environment_policy_fingerprint
+    }
+    pub fn declaration_fingerprint(&self) -> &ManagedDeclarationFingerprint {
+        &self.declaration_fingerprint
+    }
+    pub fn secret_ref(&self) -> &ManagedSecretRef {
+        &self.secret_ref
+    }
+    pub fn generation_ref(&self) -> &ManagedGenerationRef {
+        &self.generation_ref
+    }
+    pub fn environment_name(&self) -> &ManagedEnvironmentName {
+        &self.environment_name
+    }
+    pub fn source(&self) -> ManagedSecretSource {
+        self.source
+    }
+    pub fn state(&self) -> ManagedEnvironmentBindingState {
+        self.state
+    }
+    pub fn created_at_unix_secs(&self) -> u64 {
+        self.created_at_unix_secs
+    }
+    pub fn updated_at_unix_secs(&self) -> u64 {
+        self.updated_at_unix_secs
+    }
+    pub fn retired_at_unix_secs(&self) -> Option<u64> {
+        self.retired_at_unix_secs
     }
 }
 
@@ -1264,20 +1720,139 @@ impl From<&ManagedServiceDeclarationV1> for DeclarationWire {
             host_ref: value.host_ref.as_str().to_string(),
             service_ref: value.service_ref.as_str().to_string(),
             declaration_fingerprint: value.declaration_fingerprint.as_str().to_string(),
-            slots: value
-                .slots
+            slots: value.slots.iter().map(slot_wire_from).collect(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct DeclarationV2Wire {
+    schema: String,
+    schema_version: u16,
+    host_ref: String,
+    service_ref: String,
+    declaration_fingerprint: String,
+    slots: Vec<SlotWire>,
+    dynamic_environment_policy: Option<DynamicEnvironmentPolicyWire>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct DynamicEnvironmentPolicyWire {
+    environment_policy_ref: String,
+    environment_policy_fingerprint: String,
+    consumer_kind: ManagedConsumerKind,
+    delivery_kind: ManagedDeliveryKind,
+    delivery_profile_ref: String,
+    reload_profile_ref: String,
+    health_profile_ref: String,
+    allowed_sources: Vec<ManagedSecretSource>,
+    name_policy: ManagedEnvironmentNamePolicy,
+    max_active_bindings: u16,
+    additional_reserved_names: Vec<String>,
+}
+
+impl From<&ManagedDynamicEnvironmentPolicyV2> for DynamicEnvironmentPolicyWire {
+    fn from(value: &ManagedDynamicEnvironmentPolicyV2) -> Self {
+        Self {
+            environment_policy_ref: value.environment_policy_ref.as_str().to_string(),
+            environment_policy_fingerprint: value
+                .environment_policy_fingerprint
+                .as_str()
+                .to_string(),
+            consumer_kind: value.consumer_kind,
+            delivery_kind: value.delivery_kind,
+            delivery_profile_ref: value.delivery_profile_ref.as_str().to_string(),
+            reload_profile_ref: value.reload_profile_ref.as_str().to_string(),
+            health_profile_ref: value.health_profile_ref.as_str().to_string(),
+            allowed_sources: value.allowed_sources.clone(),
+            name_policy: value.name_policy,
+            max_active_bindings: value.max_active_bindings,
+            additional_reserved_names: value
+                .additional_reserved_names
                 .iter()
-                .map(|slot| SlotWire {
-                    slot_ref: slot.slot_ref.as_str().to_string(),
-                    safe_label: slot.safe_label.clone(),
-                    consumer_kind: slot.consumer_kind,
-                    delivery_kind: slot.delivery_kind,
-                    delivery_profile_ref: slot.delivery_profile_ref.as_str().to_string(),
-                    reload_profile_ref: slot.reload_profile_ref.as_str().to_string(),
-                    health_profile_ref: slot.health_profile_ref.as_str().to_string(),
-                    allowed_sources: slot.allowed_sources.clone(),
-                })
+                .map(|name| name.as_str().to_string())
                 .collect(),
+        }
+    }
+}
+
+fn slot_wire_from(slot: &ManagedSecretSlotV1) -> SlotWire {
+    SlotWire {
+        slot_ref: slot.slot_ref.as_str().to_string(),
+        safe_label: slot.safe_label.clone(),
+        consumer_kind: slot.consumer_kind,
+        delivery_kind: slot.delivery_kind,
+        delivery_profile_ref: slot.delivery_profile_ref.as_str().to_string(),
+        reload_profile_ref: slot.reload_profile_ref.as_str().to_string(),
+        health_profile_ref: slot.health_profile_ref.as_str().to_string(),
+        allowed_sources: slot.allowed_sources.clone(),
+    }
+}
+
+impl From<&ManagedServiceDeclarationV2> for DeclarationV2Wire {
+    fn from(value: &ManagedServiceDeclarationV2) -> Self {
+        Self {
+            schema: MANAGED_SERVICE_DECLARATION_V2_SCHEMA.to_string(),
+            schema_version: MANAGED_SERVICE_DYNAMIC_CONTRACT_VERSION,
+            host_ref: value.host_ref.as_str().to_string(),
+            service_ref: value.service_ref.as_str().to_string(),
+            declaration_fingerprint: value.declaration_fingerprint.as_str().to_string(),
+            slots: value.slots.iter().map(slot_wire_from).collect(),
+            dynamic_environment_policy: value
+                .dynamic_environment_policy
+                .as_ref()
+                .map(DynamicEnvironmentPolicyWire::from),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct EnvironmentBindingWire {
+    schema: String,
+    schema_version: u16,
+    binding_ref: String,
+    host_ref: String,
+    service_ref: String,
+    environment_policy_ref: String,
+    environment_policy_fingerprint: String,
+    declaration_fingerprint: String,
+    secret_ref: String,
+    generation_ref: String,
+    environment_name: String,
+    source: ManagedSecretSource,
+    state: ManagedEnvironmentBindingState,
+    created_at_unix_secs: u64,
+    updated_at_unix_secs: u64,
+    retired_at_unix_secs: Option<u64>,
+    value_returned: bool,
+}
+
+impl From<&ManagedEnvironmentBindingV2> for EnvironmentBindingWire {
+    fn from(value: &ManagedEnvironmentBindingV2) -> Self {
+        Self {
+            schema: MANAGED_ENVIRONMENT_BINDING_V2_SCHEMA.to_string(),
+            schema_version: MANAGED_SERVICE_DYNAMIC_CONTRACT_VERSION,
+            binding_ref: value.binding_ref.as_str().to_string(),
+            host_ref: value.host_ref.as_str().to_string(),
+            service_ref: value.service_ref.as_str().to_string(),
+            environment_policy_ref: value.environment_policy_ref.as_str().to_string(),
+            environment_policy_fingerprint: value
+                .environment_policy_fingerprint
+                .as_str()
+                .to_string(),
+            declaration_fingerprint: value.declaration_fingerprint.as_str().to_string(),
+            secret_ref: value.secret_ref.as_str().to_string(),
+            generation_ref: value.generation_ref.as_str().to_string(),
+            environment_name: value.environment_name.as_str().to_string(),
+            source: value.source,
+            state: value.state,
+            created_at_unix_secs: value.created_at_unix_secs,
+            updated_at_unix_secs: value.updated_at_unix_secs,
+            retired_at_unix_secs: value.retired_at_unix_secs,
+            value_returned: false,
         }
     }
 }
@@ -1555,6 +2130,36 @@ pub fn parse_managed_service_contract_fixture(
         ));
     }
     Ok((declaration, intent, operation, evidence))
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DynamicEnvironmentFixtureWire {
+    schema: String,
+    schema_version: u16,
+    declaration: DeclarationV2Wire,
+    binding: EnvironmentBindingWire,
+}
+
+/// Parse and cross-check the canonical Janus-only dynamic environment contract fixture.
+pub fn parse_managed_dynamic_environment_contract_fixture(
+    input: &str,
+) -> JanusResult<(ManagedServiceDeclarationV2, ManagedEnvironmentBindingV2)> {
+    let fixture: DynamicEnvironmentFixtureWire = parse_json(
+        input,
+        "managed dynamic environment fixture JSON is invalid or oversized",
+    )?;
+    if fixture.schema != MANAGED_DYNAMIC_ENV_FIXTURE_SCHEMA
+        || fixture.schema_version != MANAGED_SERVICE_DYNAMIC_CONTRACT_VERSION
+    {
+        return Err(invalid_contract(
+            "managed dynamic environment fixture schema is unsupported",
+        ));
+    }
+    let declaration = ManagedServiceDeclarationV2::from_wire(fixture.declaration)?;
+    let binding = ManagedEnvironmentBindingV2::from_wire(fixture.binding)?;
+    binding.validate_against(&declaration)?;
+    Ok((declaration, binding))
 }
 
 #[cfg(test)]

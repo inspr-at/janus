@@ -1,0 +1,64 @@
+{
+  "schema": "inspr.janus.managed-dynamic-env-contract-fixture.v2",
+  "schema_version": 2,
+  "declaration": {
+    "schema": "inspr.janus.managed-service-declaration.v2",
+    "schema_version": 2,
+    "host_ref": "host_7f94a1c8e912",
+    "service_ref": "svc_24b7c8f0aa19",
+    "declaration_fingerprint": "decl_51268e2b772a",
+    "slots": [
+      {
+        "slot_ref": "slot_79a5fd2468bc",
+        "safe_label": "Admin password",
+        "consumer_kind": "managed_service",
+        "delivery_kind": "private_env_file",
+        "delivery_profile_ref": "delivery_2ed71ad75c98",
+        "reload_profile_ref": "reload_5e776ec5d9a1",
+        "health_profile_ref": "health_84c12f390b2a",
+        "allowed_sources": [
+          "generated",
+          "import"
+        ]
+      }
+    ],
+    "dynamic_environment_policy": {
+      "environment_policy_ref": "envpol_41e6720bc591",
+      "environment_policy_fingerprint": "envpf_3f8d9a061c42",
+      "consumer_kind": "managed_service",
+      "delivery_kind": "private_env_file",
+      "delivery_profile_ref": "delivery_2ed71ad75c98",
+      "reload_profile_ref": "reload_5e776ec5d9a1",
+      "health_profile_ref": "health_84c12f390b2a",
+      "allowed_sources": [
+        "generated",
+        "import"
+      ],
+      "name_policy": "portable_secret_env_v1",
+      "max_active_bindings": 32,
+      "additional_reserved_names": [
+        "DATABASE_URL",
+        "TRUSTED_PROXIES"
+      ]
+    }
+  },
+  "binding": {
+    "schema": "inspr.janus.managed-environment-binding.v2",
+    "schema_version": 2,
+    "binding_ref": "bind_f81c29a6307d",
+    "host_ref": "host_7f94a1c8e912",
+    "service_ref": "svc_24b7c8f0aa19",
+    "environment_policy_ref": "envpol_41e6720bc591",
+    "environment_policy_fingerprint": "envpf_3f8d9a061c42",
+    "declaration_fingerprint": "decl_51268e2b772a",
+    "secret_ref": "sec_example0001",
+    "generation_ref": "gen_d628b7f3e114",
+    "environment_name": "HOME_ASSISTANT_TOKEN",
+    "source": "import",
+    "state": "active",
+    "created_at_unix_secs": 1785916800,
+    "updated_at_unix_secs": 1785916815,
+    "retired_at_unix_secs": null,
+    "value_returned": false
+  }
+}
