@@ -251,11 +251,27 @@ func newManagedHTTPIntentFetcher(origin, token string, transport http.RoundTripp
 }
 
 func (fetcher *managedHTTPIntentFetcher) Fetch(ctx context.Context, intentRef string) (managedSignedIntent, error) {
+	return fetcher.fetch(
+		ctx,
+		intentRef,
+		"/internal/managed-service-setup-intents/",
+		managedIntentDenialSchema,
+		managedIntentContractVersion,
+	)
+}
+
+func (fetcher *managedHTTPIntentFetcher) fetch(
+	ctx context.Context,
+	intentRef string,
+	endpointPrefix string,
+	denialSchema string,
+	contractVersion int,
+) (managedSignedIntent, error) {
 	if !validManagedRef("intent_", intentRef) {
 		return managedSignedIntent{}, managedIntentError("managed_intent_unknown")
 	}
 	target := *fetcher.origin
-	target.Path = "/internal/managed-service-setup-intents/" + intentRef
+	target.Path = endpointPrefix + intentRef
 	target.RawPath = ""
 	target.RawQuery = ""
 	target.Fragment = ""
@@ -265,6 +281,8 @@ func (fetcher *managedHTTPIntentFetcher) Fetch(ctx context.Context, intentRef st
 	}
 	request.Header.Set("Authorization", "Bearer "+fetcher.token)
 	request.Header.Set("Accept", "application/json")
+	request.Header.Set("Accept-Encoding", "identity")
+	request.Header.Set("Cache-Control", "no-store")
 	response, err := fetcher.client.Do(request)
 	if err != nil {
 		return managedSignedIntent{}, managedIntentError("managed_intent_pharos_unavailable")
@@ -283,8 +301,8 @@ func (fetcher *managedHTTPIntentFetcher) Fetch(ctx context.Context, intentRef st
 			ValueReturned bool   `json:"value_returned"`
 		}
 		if decodeStrictJSON(raw, &denial) == nil &&
-			denial.Schema == managedIntentDenialSchema &&
-			denial.SchemaVersion == managedIntentContractVersion &&
+			denial.Schema == denialSchema &&
+			denial.SchemaVersion == contractVersion &&
 			denial.Outcome == "denied" &&
 			!denial.ValueReturned &&
 			validManagedDenialReason(denial.ReasonCode) {

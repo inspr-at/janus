@@ -78,6 +78,7 @@ type Config struct {
 	RolePolicy    RolePolicy
 	ScopePolicy   ScopePolicy
 	ManagedSetup  *managedSetupRuntimeConfig
+	DynamicSetup  *managedDynamicSetupRuntimeConfig
 }
 
 func (c Config) OIDCConfigured() bool {
@@ -656,6 +657,11 @@ func loadConfig() (Config, error) {
 		return cfg, err
 	}
 	cfg.ManagedSetup = managedSetup
+	dynamicSetup, err := loadManagedDynamicSetupRuntimeConfigFromEnv()
+	if err != nil {
+		return cfg, err
+	}
+	cfg.DynamicSetup = dynamicSetup
 
 	if _, err := url.ParseRequestURI(cfg.PublicURL); err != nil {
 		return cfg, fmt.Errorf("JANUS_PUBLIC_URL is invalid: %w", err)
@@ -693,6 +699,13 @@ func NewApp(ctx context.Context, cfg Config, store *Store) (*App, error) {
 		app.managedTxn = bridge
 		app.managedBridge = bridge
 		go bridge.Run(ctx)
+	}
+	if cfg.DynamicSetup != nil {
+		dynamicSetup, err := newManagedDynamicSetupAuthority(*cfg.DynamicSetup, nil)
+		if err != nil {
+			return nil, fmt.Errorf("managed dynamic setup authority: %w", err)
+		}
+		app.managedDynamicSetup = dynamicSetup
 	}
 
 	if cfg.OIDCConfigured() {

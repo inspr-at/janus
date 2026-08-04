@@ -19,9 +19,8 @@ const (
 	managedDynamicLoginIntentDomain = "inspr.janus.managed-dynamic-login-intent.v2"
 )
 
-// managedDynamicSetupIntentAuthority is intentionally not wired by production
-// configuration yet. A later integration slice may provide a signed-envelope
-// fetcher; until then, the route is present but fails closed.
+// managedDynamicSetupIntentAuthority is wired only by the dedicated, complete
+// v2 runtime configuration. Existing v1 setup never enables this capability.
 type managedDynamicSetupIntentAuthority interface {
 	Inspect(context.Context, string, string) (managedDynamicSetupInspection, error)
 }
