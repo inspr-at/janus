@@ -839,8 +839,12 @@ func validateManagedSetupIntent(intent managedSetupIntent) error {
 }
 
 func managedIntentSignatureMessage(keyID string, payload []byte) []byte {
-	message := make([]byte, 0, len(managedIntentSignatureDomain)+len(keyID)+len(payload)+2)
-	message = append(message, managedIntentSignatureDomain...)
+	return managedIntentSignatureMessageForDomain(managedIntentSignatureDomain, keyID, payload)
+}
+
+func managedIntentSignatureMessageForDomain(domain, keyID string, payload []byte) []byte {
+	message := make([]byte, 0, len(domain)+len(keyID)+len(payload)+2)
+	message = append(message, domain...)
 	message = append(message, 0)
 	message = append(message, keyID...)
 	message = append(message, 0)
