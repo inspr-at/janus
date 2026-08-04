@@ -14,6 +14,27 @@ The executable Rust contract lives in
 `crates/janus-core/src/managed_service.rs`. The canonical cross-repository
 fixture is `contracts/managed-service-secret-contract-v1.json`.
 
+## Dynamic environment bindings (v2 contract only)
+
+The additive v2 declaration may include a reviewed dynamic-environment policy
+for a managed service. The policy fixes the host, service, delivery, reload,
+health, source, environment-name, capacity, and reserved-name boundaries. A
+binding must match the exact declaration and policy fingerprints and carries
+only opaque refs, lifecycle metadata, and `value_returned=false`—never a secret
+value, ciphertext, path, command, callback, permit, or request body.
+
+Environment names are accepted exactly as supplied only when they match
+`[A-Z][A-Z0-9_]{0,127}`. Janus rejects process-control names and prefixes such
+as `PATH`, `BASH_ENV`, `NODE_OPTIONS`, `PYTHONPATH`, `DYLD_`, `GIT_CONFIG_`,
+`JANUS_`, `LD_`, and `NIX_`, plus the service's sorted, unique reserved names.
+There is no case folding or other name normalization.
+
+This slice defines and validates the Janus contract only. It does not add a
+network route, browser flow, host materialization, deployment behavior, or a
+Pharos/nixcfg change. Its canonical fixture is
+`contracts/managed-service-dynamic-env-contract-v2.json`; the v1 parser and
+fixture remain unchanged.
+
 ## Authority and state
 
 No one system may claim an end-to-end outcome by itself.
