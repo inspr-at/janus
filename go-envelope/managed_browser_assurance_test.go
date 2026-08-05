@@ -414,6 +414,7 @@ func newManagedBrowserHarness(t *testing.T, baseURL, authBaseURL string) *manage
 	app.managedDynamicSetup = dynamicAuthority
 	app.managedDynamicCustody = &fakeManagedDynamicCustodyExecutor{}
 	app.managedDynamicDelivery = &fakeManagedDynamicDeliveryExecutor{}
+	app.managedDynamicTransport = &fakeManagedDynamicTransport{status: managedDynamicActivationActive}
 	return &managedBrowserHarness{
 		app:              app,
 		routes:           app.routes(),

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -140,6 +141,8 @@ func managedDynamicAdmissionFixture(
 
 func TestManagedDynamicImportReachesEncryptedCustodyOnce(t *testing.T) {
 	app, authority, session, sessionCookie, proofCookie := managedDynamicAdmissionFixture(t, "import")
+	transport := &fakeManagedDynamicTransport{status: managedDynamicActivationPending}
+	app.managedDynamicTransport = transport
 	canary := "bounded-once-canary"
 	request, _ := managedDynamicAdmissionRequest(t, app, session, sessionCookie, proofCookie, "import", url.QueryEscape(canary))
 	response := httptest.NewRecorder()
@@ -160,8 +163,34 @@ func TestManagedDynamicImportReachesEncryptedCustodyOnce(t *testing.T) {
 	viewResponse := httptest.NewRecorder()
 	app.routes().ServeHTTP(viewResponse, view)
 	body := viewResponse.Body.String()
-	if viewResponse.Code != http.StatusOK || !strings.Contains(body, "Host-bound package prepared") || !strings.Contains(body, "No value or packet returned") || !strings.Contains(body, authority.reservation.PackageRef) || strings.Contains(body, `name="secret_value"`) || strings.Contains(body, canary) {
+	if viewResponse.Code != http.StatusOK || !strings.Contains(body, "Waiting for the host") || strings.Contains(body, "Environment variable active") || !strings.Contains(body, "No value or packet returned") || !strings.Contains(body, authority.reservation.PackageRef) || strings.Contains(body, `name="secret_value"`) || strings.Contains(body, canary) {
 		t.Fatalf("value-free admission receipt is invalid: status=%d body=%s", viewResponse.Code, body)
+	}
+	if transport.statusQuery.OperationRef != authority.reservation.OperationRef || transport.statusQuery.PackageRef != authority.reservation.PackageRef || transport.statusQuery.ReloadProfileRef != authority.inspection.Context.ReloadProfileRef || transport.statusQuery.HealthProfileRef != authority.inspection.Context.HealthProfileRef {
+		t.Fatalf("activation lookup was not exact: %#v", transport.statusQuery)
+	}
+
+	transport.status = managedDynamicActivationActive
+	activeResponse := httptest.NewRecorder()
+	app.routes().ServeHTTP(activeResponse, view)
+	activeBody := activeResponse.Body.String()
+	if activeResponse.Code != http.StatusOK || !strings.Contains(activeBody, "Environment variable active") || !strings.Contains(activeBody, "fresh healthy observation") || strings.Contains(activeBody, canary) {
+		t.Fatalf("exact host activation was not surfaced value-free: status=%d body=%s", activeResponse.Code, activeBody)
+	}
+
+	transport.status = managedDynamicActivationExpired
+	expiredResponse := httptest.NewRecorder()
+	app.routes().ServeHTTP(expiredResponse, view)
+	if expiredResponse.Code != http.StatusOK || !strings.Contains(expiredResponse.Body.String(), "Package expired before activation") || strings.Contains(expiredResponse.Body.String(), "Environment variable active") {
+		t.Fatalf("expired package was presented as active: status=%d body=%s", expiredResponse.Code, expiredResponse.Body.String())
+	}
+
+	transport.status = ""
+	transport.statusErr = errors.New("dynamic transport unavailable")
+	unavailableResponse := httptest.NewRecorder()
+	app.routes().ServeHTTP(unavailableResponse, view)
+	if unavailableResponse.Code != http.StatusOK || !strings.Contains(unavailableResponse.Body.String(), "Activation could not be checked") || strings.Contains(unavailableResponse.Body.String(), "Environment variable active") {
+		t.Fatalf("unavailable activation evidence was presented as active: status=%d body=%s", unavailableResponse.Code, unavailableResponse.Body.String())
 	}
 }
 

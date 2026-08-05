@@ -129,6 +129,51 @@ func TestManagedDynamicTransportClientUsesExactValueFreeFrames(t *testing.T) {
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
+
+	clientConnection, serverConnection = net.Pipe()
+	client.dial = func(context.Context, string, string) (net.Conn, error) { return clientConnection, nil }
+	go func() {
+		defer serverConnection.Close()
+		body, err := readManagedTransactionFrame(serverConnection)
+		if err != nil {
+			done <- err
+			return
+		}
+		var request managedDynamicTransportStatusRequest
+		if decodeStrictJSON(body, &request) != nil || request.Action != "status" || request.Query.OperationRef != dynamicTestOperation || request.Query.PacketReturned || request.Query.ValueReturned {
+			done <- errors.New("status frame was not exact and value-free")
+			return
+		}
+		query := dynamicTestActivationQuery()
+		response := managedDynamicTransportResponse{
+			Schema: managedDynamicTransportResponseSchema, SchemaVersion: managedDynamicTransportSchemaVersion, Action: "status",
+			HostRef: &query.HostRef, ServiceRef: &query.ServiceRef,
+			EnvironmentPolicyRef: &query.EnvironmentPolicyRef, OperationRef: &query.OperationRef,
+			PackageRef: &query.PackageRef, EnvelopeRef: &query.EnvelopeRef,
+			BindingRef: &query.BindingRef, GenerationRef: &query.GenerationRef,
+			ReloadProfileRef: &query.ReloadProfileRef, HealthProfileRef: &query.HealthProfileRef,
+			Phase: "active", ReasonCode: "dynamic_transport_environment_active",
+		}
+		encoded, _ := json.Marshal(response)
+		done <- writeManagedTransactionFrame(serverConnection, encoded)
+	}()
+	status, err := client.Status(t.Context(), dynamicTestActivationQuery())
+	if err != nil || status != managedDynamicActivationActive {
+		t.Fatalf("exact activation status failed: %q %v", status, err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func dynamicTestActivationQuery() managedDynamicActivationQuery {
+	return managedDynamicActivationQuery{
+		HostRef: dynamicTestHost, ServiceRef: dynamicTestService,
+		EnvironmentPolicyRef: dynamicTestPolicy, OperationRef: dynamicTestOperation,
+		PackageRef: dynamicTestPackage, EnvelopeRef: dynamicTestEnvelope,
+		BindingRef: dynamicTestBinding, GenerationRef: dynamicTestGeneration,
+		ReloadProfileRef: dynamicTestReload, HealthProfileRef: dynamicTestHealth,
+	}
 }
 
 func TestManagedDynamicTransportClientAcceptsPacketFramesAboveTheControlLimit(t *testing.T) {
@@ -172,8 +217,11 @@ type fakeManagedDynamicTransport struct {
 	claim          *managedDynamicPackageClaim
 	claimedHost    string
 	receipt        managedDynamicActivationReceipt
+	statusQuery    managedDynamicActivationQuery
+	status         managedDynamicActivationStatus
 	claimErr       error
 	acknowledgeErr error
+	statusErr      error
 }
 
 func (fake *fakeManagedDynamicTransport) Claim(_ context.Context, hostRef string) (*managedDynamicPackageClaim, error) {
@@ -184,6 +232,11 @@ func (fake *fakeManagedDynamicTransport) Claim(_ context.Context, hostRef string
 func (fake *fakeManagedDynamicTransport) Acknowledge(_ context.Context, receipt managedDynamicActivationReceipt) error {
 	fake.receipt = receipt
 	return fake.acknowledgeErr
+}
+
+func (fake *fakeManagedDynamicTransport) Status(_ context.Context, query managedDynamicActivationQuery) (managedDynamicActivationStatus, error) {
+	fake.statusQuery = query
+	return fake.status, fake.statusErr
 }
 
 func TestManagedDynamicHostRoutesBindTokenHostAndReceipt(t *testing.T) {

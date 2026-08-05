@@ -399,6 +399,16 @@
       "value_returned": false
     },
     {
+      "id": "dynamic-ui-exact-activation-status",
+      "family": "workflow-recovery",
+      "stack": "go",
+      "runner": "go",
+      "working_directory": "go-envelope",
+      "target": "./...",
+      "test_name": "TestManagedDynamicImportReachesEncryptedCustodyOnce",
+      "value_returned": false
+    },
+    {
       "id": "dynamic-host-agent-health-gated-active-receipt",
       "family": "workflow-recovery",
       "stack": "rust",
