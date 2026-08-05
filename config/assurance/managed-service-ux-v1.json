@@ -389,6 +389,56 @@
       "value_returned": false
     },
     {
+      "id": "dynamic-host-replacement-commit",
+      "family": "workflow-recovery",
+      "stack": "rust",
+      "runner": "cargo",
+      "working_directory": ".",
+      "target": "janus-host",
+      "test_name": "tests::dynamic_replacement_commit_is_idempotent_and_restores_only_the_new_generation",
+      "value_returned": false
+    },
+    {
+      "id": "dynamic-host-unconfirmed-replacement-rollback",
+      "family": "workflow-recovery",
+      "stack": "rust",
+      "runner": "cargo",
+      "working_directory": ".",
+      "target": "janus-host",
+      "test_name": "tests::dynamic_restore_rolls_back_an_unconfirmed_replacement",
+      "value_returned": false
+    },
+    {
+      "id": "dynamic-host-interrupted-replacement-recovery",
+      "family": "workflow-recovery",
+      "stack": "rust",
+      "runner": "cargo",
+      "working_directory": ".",
+      "target": "janus-host",
+      "test_name": "tests::dynamic_restore_finishes_interrupted_replacement_commit_and_rollback",
+      "value_returned": false
+    },
+    {
+      "id": "dynamic-transport-replacement-rollback",
+      "family": "workflow-recovery",
+      "stack": "rust",
+      "runner": "cargo",
+      "working_directory": ".",
+      "target": "janusd",
+      "test_name": "runtime::lifecycle_entry::dynamic_transport::tests::replacement_rollback_is_terminal_exact_and_value_free",
+      "value_returned": false
+    },
+    {
+      "id": "dynamic-ui-replacement-rollback",
+      "family": "workflow-recovery",
+      "stack": "go",
+      "runner": "go",
+      "working_directory": "go-envelope",
+      "target": "./...",
+      "test_name": "TestManagedDynamicReplacementShowsOnlyRecoveredRollbackStatus",
+      "value_returned": false
+    },
+    {
       "id": "dynamic-exact-host-active-receipt",
       "family": "host-custody",
       "stack": "rust",

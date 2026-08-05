@@ -32,21 +32,26 @@ There is no case folding or other name normalization.
 The canonical fixture is
 `contracts/managed-service-dynamic-env-contract-v2.json`; the v1 parser and
 fixture remain unchanged. Janus's version 2 host-executor configuration may
-now carry root-owned dynamic policies and accept a signed `create` packet that
-matches one policy exactly. This is only the local host acceptance and private
-aggregate-file boundary. A separate transport daemon and the existing enrolled
-host agent can now carry that still-encrypted packet to the exact host and
-record value-free activation evidence. The agent resolves only the exact
-pre-approved reload and health profiles already present in its root-owned
-configuration, force-recreates that fixed service, and records active only
-after a fresh bounded healthy observation. This adds no replacement, removal,
-deployment enablement, or Pharos/nixcfg change.
+now carry root-owned dynamic policies and accept a signed `create` packet or an
+exact-existing-name `replace` packet that matches one policy exactly. A
+separate transport daemon and the existing enrolled host agent carry that
+still-encrypted packet to the exact host and record value-free activation or
+recovered-rollback evidence. The agent resolves only the exact pre-approved
+reload and health profiles already present in its root-owned configuration.
+Replacement retains the previous signed packet for a bounded window, commits
+only after fresh health, and otherwise restores the full previous aggregate
+before requiring recovered health. This adds no removal, deployment
+enablement, or Pharos/nixcfg change.
 
 The Janus setup page may read that outcome only through the private transport's
-strict value-free status action. `Active` requires the exact host, service,
+strict version 4 value-free status action. New version 3 receipts bind the
+operation kind and outcome; stored version 2 create receipts remain readable.
+`Active` requires the exact host, service,
 policy, operation, package, envelope, binding, generation, reload profile, and
 health profile to match the integrity-bound receipt. Missing, expired,
 mismatched, malformed, or unavailable evidence never becomes a success claim.
+A rolled-back replacement is terminal and explicitly says the old value is
+active; it is never presented as activation of the replacement.
 
 ## Authority and state
 
@@ -144,11 +149,12 @@ Copying an operation or encrypted envelope to another host must fail.
 `commit`, `rollback`, and `status` unchanged. With a strict version 2
 configuration it additionally accepts `install-dynamic` and
 `restore-dynamic`. Dynamic install reads one bounded signed packet from
-standard input and is create-only; dynamic restore rebuilds configured
-aggregates from the signed cache. These actions do not transport a packet,
-reload a service, inspect health, activate a binding, replace a value, or
-remove a binding. Commit and rollback read one strict value-free control
-document. The root-owned configuration fixes the host, scope, Janus producer
+standard input and accepts only create or exact-existing-name replacement;
+dynamic restore rebuilds configured aggregates from the signed cache and
+rolls back an unconfirmed staged replacement. Replacement commit and rollback
+use an exact value-free operation, binding, and generation control. These
+actions do not transport a packet, reload a service, inspect health, activate a
+binding, or remove a binding. The root-owned configuration fixes the host, scope, Janus producer
 verification keys, revocation epoch, declared slots, declaration fingerprints,
 generation floors, rollback windows, and—only in version 2—dynamic service
 policies.
@@ -193,7 +199,9 @@ by the outbox-bound reload and health references and submits value-free active
 evidence only after a fresh bounded Docker health observation. Lost responses
 retry safely; cross-host claims, unknown or ambiguous runtime targets, invalid
 earlier outbox state, mismatched executor outcomes, stale health, and
-conflicting receipts fail closed.
+conflicting receipts fail closed. A replacement reload or health failure invokes
+the exact executor rollback, force-recreates the same service, and requires
+fresh recovered health before the value-free rolled-back receipt is accepted.
 
 The current ciphertext restores the runtime file after reboot without central
 Janus. Once committed, delivery expiry does not destroy that offline recovery

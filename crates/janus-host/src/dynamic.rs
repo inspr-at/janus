@@ -1,7 +1,8 @@
 //! Dynamic service-environment acceptance and aggregate materialization.
 //!
-//! This module is deliberately create-only. It accepts no transport, reload,
-//! health, activation, replacement, rollback, or removal authority.
+//! This module accepts create and staged replacement packets. It retains the
+//! previous signed replacement packet until the caller either commits after a
+//! fresh healthy reload or rolls back to the proven previous aggregate.
 
 use super::*;
 
@@ -13,6 +14,7 @@ const DYNAMIC_CACHE_DIR: &str = ".dynamic";
 const DYNAMIC_RUNTIME_FILE: &str = "dynamic.env";
 const MAX_DYNAMIC_VALUE_BYTES: usize = 1024;
 const MAX_DYNAMIC_AGGREGATE_BYTES: usize = 128 * 1024;
+const DYNAMIC_REPLACEMENT_ROLLBACK_WINDOW_SECS: u64 = 300;
 
 /// One root-owned deployed service policy that may accept dynamic creates.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -62,6 +64,10 @@ pub struct DynamicHostExecutorOutcome {
     pub binding_ref: Option<String>,
     pub operation_ref: Option<String>,
     pub generation_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_binding_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_generation_ref: Option<String>,
     pub binding_count: u16,
     pub phase: String,
     pub reason_code: String,
@@ -95,7 +101,38 @@ struct HostDynamicServiceStateV1 {
     declaration_fingerprint: String,
     bindings: Vec<CachedDynamicBindingV1>,
     pending: Option<CachedDynamicBindingV1>,
+    #[serde(default)]
+    pending_replacement: Option<PendingDynamicReplacementV1>,
+    #[serde(default)]
+    staged_replacement: Option<StagedDynamicReplacementV1>,
     integrity_hash: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct PendingDynamicReplacementV1 {
+    previous: CachedDynamicBindingV1,
+    replacement: CachedDynamicBindingV1,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct StagedDynamicReplacementV1 {
+    previous: CachedDynamicBindingV1,
+    replacement: CachedDynamicBindingV1,
+    phase: String,
+    staged_at_unix_secs: u64,
+    rollback_expires_at_unix_secs: u64,
+}
+
+/// Exact value-free authority for committing or rolling back one staged
+/// replacement. The packet itself remains the authority for every binding.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DynamicHostReplacementControlV1 {
+    pub operation_ref: String,
+    pub binding_ref: String,
+    pub generation_ref: String,
 }
 
 struct DecryptedDynamicHostEnvelope {
@@ -216,7 +253,7 @@ impl HostExecutor {
             self.paths.executor_uid,
         )?;
         validate_dynamic_inventory(&service_dir, &state, self.paths.executor_uid)?;
-        state = self.reconcile_dynamic_pending(policy, state, now)?;
+        state = self.reconcile_dynamic_pending(policy, state, now, false)?;
         validate_dynamic_inventory(&service_dir, &state, self.paths.executor_uid)?;
 
         let cached = cached_dynamic_binding(&opened.binding, &opened.packet_sha256);
@@ -239,6 +276,14 @@ impl HostExecutor {
                 "materialized",
                 "dynamic_host_materialization_idempotent",
             ));
+        }
+        if state.staged_replacement.is_some() {
+            return Err(HostEnvelopeError::new(
+                "dynamic_host_replacement_in_progress",
+            ));
+        }
+        if opened.binding.operation_kind == "replace" {
+            return self.stage_dynamic_replacement(policy, state, cached, packet, opened, now);
         }
         if state.bindings.iter().any(|entry| {
             entry.environment_name == cached.environment_name
@@ -273,7 +318,7 @@ impl HostExecutor {
             self.paths.executor_uid,
             "dynamic_host_cache_write_failed",
         ) {
-            return self.fail_dynamic_create(policy, previous_state, &packet_path, now, error);
+            return self.fail_dynamic_mutation(policy, previous_state, &packet_path, now, error);
         }
 
         let mut completed = state.clone();
@@ -292,7 +337,7 @@ impl HostExecutor {
                 )
             })
         {
-            return self.fail_dynamic_create(policy, previous_state, &packet_path, now, error);
+            return self.fail_dynamic_mutation(policy, previous_state, &packet_path, now, error);
         }
         sync_dir(&service_dir, "dynamic_host_cache_sync_failed")?;
         Ok(dynamic_outcome(
@@ -303,6 +348,99 @@ impl HostExecutor {
             completed.bindings.len(),
             "materialized",
             "dynamic_host_environment_materialized",
+        ))
+    }
+
+    fn stage_dynamic_replacement(
+        &self,
+        policy: &HostDynamicEnvironmentPolicyV1,
+        mut state: HostDynamicServiceStateV1,
+        replacement: CachedDynamicBindingV1,
+        packet: &[u8],
+        opened: DecryptedDynamicHostEnvelope,
+        now: SystemTime,
+    ) -> HostResult<DynamicHostExecutorOutcome> {
+        let previous_index = state
+            .bindings
+            .iter()
+            .position(|entry| entry.environment_name == replacement.environment_name)
+            .ok_or_else(|| HostEnvelopeError::new("dynamic_host_binding_missing"))?;
+        let previous = state.bindings[previous_index].clone();
+        if state.bindings.iter().any(|entry| {
+            entry.operation_ref == replacement.operation_ref
+                || entry.envelope_ref == replacement.envelope_ref
+                || entry.binding_ref == replacement.binding_ref
+                || entry.secret_ref == replacement.secret_ref
+                || entry.generation_ref == replacement.generation_ref
+        }) {
+            return Err(HostEnvelopeError::new("dynamic_host_binding_collision"));
+        }
+
+        // Prove the old aggregate before persisting any replacement journal.
+        let mut previous_aggregate = self.build_dynamic_aggregate(policy, &state.bindings, now)?;
+        previous_aggregate.zeroize();
+        drop(opened);
+
+        let service_dir = self.dynamic_service_cache_dir(policy);
+        let previous_state = state.clone();
+        state.pending_replacement = Some(PendingDynamicReplacementV1 {
+            previous: previous.clone(),
+            replacement: replacement.clone(),
+        });
+        write_dynamic_state(
+            &service_dir.join("state.json"),
+            state.clone(),
+            self.paths.executor_uid,
+        )?;
+        let packet_path = dynamic_packet_path(&service_dir, &replacement.binding_ref);
+        if let Err(error) = atomic_create_private(
+            &packet_path,
+            packet,
+            self.paths.executor_uid,
+            "dynamic_host_cache_write_failed",
+        ) {
+            return self.fail_dynamic_mutation(policy, previous_state, &packet_path, now, error);
+        }
+
+        let staged_at = unix_seconds(now)?;
+        let rollback_expires_at = staged_at
+            .checked_add(DYNAMIC_REPLACEMENT_ROLLBACK_WINDOW_SECS)
+            .ok_or_else(|| HostEnvelopeError::new("dynamic_host_clock_invalid"))?;
+        let mut completed = state;
+        completed.bindings[previous_index] = replacement.clone();
+        completed
+            .bindings
+            .sort_by(|left, right| left.environment_name.cmp(&right.environment_name));
+        completed.pending_replacement = None;
+        completed.staged_replacement = Some(StagedDynamicReplacementV1 {
+            previous: previous.clone(),
+            replacement: replacement.clone(),
+            phase: "staged".to_string(),
+            staged_at_unix_secs: staged_at,
+            rollback_expires_at_unix_secs: rollback_expires_at,
+        });
+        if let Err(error) = self
+            .materialize_dynamic_state(policy, &completed.bindings, now)
+            .and_then(|()| {
+                write_dynamic_state(
+                    &service_dir.join("state.json"),
+                    completed.clone(),
+                    self.paths.executor_uid,
+                )
+            })
+        {
+            return self.fail_dynamic_mutation(policy, previous_state, &packet_path, now, error);
+        }
+        sync_dir(&service_dir, "dynamic_host_cache_sync_failed")?;
+        Ok(dynamic_replacement_outcome(
+            "install-dynamic",
+            &self.config.host_ref,
+            policy,
+            &replacement,
+            &previous,
+            completed.bindings.len(),
+            "materialized",
+            "dynamic_host_replacement_materialized",
         ))
     }
 
@@ -327,7 +465,7 @@ impl HostExecutor {
                 self.paths.executor_uid,
             )?;
             validate_dynamic_inventory(&service_dir, &state, self.paths.executor_uid)?;
-            state = self.reconcile_dynamic_pending(policy, state, now)?;
+            state = self.reconcile_dynamic_pending(policy, state, now, true)?;
             validate_dynamic_inventory(&service_dir, &state, self.paths.executor_uid)?;
             self.materialize_dynamic_state(policy, &state.bindings, now)?;
             outcomes.push(dynamic_outcome(
@@ -362,7 +500,7 @@ impl HostExecutor {
         Ok(())
     }
 
-    fn fail_dynamic_create(
+    fn fail_dynamic_mutation(
         &self,
         policy: &HostDynamicEnvironmentPolicyV1,
         previous_state: HostDynamicServiceStateV1,
@@ -390,54 +528,313 @@ impl HostExecutor {
         }
     }
 
-    fn reconcile_dynamic_pending(
+    /// Commit an exact staged replacement after its new aggregate has passed
+    /// the caller-owned reload and fresh health observation.
+    pub fn commit_dynamic_replacement(
         &self,
-        policy: &HostDynamicEnvironmentPolicyV1,
-        mut state: HostDynamicServiceStateV1,
+        control: &DynamicHostReplacementControlV1,
         now: SystemTime,
-    ) -> HostResult<HostDynamicServiceStateV1> {
-        let Some(pending) = state.pending.clone() else {
-            return Ok(state);
-        };
+    ) -> HostResult<DynamicHostExecutorOutcome> {
+        validate_dynamic_replacement_control(control)?;
+        let policy = self.policy_for_dynamic_control(control)?;
+        self.ensure_dynamic_service_dirs(policy)?;
         let service_dir = self.dynamic_service_cache_dir(policy);
-        let packet_path = dynamic_packet_path(&service_dir, &pending.binding_ref);
-        if !entry_exists(&packet_path, "dynamic_host_cache_unavailable")? {
-            state.pending = None;
-            write_dynamic_state(
-                &service_dir.join("state.json"),
-                state.clone(),
-                self.paths.executor_uid,
-            )?;
-            return Ok(state);
-        }
-        let packet = read_private_regular(
-            &packet_path,
-            MAX_PACKET_BYTES,
-            Some(self.paths.executor_uid),
-            "dynamic_host_cache_unavailable",
+        let _lock = lock_slot(&service_dir, self.paths.executor_uid)?;
+        let mut state = load_dynamic_state(
+            &service_dir.join("state.json"),
+            &self.config.host_ref,
+            policy,
+            self.paths.executor_uid,
         )?;
-        if sha256_hex(&packet) != pending.packet_sha256 {
-            return Err(HostEnvelopeError::new("dynamic_host_cache_tampered"));
+        validate_dynamic_inventory(&service_dir, &state, self.paths.executor_uid)?;
+        state = self.reconcile_dynamic_pending(policy, state, now, false)?;
+        validate_dynamic_inventory(&service_dir, &state, self.paths.executor_uid)?;
+
+        let Some(staged) = state.staged_replacement.clone() else {
+            let current = exact_dynamic_control_binding(&state.bindings, control)
+                .ok_or_else(|| HostEnvelopeError::new("dynamic_host_replacement_missing"))?;
+            return Ok(dynamic_outcome(
+                "commit-dynamic-replacement",
+                &self.config.host_ref,
+                policy,
+                Some(current),
+                state.bindings.len(),
+                "committed",
+                "dynamic_host_replacement_commit_idempotent",
+            ));
+        };
+        validate_staged_control(&staged, control)?;
+        if unix_seconds(now)? > staged.rollback_expires_at_unix_secs {
+            return Err(HostEnvelopeError::new("dynamic_host_rollback_expired"));
         }
-        let opened = self.open_dynamic_packet_with_expiry(&packet, now, true)?;
-        self.resolve_dynamic_policy(&opened.binding)?;
-        validate_dynamic_value(opened.value.expose_bytes())?;
-        if cached_dynamic_binding(&opened.binding, &opened.packet_sha256) != pending {
-            return Err(HostEnvelopeError::new("dynamic_host_cache_mismatch"));
-        }
-        drop(opened);
-        let mut completed = state.bindings.clone();
-        completed.push(pending);
-        completed.sort_by(|left, right| left.environment_name.cmp(&right.environment_name));
-        validate_cached_dynamic_set(&completed, policy.max_active_bindings)?;
-        self.materialize_dynamic_state(policy, &completed, now)?;
-        state.bindings = completed;
-        state.pending = None;
+        state
+            .staged_replacement
+            .as_mut()
+            .expect("staged replacement present")
+            .phase = "commit_pending".to_string();
         write_dynamic_state(
             &service_dir.join("state.json"),
             state.clone(),
             self.paths.executor_uid,
         )?;
+        state = self.reconcile_dynamic_pending(policy, state, now, false)?;
+        sync_dir(&service_dir, "dynamic_host_cache_sync_failed")?;
+        Ok(dynamic_replacement_outcome(
+            "commit-dynamic-replacement",
+            &self.config.host_ref,
+            policy,
+            &staged.replacement,
+            &staged.previous,
+            state.bindings.len(),
+            "committed",
+            "dynamic_host_replacement_committed",
+        ))
+    }
+
+    /// Restore an exact staged replacement's previous aggregate. The caller
+    /// must still reload the fixed service and verify fresh recovered health.
+    pub fn rollback_dynamic_replacement(
+        &self,
+        control: &DynamicHostReplacementControlV1,
+        now: SystemTime,
+    ) -> HostResult<DynamicHostExecutorOutcome> {
+        validate_dynamic_replacement_control(control)?;
+        let policy = self.policy_for_dynamic_control(control)?;
+        self.ensure_dynamic_service_dirs(policy)?;
+        let service_dir = self.dynamic_service_cache_dir(policy);
+        let _lock = lock_slot(&service_dir, self.paths.executor_uid)?;
+        let mut state = load_dynamic_state(
+            &service_dir.join("state.json"),
+            &self.config.host_ref,
+            policy,
+            self.paths.executor_uid,
+        )?;
+        validate_dynamic_inventory(&service_dir, &state, self.paths.executor_uid)?;
+        state = self.reconcile_dynamic_pending(policy, state, now, false)?;
+        validate_dynamic_inventory(&service_dir, &state, self.paths.executor_uid)?;
+        let staged = state
+            .staged_replacement
+            .clone()
+            .ok_or_else(|| HostEnvelopeError::new("dynamic_host_replacement_missing"))?;
+        validate_staged_control(&staged, control)?;
+        if unix_seconds(now)? > staged.rollback_expires_at_unix_secs {
+            return Err(HostEnvelopeError::new("dynamic_host_rollback_expired"));
+        }
+        state
+            .staged_replacement
+            .as_mut()
+            .expect("staged replacement present")
+            .phase = "rollback_pending".to_string();
+        write_dynamic_state(
+            &service_dir.join("state.json"),
+            state.clone(),
+            self.paths.executor_uid,
+        )?;
+        state = self.reconcile_dynamic_pending(policy, state, now, false)?;
+        sync_dir(&service_dir, "dynamic_host_cache_sync_failed")?;
+        Ok(dynamic_replacement_outcome(
+            "rollback-dynamic-replacement",
+            &self.config.host_ref,
+            policy,
+            &staged.replacement,
+            &staged.previous,
+            state.bindings.len(),
+            "rolled_back",
+            "dynamic_host_replacement_rolled_back",
+        ))
+    }
+
+    fn policy_for_dynamic_control(
+        &self,
+        control: &DynamicHostReplacementControlV1,
+    ) -> HostResult<&HostDynamicEnvironmentPolicyV1> {
+        let mut matching = self.dynamic_policies.iter().filter(|policy| {
+            let service_dir = self.dynamic_service_cache_dir(policy);
+            let state = load_dynamic_state(
+                &service_dir.join("state.json"),
+                &self.config.host_ref,
+                policy,
+                self.paths.executor_uid,
+            );
+            state.is_ok_and(|state| {
+                exact_dynamic_control_binding(&state.bindings, control).is_some()
+                    || state.staged_replacement.as_ref().is_some_and(|staged| {
+                        staged.replacement.operation_ref == control.operation_ref
+                            && staged.replacement.binding_ref == control.binding_ref
+                            && staged.replacement.generation_ref == control.generation_ref
+                    })
+            })
+        });
+        let policy = matching
+            .next()
+            .ok_or_else(|| HostEnvelopeError::new("dynamic_host_replacement_missing"))?;
+        if matching.next().is_some() {
+            return Err(HostEnvelopeError::new("dynamic_host_replacement_ambiguous"));
+        }
+        Ok(policy)
+    }
+
+    fn reconcile_dynamic_pending(
+        &self,
+        policy: &HostDynamicEnvironmentPolicyV1,
+        mut state: HostDynamicServiceStateV1,
+        now: SystemTime,
+        recover_staged_replacement: bool,
+    ) -> HostResult<HostDynamicServiceStateV1> {
+        let service_dir = self.dynamic_service_cache_dir(policy);
+        if let Some(pending) = state.pending.clone() {
+            let packet_path = dynamic_packet_path(&service_dir, &pending.binding_ref);
+            if !entry_exists(&packet_path, "dynamic_host_cache_unavailable")? {
+                state.pending = None;
+                write_dynamic_state(
+                    &service_dir.join("state.json"),
+                    state.clone(),
+                    self.paths.executor_uid,
+                )?;
+            } else {
+                let packet = read_private_regular(
+                    &packet_path,
+                    MAX_PACKET_BYTES,
+                    Some(self.paths.executor_uid),
+                    "dynamic_host_cache_unavailable",
+                )?;
+                if sha256_hex(&packet) != pending.packet_sha256 {
+                    return Err(HostEnvelopeError::new("dynamic_host_cache_tampered"));
+                }
+                let opened = self.open_dynamic_packet_with_expiry(&packet, now, true)?;
+                self.resolve_dynamic_policy(&opened.binding)?;
+                validate_dynamic_value(opened.value.expose_bytes())?;
+                if opened.binding.operation_kind != "create"
+                    || cached_dynamic_binding(&opened.binding, &opened.packet_sha256) != pending
+                {
+                    return Err(HostEnvelopeError::new("dynamic_host_cache_mismatch"));
+                }
+                drop(opened);
+                let mut completed = state.bindings.clone();
+                completed.push(pending);
+                completed.sort_by(|left, right| left.environment_name.cmp(&right.environment_name));
+                validate_cached_dynamic_set(&completed, policy.max_active_bindings)?;
+                self.materialize_dynamic_state(policy, &completed, now)?;
+                state.bindings = completed;
+                state.pending = None;
+                write_dynamic_state(
+                    &service_dir.join("state.json"),
+                    state.clone(),
+                    self.paths.executor_uid,
+                )?;
+            }
+        }
+
+        if let Some(pending) = state.pending_replacement.clone() {
+            let replacement_path =
+                dynamic_packet_path(&service_dir, &pending.replacement.binding_ref);
+            if entry_exists(&replacement_path, "dynamic_host_cache_unavailable")? {
+                let packet = read_private_regular(
+                    &replacement_path,
+                    MAX_PACKET_BYTES,
+                    Some(self.paths.executor_uid),
+                    "dynamic_host_cache_unavailable",
+                )?;
+                let opened = self.open_dynamic_packet_with_expiry(&packet, now, true)?;
+                self.resolve_dynamic_policy(&opened.binding)?;
+                if opened.binding.operation_kind != "replace"
+                    || cached_dynamic_binding(&opened.binding, &opened.packet_sha256)
+                        != pending.replacement
+                {
+                    return Err(HostEnvelopeError::new("dynamic_host_cache_mismatch"));
+                }
+                drop(opened);
+                remove_private_file_if_present(
+                    &replacement_path,
+                    self.paths.executor_uid,
+                    "dynamic_host_cache_rollback_failed",
+                )?;
+            }
+            state.pending_replacement = None;
+            self.materialize_dynamic_state(policy, &state.bindings, now)?;
+            write_dynamic_state(
+                &service_dir.join("state.json"),
+                state.clone(),
+                self.paths.executor_uid,
+            )?;
+        }
+
+        if recover_staged_replacement
+            && state
+                .staged_replacement
+                .as_ref()
+                .is_some_and(|staged| staged.phase == "staged")
+        {
+            let staged = state
+                .staged_replacement
+                .as_mut()
+                .expect("staged replacement");
+            if unix_seconds(now)? > staged.rollback_expires_at_unix_secs {
+                return Err(HostEnvelopeError::new("dynamic_host_rollback_expired"));
+            }
+            staged.phase = "rollback_pending".to_string();
+            write_dynamic_state(
+                &service_dir.join("state.json"),
+                state.clone(),
+                self.paths.executor_uid,
+            )?;
+        }
+
+        if let Some(staged) = state.staged_replacement.clone() {
+            match staged.phase.as_str() {
+                "staged" => {}
+                "commit_pending" => {
+                    let previous_path =
+                        dynamic_packet_path(&service_dir, &staged.previous.binding_ref);
+                    if entry_exists(&previous_path, "dynamic_host_cache_commit_failed")? {
+                        let mut previous = self.build_dynamic_aggregate(
+                            policy,
+                            std::slice::from_ref(&staged.previous),
+                            now,
+                        )?;
+                        previous.zeroize();
+                        remove_private_file_if_present(
+                            &previous_path,
+                            self.paths.executor_uid,
+                            "dynamic_host_cache_commit_failed",
+                        )?;
+                    }
+                    state.staged_replacement = None;
+                    self.materialize_dynamic_state(policy, &state.bindings, now)?;
+                    write_dynamic_state(
+                        &service_dir.join("state.json"),
+                        state.clone(),
+                        self.paths.executor_uid,
+                    )?;
+                }
+                "rollback_pending" => {
+                    let current_index = state
+                        .bindings
+                        .iter()
+                        .position(|binding| binding == &staged.replacement)
+                        .ok_or_else(|| {
+                            HostEnvelopeError::new("dynamic_host_cache_state_invalid")
+                        })?;
+                    remove_private_file_if_present(
+                        &dynamic_packet_path(&service_dir, &staged.replacement.binding_ref),
+                        self.paths.executor_uid,
+                        "dynamic_host_cache_rollback_failed",
+                    )?;
+                    state.bindings[current_index] = staged.previous;
+                    state
+                        .bindings
+                        .sort_by(|left, right| left.environment_name.cmp(&right.environment_name));
+                    state.staged_replacement = None;
+                    self.materialize_dynamic_state(policy, &state.bindings, now)?;
+                    write_dynamic_state(
+                        &service_dir.join("state.json"),
+                        state.clone(),
+                        self.paths.executor_uid,
+                    )?;
+                }
+                _ => return Err(HostEnvelopeError::new("dynamic_host_cache_state_invalid")),
+            }
+        }
         Ok(state)
     }
 
@@ -596,7 +993,7 @@ impl HostExecutor {
         &self,
         binding: &DynamicHostEnvelopeBindingV1,
     ) -> HostResult<&HostDynamicEnvironmentPolicyV1> {
-        if binding.operation_kind != "create" {
+        if !matches!(binding.operation_kind.as_str(), "create" | "replace") {
             return Err(HostEnvelopeError::new("dynamic_host_operation_denied"));
         }
         let policy = self
@@ -677,6 +1074,50 @@ impl HostExecutor {
             self.paths.executor_uid,
         )?;
         Ok(binding_ref)
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_interrupt_dynamic_replacement(
+        &self,
+        service_ref: &str,
+        phase: &str,
+        remove_packet: bool,
+    ) -> HostResult<()> {
+        let policy = self
+            .dynamic_policies
+            .iter()
+            .find(|policy| policy.service_ref == service_ref)
+            .ok_or_else(|| HostEnvelopeError::new("dynamic_host_policy_denied"))?;
+        let service_dir = self.dynamic_service_cache_dir(policy);
+        let mut state = load_dynamic_state(
+            &service_dir.join("state.json"),
+            &self.config.host_ref,
+            policy,
+            self.paths.executor_uid,
+        )?;
+        let staged = state
+            .staged_replacement
+            .as_mut()
+            .ok_or_else(|| HostEnvelopeError::new("dynamic_host_replacement_missing"))?;
+        staged.phase = phase.to_string();
+        let packet_ref = match phase {
+            "commit_pending" => staged.previous.binding_ref.clone(),
+            "rollback_pending" => staged.replacement.binding_ref.clone(),
+            _ => return Err(HostEnvelopeError::new("dynamic_host_cache_state_invalid")),
+        };
+        write_dynamic_state(
+            &service_dir.join("state.json"),
+            state,
+            self.paths.executor_uid,
+        )?;
+        if remove_packet {
+            remove_private_file_if_present(
+                &dynamic_packet_path(&service_dir, &packet_ref),
+                self.paths.executor_uid,
+                "dynamic_host_cache_unavailable",
+            )?;
+        }
+        Ok(())
     }
 }
 
@@ -813,6 +1254,8 @@ fn load_dynamic_state(
             declaration_fingerprint: policy.declaration_fingerprint.clone(),
             bindings: Vec::new(),
             pending: None,
+            pending_replacement: None,
+            staged_replacement: None,
             integrity_hash: String::new(),
         }
     };
@@ -837,6 +1280,13 @@ fn validate_dynamic_state(
         return Err(HostEnvelopeError::new("dynamic_host_cache_state_invalid"));
     }
     validate_cached_dynamic_set(&state.bindings, policy.max_active_bindings)?;
+    if usize::from(state.pending.is_some())
+        + usize::from(state.pending_replacement.is_some())
+        + usize::from(state.staged_replacement.is_some())
+        > 1
+    {
+        return Err(HostEnvelopeError::new("dynamic_host_cache_state_invalid"));
+    }
     if let Some(pending) = &state.pending {
         if !valid_cached_dynamic_binding(pending)
             || state.bindings.len() >= usize::from(policy.max_active_bindings)
@@ -852,7 +1302,59 @@ fn validate_dynamic_state(
             return Err(HostEnvelopeError::new("dynamic_host_cache_state_invalid"));
         }
     }
+    if let Some(pending) = &state.pending_replacement {
+        if !valid_dynamic_replacement_pair(&pending.previous, &pending.replacement)
+            || !state
+                .bindings
+                .iter()
+                .any(|entry| entry == &pending.previous)
+            || state.bindings.iter().any(|entry| {
+                entry.binding_ref == pending.replacement.binding_ref
+                    || entry.secret_ref == pending.replacement.secret_ref
+                    || entry.generation_ref == pending.replacement.generation_ref
+                    || entry.operation_ref == pending.replacement.operation_ref
+                    || entry.envelope_ref == pending.replacement.envelope_ref
+            })
+        {
+            return Err(HostEnvelopeError::new("dynamic_host_cache_state_invalid"));
+        }
+    }
+    if let Some(staged) = &state.staged_replacement {
+        if !valid_dynamic_replacement_pair(&staged.previous, &staged.replacement)
+            || !matches!(
+                staged.phase.as_str(),
+                "staged" | "commit_pending" | "rollback_pending"
+            )
+            || staged.staged_at_unix_secs == 0
+            || staged.rollback_expires_at_unix_secs
+                != staged
+                    .staged_at_unix_secs
+                    .checked_add(DYNAMIC_REPLACEMENT_ROLLBACK_WINDOW_SECS)
+                    .unwrap_or(0)
+            || !state
+                .bindings
+                .iter()
+                .any(|entry| entry == &staged.replacement)
+            || state.bindings.iter().any(|entry| entry == &staged.previous)
+        {
+            return Err(HostEnvelopeError::new("dynamic_host_cache_state_invalid"));
+        }
+    }
     Ok(())
+}
+
+fn valid_dynamic_replacement_pair(
+    previous: &CachedDynamicBindingV1,
+    replacement: &CachedDynamicBindingV1,
+) -> bool {
+    valid_cached_dynamic_binding(previous)
+        && valid_cached_dynamic_binding(replacement)
+        && previous.environment_name == replacement.environment_name
+        && previous.binding_ref != replacement.binding_ref
+        && previous.secret_ref != replacement.secret_ref
+        && previous.generation_ref != replacement.generation_ref
+        && previous.operation_ref != replacement.operation_ref
+        && previous.envelope_ref != replacement.envelope_ref
 }
 
 fn write_dynamic_state(
@@ -895,6 +1397,32 @@ fn validate_dynamic_inventory(
         let name = format!("{}.envelope", pending.binding_ref);
         if entry_exists(&service_dir.join(&name), "dynamic_host_cache_unavailable")? {
             expected.insert(name);
+        }
+    }
+    if let Some(pending) = &state.pending_replacement {
+        let name = format!("{}.envelope", pending.replacement.binding_ref);
+        if entry_exists(&service_dir.join(&name), "dynamic_host_cache_unavailable")? {
+            expected.insert(name);
+        }
+    }
+    if let Some(staged) = &state.staged_replacement {
+        let replacement_name = format!("{}.envelope", staged.replacement.binding_ref);
+        if staged.phase == "rollback_pending"
+            && !entry_exists(
+                &service_dir.join(&replacement_name),
+                "dynamic_host_cache_unavailable",
+            )?
+        {
+            expected.remove(&replacement_name);
+        }
+        let previous_name = format!("{}.envelope", staged.previous.binding_ref);
+        if staged.phase != "commit_pending"
+            || entry_exists(
+                &service_dir.join(&previous_name),
+                "dynamic_host_cache_unavailable",
+            )?
+        {
+            expected.insert(previous_name);
         }
     }
     let mut found = BTreeSet::new();
@@ -1012,9 +1540,77 @@ fn dynamic_outcome(
         binding_ref: binding.map(|value| value.binding_ref.clone()),
         operation_ref: binding.map(|value| value.operation_ref.clone()),
         generation_ref: binding.map(|value| value.generation_ref.clone()),
+        previous_binding_ref: None,
+        previous_generation_ref: None,
         binding_count: u16::try_from(binding_count).unwrap_or(u16::MAX),
         phase: phase.to_string(),
         reason_code: reason_code.to_string(),
         value_returned: false,
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn dynamic_replacement_outcome(
+    action: &str,
+    host_ref: &str,
+    policy: &HostDynamicEnvironmentPolicyV1,
+    replacement: &CachedDynamicBindingV1,
+    previous: &CachedDynamicBindingV1,
+    binding_count: usize,
+    phase: &str,
+    reason_code: &str,
+) -> DynamicHostExecutorOutcome {
+    let mut outcome = dynamic_outcome(
+        action,
+        host_ref,
+        policy,
+        Some(replacement),
+        binding_count,
+        phase,
+        reason_code,
+    );
+    outcome.previous_binding_ref = Some(previous.binding_ref.clone());
+    outcome.previous_generation_ref = Some(previous.generation_ref.clone());
+    outcome
+}
+
+fn validate_dynamic_replacement_control(
+    control: &DynamicHostReplacementControlV1,
+) -> HostResult<()> {
+    if !valid_ref("op_", &control.operation_ref)
+        || !valid_ref("bind_", &control.binding_ref)
+        || !valid_ref("gen_", &control.generation_ref)
+    {
+        return Err(HostEnvelopeError::new(
+            "dynamic_host_replacement_control_invalid",
+        ));
+    }
+    Ok(())
+}
+
+fn exact_dynamic_control_binding<'a>(
+    bindings: &'a [CachedDynamicBindingV1],
+    control: &DynamicHostReplacementControlV1,
+) -> Option<&'a CachedDynamicBindingV1> {
+    bindings.iter().find(|binding| {
+        binding.operation_ref == control.operation_ref
+            && binding.binding_ref == control.binding_ref
+            && binding.generation_ref == control.generation_ref
+    })
+}
+
+fn validate_staged_control(
+    staged: &StagedDynamicReplacementV1,
+    control: &DynamicHostReplacementControlV1,
+) -> HostResult<()> {
+    if staged.phase != "staged"
+        || staged.replacement.operation_ref != control.operation_ref
+        || staged.replacement.binding_ref != control.binding_ref
+        || staged.replacement.generation_ref != control.generation_ref
+    {
+        return Err(HostEnvelopeError::new(
+            "dynamic_host_replacement_control_mismatch",
+        ));
+    }
+    Ok(())
 }

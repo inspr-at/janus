@@ -337,6 +337,47 @@ test("dynamic generation accepts no browser value", async ({ page }) => {
   await expect(page.locator('input[name="secret_value"]')).toHaveCount(0);
 });
 
+test("dynamic replacement reports recovered rollback without returning a value", async ({
+  page,
+}) => {
+  await page.goto("/__managed-browser/session?kind=dynamic-replace-rollback");
+  await expect(
+    page.getByRole("heading", { name: "Replace environment variable" }),
+  ).toBeVisible();
+  await expect(page.getByText("Replace safely")).toBeVisible();
+  await page.getByRole("button", { name: "Confirm with passkey" }).click();
+  const canary = runtimeCanary("dynamic-replacement-rollback");
+  const form = page.locator(
+    'form[action="/managed-environment/setup/admit"]',
+  );
+  await form.evaluate((element, value) => {
+    const input = element.querySelector('input[name="secret_value"]');
+    if (!(input instanceof HTMLInputElement)) {
+      throw new Error("dynamic replacement value input unavailable");
+    }
+    input.value = value;
+    try {
+      element.requestSubmit();
+    } finally {
+      input.value = "";
+    }
+  }, canary);
+  await expect(
+    page.getByRole("heading", { name: "Replacement rolled back safely" }),
+  ).toBeVisible();
+  await expect(page.getByText("Old value active")).toBeVisible();
+  await expect(page.getByRole("status")).toContainText(
+    "No value or packet returned",
+  );
+  await expectCanariesAbsent(page, [canary]);
+  const accessibility = await new AxeBuilder({ page }).analyze();
+  expect(
+    accessibility.violations.filter(({ impact }) =>
+      ["serious", "critical"].includes(impact),
+    ),
+  ).toEqual([]);
+});
+
 test("compact generated flow works from the keyboard", async ({ page }) => {
   await page.goto("/__managed-browser/session?kind=create");
   await expect(

@@ -117,6 +117,7 @@ type managedDynamicSetupPageData struct {
 	ValueAdmissionComplete       bool
 	ActivationActive             bool
 	ActivationExpired            bool
+	ActivationRolledBack         bool
 	ActivationUnavailable        bool
 	BindingRef                   string
 	SecretRef                    string
@@ -179,7 +180,8 @@ func (app *App) handleManagedDynamicSetup(w http.ResponseWriter, r *http.Request
 					activationStatus, reservationErr = app.managedDynamicTransport.Status(r.Context(), managedDynamicActivationQuery{
 						HostRef: target.HostRef, ServiceRef: target.ServiceRef,
 						EnvironmentPolicyRef: target.EnvironmentPolicyRef, OperationRef: reservation.OperationRef,
-						PackageRef: reservation.PackageRef, EnvelopeRef: reservation.EnvelopeRef,
+						OperationKind: target.OperationKind,
+						PackageRef:    reservation.PackageRef, EnvelopeRef: reservation.EnvelopeRef,
 						BindingRef: reservation.BindingRef, GenerationRef: reservation.GenerationRef,
 						ReloadProfileRef: inspection.Context.ReloadProfileRef,
 						HealthProfileRef: inspection.Context.HealthProfileRef,
@@ -218,6 +220,7 @@ func (app *App) handleManagedDynamicSetup(w http.ResponseWriter, r *http.Request
 		ValueAdmissionComplete:       valueAdmissionComplete,
 		ActivationActive:             activationStatus == managedDynamicActivationActive,
 		ActivationExpired:            activationStatus == managedDynamicActivationExpired,
+		ActivationRolledBack:         activationStatus == managedDynamicActivationRolledBack,
 		ActivationUnavailable:        activationUnavailable,
 		BindingRef:                   bindingRef,
 		SecretRef:                    secretRef,
