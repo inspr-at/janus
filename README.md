@@ -231,7 +231,8 @@ It exercises:
 - the hard use/admin process boundary and retired mixed entry point;
 - the approval-to-env-file operator flow;
 - create-only dynamic host acceptance, deterministic private aggregate
-  materialization, and interrupted-create recovery;
+  materialization, exact pre-approved service reload, fresh health-gated active
+  evidence, and interrupted-create recovery;
 - the private web-to-Rust lifecycle transaction, crash reconciliation, and
   value-free protocol flow;
 - the versioned approval-registry migration and rollback flow;

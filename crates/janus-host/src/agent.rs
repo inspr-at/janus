@@ -27,8 +27,9 @@ const LEASE_SCHEMA: &str = "inspr.pharos.managed-service-operation-lease.v1";
 const RESULT_SCHEMA: &str = "inspr.pharos.managed-service-operation-result.v1";
 const STATUS_SCHEMA: &str = "inspr.pharos.managed-service-operation-status.v1";
 const RECONCILE_SCHEMA: &str = "inspr.janus.managed-host-reconcile-request.v1";
-const DYNAMIC_CLAIM_SCHEMA: &str = "inspr.janus.managed-dynamic-host-package-claim.v1";
-const DYNAMIC_RECEIPT_SCHEMA: &str = "inspr.janus.managed-dynamic-host-receipt-submission.v1";
+const DYNAMIC_CLAIM_SCHEMA: &str = "inspr.janus.managed-dynamic-host-package-claim.v2";
+const DYNAMIC_RECEIPT_SCHEMA: &str = "inspr.janus.managed-dynamic-host-receipt-submission.v2";
+const DYNAMIC_SCHEMA_VERSION: u16 = 2;
 const SCHEMA_VERSION: u16 = 1;
 const SYSTEM_CONFIG_PATH: &str = "/run/janus-managed-agent/config.json";
 const MAX_CONFIG_BYTES: usize = 128 * 1024;
@@ -214,7 +215,7 @@ struct ManagedOperationStatusV1 {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ManagedDynamicHostPackageClaimV1 {
+struct ManagedDynamicHostPackageClaimV2 {
     schema: String,
     schema_version: u16,
     host_ref: String,
@@ -225,6 +226,8 @@ struct ManagedDynamicHostPackageClaimV1 {
     envelope_ref: String,
     binding_ref: String,
     generation_ref: String,
+    reload_profile_ref: String,
+    health_profile_ref: String,
     packet_base64: String,
     phase: String,
     reason_code: String,
@@ -233,7 +236,7 @@ struct ManagedDynamicHostPackageClaimV1 {
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
-struct ManagedDynamicHostReceiptV1 {
+struct ManagedDynamicHostReceiptV2 {
     schema: &'static str,
     schema_version: u16,
     host_ref: String,
@@ -244,11 +247,28 @@ struct ManagedDynamicHostReceiptV1 {
     envelope_ref: String,
     binding_ref: String,
     generation_ref: String,
+    reload_profile_ref: String,
+    health_profile_ref: String,
     phase: &'static str,
-    reason_code: String,
-    observed_at_unix_secs: i64,
+    reason_code: &'static str,
+    materialization_reason_code: String,
+    materialized_at_unix_secs: i64,
+    reloaded_at_unix_secs: i64,
+    heartbeat_observed_at_unix_secs: i64,
+    process_observed_at_unix_secs: i64,
+    probe_observed_at_unix_secs: i64,
     packet_returned: bool,
     value_returned: bool,
+}
+
+#[derive(Clone, Copy)]
+struct ManagedHealthObservation {
+    materialized: bool,
+    process_state: &'static str,
+    probe_state: &'static str,
+    heartbeat_observed_at_unix_secs: i64,
+    process_observed_at_unix_secs: i64,
+    probe_observed_at_unix_secs: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -414,6 +434,7 @@ impl ManagedHostAgent {
         let Some(claim) = self.claim_dynamic_package()? else {
             return Ok(false);
         };
+        let profile = self.dynamic_profile_for_claim(&claim)?;
         let packet = STANDARD_NO_PAD
             .decode(claim.packet_base64.as_bytes())
             .map_err(|_| ManagedHostAgentError::new("managed_dynamic_claim_invalid"))?;
@@ -423,7 +444,13 @@ impl ManagedHostAgent {
         let outcome = executor
             .install_dynamic(&packet, SystemTime::now())
             .map_err(|_| ManagedHostAgentError::new("managed_dynamic_install_failed"))?;
-        let receipt = dynamic_receipt_for_outcome(&claim, &outcome, unix_seconds()?)?;
+        let materialized_at = unix_seconds()?;
+        validate_dynamic_outcome(&claim, &outcome)?;
+        self.compose_up(profile)?;
+        let reloaded_at = unix_seconds()?;
+        let health = self.verify_observation(profile)?;
+        let receipt =
+            dynamic_active_receipt(&claim, &outcome, materialized_at, reloaded_at, health)?;
         let body = serde_json::to_vec(&receipt)
             .map_err(|_| ManagedHostAgentError::new("managed_dynamic_receipt_invalid"))?;
         let path = format!(
@@ -439,7 +466,7 @@ impl ManagedHostAgent {
         Ok(true)
     }
 
-    fn claim_dynamic_package(&self) -> AgentResult<Option<ManagedDynamicHostPackageClaimV1>> {
+    fn claim_dynamic_package(&self) -> AgentResult<Option<ManagedDynamicHostPackageClaimV2>> {
         let path = format!(
             "/internal/managed-environment-host-packages/{}",
             self.config.host_ref
@@ -458,10 +485,10 @@ impl ManagedHostAgent {
                 "managed_dynamic_claim_unavailable",
             ));
         }
-        let claim: ManagedDynamicHostPackageClaimV1 = decode_strict(&response.body)
+        let claim: ManagedDynamicHostPackageClaimV2 = decode_strict(&response.body)
             .map_err(|_| ManagedHostAgentError::new("managed_dynamic_claim_invalid"))?;
         if claim.schema != DYNAMIC_CLAIM_SCHEMA
-            || claim.schema_version != 1
+            || claim.schema_version != DYNAMIC_SCHEMA_VERSION
             || claim.host_ref != self.config.host_ref
             || !valid_ref("svc_", &claim.service_ref)
             || !valid_ref("envpol_", &claim.environment_policy_ref)
@@ -470,6 +497,8 @@ impl ManagedHostAgent {
             || !valid_ref("env_", &claim.envelope_ref)
             || !valid_ref("bind_", &claim.binding_ref)
             || !valid_ref("gen_", &claim.generation_ref)
+            || !valid_ref("reload_", &claim.reload_profile_ref)
+            || !valid_ref("health_", &claim.health_profile_ref)
             || claim.packet_base64.is_empty()
             || claim.phase != "claimed"
             || claim.reason_code != "dynamic_transport_package_claimed"
@@ -1155,8 +1184,23 @@ impl ManagedHostAgent {
         profile: &ManagedHostProfileV1,
         generation: u64,
     ) -> AgentResult<ManagedHealthEvidenceV1> {
-        wait_for_healthy_state(
+        let observation = self.verify_observation(profile)?;
+        Ok(ManagedHealthEvidenceV1 {
             generation,
+            materialized: observation.materialized,
+            process_state: observation.process_state,
+            probe_state: observation.probe_state,
+            heartbeat_observed_at_unix_secs: observation.heartbeat_observed_at_unix_secs,
+            process_observed_at_unix_secs: observation.process_observed_at_unix_secs,
+            probe_observed_at_unix_secs: observation.probe_observed_at_unix_secs,
+        })
+    }
+
+    fn verify_observation(
+        &self,
+        profile: &ManagedHostProfileV1,
+    ) -> AgentResult<ManagedHealthObservation> {
+        wait_for_healthy_observation(
             HEALTH_VERIFY_MAX_ATTEMPTS,
             HEALTH_VERIFY_RETRY_INTERVAL,
             || self.inspect_docker_state(profile),
@@ -1219,6 +1263,26 @@ impl ManagedHostAgent {
             .ok_or_else(|| ManagedHostAgentError::new("managed_host_profile_unknown"))?;
         if matches.next().is_some() {
             return Err(ManagedHostAgentError::new("managed_host_profile_ambiguous"));
+        }
+        Ok(profile)
+    }
+
+    fn dynamic_profile_for_claim(
+        &self,
+        claim: &ManagedDynamicHostPackageClaimV2,
+    ) -> AgentResult<&ManagedHostProfileV1> {
+        let mut matches = self.config.profiles.iter().filter(|profile| {
+            profile.service_ref == claim.service_ref
+                && profile.reload_profile_ref == claim.reload_profile_ref
+                && profile.health_profile_ref == claim.health_profile_ref
+        });
+        let profile = matches
+            .next()
+            .ok_or_else(|| ManagedHostAgentError::new("managed_dynamic_profile_unknown"))?;
+        if matches.any(|candidate| !same_runtime_target(profile, candidate)) {
+            return Err(ManagedHostAgentError::new(
+                "managed_dynamic_profile_ambiguous",
+            ));
         }
         Ok(profile)
     }
@@ -1326,11 +1390,10 @@ fn endpoint(origin: &str, path: &str) -> AgentResult<Url> {
         .map_err(|_| ManagedHostAgentError::new("managed_host_target_invalid"))
 }
 
-fn dynamic_receipt_for_outcome(
-    claim: &ManagedDynamicHostPackageClaimV1,
+fn validate_dynamic_outcome(
+    claim: &ManagedDynamicHostPackageClaimV2,
     outcome: &DynamicHostExecutorOutcome,
-    observed_at_unix_secs: i64,
-) -> AgentResult<ManagedDynamicHostReceiptV1> {
+) -> AgentResult<()> {
     if outcome.action != "install-dynamic"
         || outcome.host_ref != claim.host_ref
         || outcome.service_ref != claim.service_ref
@@ -1350,9 +1413,33 @@ fn dynamic_receipt_for_outcome(
             "managed_dynamic_outcome_invalid",
         ));
     }
-    Ok(ManagedDynamicHostReceiptV1 {
+    Ok(())
+}
+
+fn dynamic_active_receipt(
+    claim: &ManagedDynamicHostPackageClaimV2,
+    outcome: &DynamicHostExecutorOutcome,
+    materialized_at_unix_secs: i64,
+    reloaded_at_unix_secs: i64,
+    health: ManagedHealthObservation,
+) -> AgentResult<ManagedDynamicHostReceiptV2> {
+    validate_dynamic_outcome(claim, outcome)?;
+    if materialized_at_unix_secs <= 0
+        || reloaded_at_unix_secs < materialized_at_unix_secs
+        || !health.materialized
+        || health.process_state != "running"
+        || health.probe_state != "healthy"
+        || health.heartbeat_observed_at_unix_secs < reloaded_at_unix_secs
+        || health.process_observed_at_unix_secs < reloaded_at_unix_secs
+        || health.probe_observed_at_unix_secs < reloaded_at_unix_secs
+    {
+        return Err(ManagedHostAgentError::new(
+            "managed_dynamic_activation_invalid",
+        ));
+    }
+    Ok(ManagedDynamicHostReceiptV2 {
         schema: DYNAMIC_RECEIPT_SCHEMA,
-        schema_version: SCHEMA_VERSION,
+        schema_version: DYNAMIC_SCHEMA_VERSION,
         host_ref: claim.host_ref.clone(),
         service_ref: claim.service_ref.clone(),
         environment_policy_ref: claim.environment_policy_ref.clone(),
@@ -1361,12 +1448,25 @@ fn dynamic_receipt_for_outcome(
         envelope_ref: claim.envelope_ref.clone(),
         binding_ref: claim.binding_ref.clone(),
         generation_ref: claim.generation_ref.clone(),
-        phase: "materialized",
-        reason_code: outcome.reason_code.clone(),
-        observed_at_unix_secs,
+        reload_profile_ref: claim.reload_profile_ref.clone(),
+        health_profile_ref: claim.health_profile_ref.clone(),
+        phase: "active",
+        reason_code: "dynamic_host_environment_active",
+        materialization_reason_code: outcome.reason_code.clone(),
+        materialized_at_unix_secs,
+        reloaded_at_unix_secs,
+        heartbeat_observed_at_unix_secs: health.heartbeat_observed_at_unix_secs,
+        process_observed_at_unix_secs: health.process_observed_at_unix_secs,
+        probe_observed_at_unix_secs: health.probe_observed_at_unix_secs,
         packet_returned: false,
         value_returned: false,
     })
+}
+
+fn same_runtime_target(left: &ManagedHostProfileV1, right: &ManagedHostProfileV1) -> bool {
+    left.compose_file == right.compose_file
+        && left.compose_service == right.compose_service
+        && left.container_name == right.container_name
 }
 
 fn validate_config(config: &ManagedHostAgentConfigV2) -> AgentResult<()> {
@@ -1619,13 +1719,36 @@ fn docker_state_is_stopped(raw: &[u8]) -> bool {
     decode_strict::<DockerState>(raw).is_ok_and(|state| !state.running && state.status == "exited")
 }
 
+#[cfg(test)]
 fn wait_for_healthy_state<I, S>(
     generation: u64,
     max_attempts: usize,
     retry_interval: Duration,
+    inspect: I,
+    sleep: S,
+) -> AgentResult<ManagedHealthEvidenceV1>
+where
+    I: FnMut() -> AgentResult<DockerState>,
+    S: FnMut(Duration),
+{
+    let observation = wait_for_healthy_observation(max_attempts, retry_interval, inspect, sleep)?;
+    Ok(ManagedHealthEvidenceV1 {
+        generation,
+        materialized: observation.materialized,
+        process_state: observation.process_state,
+        probe_state: observation.probe_state,
+        heartbeat_observed_at_unix_secs: observation.heartbeat_observed_at_unix_secs,
+        process_observed_at_unix_secs: observation.process_observed_at_unix_secs,
+        probe_observed_at_unix_secs: observation.probe_observed_at_unix_secs,
+    })
+}
+
+fn wait_for_healthy_observation<I, S>(
+    max_attempts: usize,
+    retry_interval: Duration,
     mut inspect: I,
     mut sleep: S,
-) -> AgentResult<ManagedHealthEvidenceV1>
+) -> AgentResult<ManagedHealthObservation>
 where
     I: FnMut() -> AgentResult<DockerState>,
     S: FnMut(Duration),
@@ -1656,8 +1779,7 @@ where
                 if health.status == "healthy" && health.failing_streak == 0 {
                     let _ = health.log;
                     let now = unix_seconds()?;
-                    return Ok(ManagedHealthEvidenceV1 {
-                        generation,
+                    return Ok(ManagedHealthObservation {
                         materialized: true,
                         process_state: "running",
                         probe_state: "healthy",
@@ -1797,11 +1919,10 @@ mod tests {
         }
     }
 
-    #[test]
-    fn dynamic_receipt_requires_exact_value_free_materialization() {
-        let claim = ManagedDynamicHostPackageClaimV1 {
+    fn dynamic_claim() -> ManagedDynamicHostPackageClaimV2 {
+        ManagedDynamicHostPackageClaimV2 {
             schema: DYNAMIC_CLAIM_SCHEMA.to_string(),
-            schema_version: SCHEMA_VERSION,
+            schema_version: DYNAMIC_SCHEMA_VERSION,
             host_ref: "host_58f36c72a91e".to_string(),
             service_ref: "svc_0bca8d31f7e2".to_string(),
             environment_policy_ref: "envpol_2d7a0f63c951".to_string(),
@@ -1810,12 +1931,19 @@ mod tests {
             envelope_ref: "env_a84f209c4b32".to_string(),
             binding_ref: "bind_094df2f6c8b1".to_string(),
             generation_ref: "gen_8a0f4e271c93".to_string(),
+            reload_profile_ref: "reload_094df2f6c8b1".to_string(),
+            health_profile_ref: "health_2a02f96c33d4".to_string(),
             packet_base64: "cGFja2V0".to_string(),
             phase: "claimed".to_string(),
             reason_code: "dynamic_transport_package_claimed".to_string(),
             packet_returned: true,
             value_returned: false,
-        };
+        }
+    }
+
+    #[test]
+    fn dynamic_receipt_requires_exact_value_free_activation_evidence() {
+        let claim = dynamic_claim();
         let outcome = DynamicHostExecutorOutcome {
             action: "install-dynamic".to_string(),
             host_ref: claim.host_ref.clone(),
@@ -1829,25 +1957,96 @@ mod tests {
             reason_code: "dynamic_host_environment_materialized".to_string(),
             value_returned: false,
         };
-        let receipt = dynamic_receipt_for_outcome(&claim, &outcome, 1_800_000_000)
-            .expect("exact materialization");
+        let healthy = ManagedHealthObservation {
+            materialized: true,
+            process_state: "running",
+            probe_state: "healthy",
+            heartbeat_observed_at_unix_secs: 1_800_000_002,
+            process_observed_at_unix_secs: 1_800_000_002,
+            probe_observed_at_unix_secs: 1_800_000_002,
+        };
+        let receipt =
+            dynamic_active_receipt(&claim, &outcome, 1_800_000_000, 1_800_000_001, healthy)
+                .expect("exact activation");
         assert_eq!(receipt.operation_ref, claim.operation_ref);
+        assert_eq!(receipt.phase, "active");
+        assert_eq!(receipt.reload_profile_ref, claim.reload_profile_ref);
+        assert_eq!(receipt.health_profile_ref, claim.health_profile_ref);
         assert!(!receipt.packet_returned);
         assert!(!receipt.value_returned);
 
         let mut mismatch = outcome.clone();
         mismatch.operation_ref = Some("op_attacker000001".to_string());
         assert_eq!(
-            dynamic_receipt_for_outcome(&claim, &mismatch, 1_800_000_000)
+            dynamic_active_receipt(&claim, &mismatch, 1_800_000_000, 1_800_000_001, healthy,)
                 .expect_err("cross-operation outcome denied"),
             ManagedHostAgentError::new("managed_dynamic_outcome_invalid")
         );
         let mut leaking = outcome;
         leaking.value_returned = true;
         assert_eq!(
-            dynamic_receipt_for_outcome(&claim, &leaking, 1_800_000_000)
+            dynamic_active_receipt(&claim, &leaking, 1_800_000_000, 1_800_000_001, healthy,)
                 .expect_err("value-bearing outcome denied"),
             ManagedHostAgentError::new("managed_dynamic_outcome_invalid")
+        );
+
+        let stale_health = ManagedHealthObservation {
+            heartbeat_observed_at_unix_secs: 1_800_000_000,
+            ..healthy
+        };
+        assert_eq!(
+            dynamic_active_receipt(
+                &claim,
+                &DynamicHostExecutorOutcome {
+                    value_returned: false,
+                    ..leaking
+                },
+                1_800_000_000,
+                1_800_000_001,
+                stale_health,
+            )
+            .expect_err("pre-reload health denied"),
+            ManagedHostAgentError::new("managed_dynamic_activation_invalid")
+        );
+    }
+
+    #[test]
+    fn dynamic_claim_resolves_only_one_exact_runtime_target() {
+        let claim = dynamic_claim();
+        let mut agent = ManagedHostAgent {
+            config: config(),
+            token: "x".repeat(32),
+            http: ureq::AgentBuilder::new().build(),
+        };
+        assert_eq!(
+            agent
+                .dynamic_profile_for_claim(&claim)
+                .expect("exact pre-approved runtime")
+                .compose_service,
+            "secret-canary"
+        );
+
+        let mut equivalent = agent.config.profiles[0].clone();
+        equivalent.slot_ref = "slot_aaaaaaaaaaaaaaaa".to_string();
+        agent.config.profiles.push(equivalent);
+        agent
+            .dynamic_profile_for_claim(&claim)
+            .expect("equivalent slots share one runtime target");
+
+        agent.config.profiles[1].compose_service = "different-service".to_string();
+        assert_eq!(
+            agent
+                .dynamic_profile_for_claim(&claim)
+                .expect_err("divergent runtime targets denied"),
+            ManagedHostAgentError::new("managed_dynamic_profile_ambiguous")
+        );
+
+        agent.config.profiles.clear();
+        assert_eq!(
+            agent
+                .dynamic_profile_for_claim(&claim)
+                .expect_err("unknown runtime target denied"),
+            ManagedHostAgentError::new("managed_dynamic_profile_unknown")
         );
     }
 

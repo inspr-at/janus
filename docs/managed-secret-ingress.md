@@ -25,8 +25,11 @@ private aggregate environment file. JANUS-400 adds the separate transport
 boundary: the enrolled host agent may claim only its exact package through the
 existing host-token model, install it with the v2 executor only when no v1
 lease is pending, and return a strict value-free materialization receipt.
-It still performs no reload, health, activation, replacement, removal, or
-deployment enablement.
+JANUS-401 binds that claim to the exact pre-approved reload and health profiles,
+force-recreates the fixed Compose service, and returns a strict value-free
+active receipt only after a fresh bounded healthy observation. It still
+performs no replacement, removal, deployment enablement, or Pharos/nixcfg
+change.
 The existing v1 declared-slot flow described below remains unchanged and is
 still the only production value-bearing path.
 
@@ -125,9 +128,10 @@ No current deployment configuration enables this capability. Janus can create
 encrypted custody and a host-bound package in its private outbox, and the
 enrolled host agent can claim that package for the exact host, ask the version
 2 executor to materialize the pre-approved service's private aggregate, and
-return value-free evidence. There is still no Pharos operation registration
-and no service reload, health, activation, replacement, or removal claim. Each
-remains a separate reviewed slice.
+return value-free active evidence after force-recreating the exact
+outbox-bound service and observing it healthy. There is still no Pharos
+operation registration, replacement, or removal claim. Each remains a
+separate reviewed slice.
 
 ## Dynamic value admission boundary
 
@@ -220,23 +224,27 @@ receipt, ciphertext, peer identity, or release gate is invalid.
 
 The transport daemon is a third no-argv process. It never decrypts a packet,
 contacts a host, reloads a service, or inspects health. It exposes only exact
-host claim and exact materialization-receipt operations to the Go envelope:
+host claim and exact activation-receipt operations to the Go envelope and
+validates the outbox-bound reload and health references plus timestamp order:
 
 | Environment variable | Contract |
 | --- | --- |
 | `JANUS_MANAGED_DYNAMIC_TRANSPORT_SOCKET` | Absolute private Unix-socket path; shared with the Go envelope and distinct from custody and delivery. |
 | `JANUS_MANAGED_DYNAMIC_TRANSPORT_ALLOWED_UID` | Exact kernel-reported UID permitted to connect. |
 | `JANUS_MANAGED_DYNAMIC_TRANSPORT_PROFILE_FILE` | Existing strict delivery catalog used to locate and revalidate the exact host outbox. |
-| `JANUS_MANAGED_DYNAMIC_TRANSPORT_RECEIPT_DIR` | Separate private root for strict value-free materialization receipts. |
+| `JANUS_MANAGED_DYNAMIC_TRANSPORT_RECEIPT_DIR` | Separate private root for integrity-bound, create-new, value-free active receipts. |
 
 When the dynamic capability is enabled, the Go envelope also requires
 `JANUS_MANAGED_DYNAMIC_HOST_TOKEN_GENERATION_DIR`, the existing private
 host-token generation directory. The host agent authenticates its exact
 `host_` reference, receives only the still-encrypted packet, calls
 `install-dynamic`, validates the returned identity and materialized outcome,
-then submits a receipt containing no packet or value. Lost responses retry
-idempotently; invalid earlier outbox state, cross-host claims, mismatched
-outcomes, and conflicting receipts fail closed.
+resolves the exact fixed runtime target from the outbox-bound reload and health
+references, force-recreates that service, and submits a receipt containing no
+packet or value only after a fresh bounded healthy observation. Lost responses
+retry idempotently; invalid earlier outbox state, cross-host claims, unknown or
+ambiguous runtime targets, mismatched outcomes, stale health, and conflicting
+receipts fail closed.
 
 ## Route and trust boundary
 

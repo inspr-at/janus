@@ -2,8 +2,9 @@
 //!
 //! This process never opens custody. It returns one already signed and
 //! host-encrypted packet to the trusted Go edge and persists only an exact,
-//! value-free materialization receipt. Reload, health, activation,
-//! replacement, rollback, and removal remain outside this boundary.
+//! value-free activation receipt. Reload and health are performed by the
+//! exact pre-approved host profile; replacement, rollback, and removal remain
+//! outside this boundary.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
@@ -22,12 +23,13 @@ use tokio::time::{timeout, Duration};
 
 use super::dynamic_delivery::{
     load_catalog, normalized_absolute, outbox_hash, valid_ref, DeliveryProfile, OutboxRecord,
-    ProfileKey, MAX_OUTBOX_BYTES, OUTBOX_SCHEMA, SCHEMA_VERSION,
+    ProfileKey, MAX_OUTBOX_BYTES, OUTBOX_SCHEMA, SCHEMA_VERSION as DELIVERY_SCHEMA_VERSION,
 };
 
-const REQUEST_SCHEMA: &str = "inspr.janus.managed-dynamic-transport-request.v1";
-const RESPONSE_SCHEMA: &str = "inspr.janus.managed-dynamic-transport-response.v1";
-const RECEIPT_SCHEMA: &str = "inspr.janus.managed-dynamic-host-receipt.v1";
+const REQUEST_SCHEMA: &str = "inspr.janus.managed-dynamic-transport-request.v2";
+const RESPONSE_SCHEMA: &str = "inspr.janus.managed-dynamic-transport-response.v2";
+const RECEIPT_SCHEMA: &str = "inspr.janus.managed-dynamic-host-receipt.v2";
+const TRANSPORT_SCHEMA_VERSION: u8 = 2;
 const SOCKET_ENV: &str = "JANUS_MANAGED_DYNAMIC_TRANSPORT_SOCKET";
 const PEER_UID_ENV: &str = "JANUS_MANAGED_DYNAMIC_TRANSPORT_ALLOWED_UID";
 const PROFILE_ENV: &str = "JANUS_MANAGED_DYNAMIC_TRANSPORT_PROFILE_FILE";
@@ -66,9 +68,16 @@ struct TransportAcknowledgementRequest {
     envelope_ref: String,
     binding_ref: String,
     generation_ref: String,
+    reload_profile_ref: String,
+    health_profile_ref: String,
     phase: String,
     reason_code: String,
-    observed_at_unix_secs: u64,
+    materialization_reason_code: String,
+    materialized_at_unix_secs: u64,
+    reloaded_at_unix_secs: u64,
+    heartbeat_observed_at_unix_secs: u64,
+    process_observed_at_unix_secs: u64,
+    probe_observed_at_unix_secs: u64,
     packet_returned: bool,
     value_returned: bool,
 }
@@ -87,6 +96,8 @@ struct TransportResponse {
     envelope_ref: Option<String>,
     binding_ref: Option<String>,
     generation_ref: Option<String>,
+    reload_profile_ref: Option<String>,
+    health_profile_ref: Option<String>,
     packet_base64: Option<String>,
     phase: &'static str,
     reason_code: &'static str,
@@ -96,7 +107,7 @@ struct TransportResponse {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-struct MaterializationReceipt {
+struct ActivationReceipt {
     schema: String,
     schema_version: u8,
     host_ref: String,
@@ -107,9 +118,16 @@ struct MaterializationReceipt {
     envelope_ref: String,
     binding_ref: String,
     generation_ref: String,
+    reload_profile_ref: String,
+    health_profile_ref: String,
     phase: String,
     reason_code: String,
-    observed_at_unix_secs: u64,
+    materialization_reason_code: String,
+    materialized_at_unix_secs: u64,
+    reloaded_at_unix_secs: u64,
+    heartbeat_observed_at_unix_secs: u64,
+    process_observed_at_unix_secs: u64,
+    probe_observed_at_unix_secs: u64,
     packet_returned: bool,
     value_returned: bool,
     integrity_hash: String,
@@ -125,9 +143,16 @@ struct Acknowledgement {
     envelope_ref: String,
     binding_ref: String,
     generation_ref: String,
+    reload_profile_ref: String,
+    health_profile_ref: String,
     phase: String,
     reason_code: String,
-    observed_at_unix_secs: u64,
+    materialization_reason_code: String,
+    materialized_at_unix_secs: u64,
+    reloaded_at_unix_secs: u64,
+    heartbeat_observed_at_unix_secs: u64,
+    process_observed_at_unix_secs: u64,
+    probe_observed_at_unix_secs: u64,
     packet_returned: bool,
     value_returned: bool,
 }
@@ -209,7 +234,7 @@ async fn handle_connection(
             value_returned,
         } => {
             if schema != REQUEST_SCHEMA
-                || schema_version != SCHEMA_VERSION
+                || schema_version != TRANSPORT_SCHEMA_VERSION
                 || !valid_ref("host_", &host_ref)
                 || packet_returned
                 || value_returned
@@ -234,13 +259,20 @@ async fn handle_connection(
                 envelope_ref: receipt.envelope_ref,
                 binding_ref: receipt.binding_ref,
                 generation_ref: receipt.generation_ref,
+                reload_profile_ref: receipt.reload_profile_ref,
+                health_profile_ref: receipt.health_profile_ref,
                 phase: receipt.phase,
                 reason_code: receipt.reason_code,
-                observed_at_unix_secs: receipt.observed_at_unix_secs,
+                materialization_reason_code: receipt.materialization_reason_code,
+                materialized_at_unix_secs: receipt.materialized_at_unix_secs,
+                reloaded_at_unix_secs: receipt.reloaded_at_unix_secs,
+                heartbeat_observed_at_unix_secs: receipt.heartbeat_observed_at_unix_secs,
+                process_observed_at_unix_secs: receipt.process_observed_at_unix_secs,
+                probe_observed_at_unix_secs: receipt.probe_observed_at_unix_secs,
                 packet_returned: receipt.packet_returned,
                 value_returned: receipt.value_returned,
             };
-            if schema != REQUEST_SCHEMA || schema_version != SCHEMA_VERSION {
+            if schema != REQUEST_SCHEMA || schema_version != TRANSPORT_SCHEMA_VERSION {
                 denied("acknowledge", "dynamic_transport_request_invalid")
             } else {
                 acknowledge(profiles, receipt_dir, &acknowledgement, now)
@@ -304,7 +336,7 @@ fn claim(
     };
     Ok(TransportResponse {
         schema: RESPONSE_SCHEMA,
-        schema_version: SCHEMA_VERSION,
+        schema_version: TRANSPORT_SCHEMA_VERSION,
         action: "claim",
         host_ref: Some(record.host_ref),
         service_ref: Some(record.service_ref),
@@ -314,6 +346,8 @@ fn claim(
         envelope_ref: Some(record.envelope_ref),
         binding_ref: Some(record.binding_ref),
         generation_ref: Some(record.generation_ref),
+        reload_profile_ref: Some(record.reload_profile_ref),
+        health_profile_ref: Some(record.health_profile_ref),
         packet_base64: Some(record.packet_base64),
         phase: "claimed",
         reason_code: "dynamic_transport_package_claimed",
@@ -356,15 +390,29 @@ fn acknowledge(
         || record.envelope_ref != acknowledgement.envelope_ref
         || record.binding_ref != acknowledgement.binding_ref
         || record.generation_ref != acknowledgement.generation_ref
+        || record.reload_profile_ref != acknowledgement.reload_profile_ref
+        || record.health_profile_ref != acknowledgement.health_profile_ref
         || now >= record.expires_at_unix_secs
-        || acknowledgement.observed_at_unix_secs < record.prepared_at_unix_secs
-        || acknowledgement.observed_at_unix_secs > now.saturating_add(30)
+        || acknowledgement.materialized_at_unix_secs < record.prepared_at_unix_secs
+        || acknowledgement.reloaded_at_unix_secs < acknowledgement.materialized_at_unix_secs
+        || acknowledgement.heartbeat_observed_at_unix_secs < acknowledgement.reloaded_at_unix_secs
+        || acknowledgement.process_observed_at_unix_secs < acknowledgement.reloaded_at_unix_secs
+        || acknowledgement.probe_observed_at_unix_secs < acknowledgement.reloaded_at_unix_secs
+        || [
+            acknowledgement.materialized_at_unix_secs,
+            acknowledgement.reloaded_at_unix_secs,
+            acknowledgement.heartbeat_observed_at_unix_secs,
+            acknowledgement.process_observed_at_unix_secs,
+            acknowledgement.probe_observed_at_unix_secs,
+        ]
+        .iter()
+        .any(|observed| *observed > now.saturating_add(30))
     {
         return Err("dynamic_transport_receipt_denied");
     }
-    let mut receipt = MaterializationReceipt {
+    let mut receipt = ActivationReceipt {
         schema: RECEIPT_SCHEMA.to_string(),
-        schema_version: SCHEMA_VERSION,
+        schema_version: TRANSPORT_SCHEMA_VERSION,
         host_ref: acknowledgement.host_ref.clone(),
         service_ref: acknowledgement.service_ref.clone(),
         environment_policy_ref: acknowledgement.environment_policy_ref.clone(),
@@ -373,9 +421,16 @@ fn acknowledge(
         envelope_ref: acknowledgement.envelope_ref.clone(),
         binding_ref: acknowledgement.binding_ref.clone(),
         generation_ref: acknowledgement.generation_ref.clone(),
+        reload_profile_ref: acknowledgement.reload_profile_ref.clone(),
+        health_profile_ref: acknowledgement.health_profile_ref.clone(),
         phase: acknowledgement.phase.clone(),
         reason_code: acknowledgement.reason_code.clone(),
-        observed_at_unix_secs: acknowledgement.observed_at_unix_secs,
+        materialization_reason_code: acknowledgement.materialization_reason_code.clone(),
+        materialized_at_unix_secs: acknowledgement.materialized_at_unix_secs,
+        reloaded_at_unix_secs: acknowledgement.reloaded_at_unix_secs,
+        heartbeat_observed_at_unix_secs: acknowledgement.heartbeat_observed_at_unix_secs,
+        process_observed_at_unix_secs: acknowledgement.process_observed_at_unix_secs,
+        probe_observed_at_unix_secs: acknowledgement.probe_observed_at_unix_secs,
         packet_returned: false,
         value_returned: false,
         integrity_hash: String::new(),
@@ -391,7 +446,7 @@ fn acknowledge(
     }
     Ok(TransportResponse {
         schema: RESPONSE_SCHEMA,
-        schema_version: SCHEMA_VERSION,
+        schema_version: TRANSPORT_SCHEMA_VERSION,
         action: "acknowledge",
         host_ref: Some(receipt.host_ref),
         service_ref: Some(receipt.service_ref),
@@ -401,8 +456,10 @@ fn acknowledge(
         envelope_ref: Some(receipt.envelope_ref),
         binding_ref: Some(receipt.binding_ref),
         generation_ref: Some(receipt.generation_ref),
+        reload_profile_ref: Some(receipt.reload_profile_ref),
+        health_profile_ref: Some(receipt.health_profile_ref),
         packet_base64: None,
-        phase: "materialized",
+        phase: "active",
         reason_code: "dynamic_transport_receipt_recorded",
         packet_returned: false,
         value_returned: false,
@@ -420,12 +477,19 @@ fn validate_acknowledgement(
         || !valid_ref("env_", &acknowledgement.envelope_ref)
         || !valid_ref("bind_", &acknowledgement.binding_ref)
         || !valid_ref("gen_", &acknowledgement.generation_ref)
-        || acknowledgement.phase != "materialized"
+        || !valid_ref("reload_", &acknowledgement.reload_profile_ref)
+        || !valid_ref("health_", &acknowledgement.health_profile_ref)
+        || acknowledgement.phase != "active"
+        || acknowledgement.reason_code != "dynamic_host_environment_active"
         || !matches!(
-            acknowledgement.reason_code.as_str(),
+            acknowledgement.materialization_reason_code.as_str(),
             "dynamic_host_environment_materialized" | "dynamic_host_materialization_idempotent"
         )
-        || acknowledgement.observed_at_unix_secs == 0
+        || acknowledgement.materialized_at_unix_secs == 0
+        || acknowledgement.reloaded_at_unix_secs < acknowledgement.materialized_at_unix_secs
+        || acknowledgement.heartbeat_observed_at_unix_secs < acknowledgement.reloaded_at_unix_secs
+        || acknowledgement.process_observed_at_unix_secs < acknowledgement.reloaded_at_unix_secs
+        || acknowledgement.probe_observed_at_unix_secs < acknowledgement.reloaded_at_unix_secs
         || acknowledgement.packet_returned
         || acknowledgement.value_returned
     {
@@ -453,7 +517,7 @@ fn load_outbox(
     let record: OutboxRecord =
         serde_json::from_slice(&raw).map_err(|_| "dynamic_transport_outbox_invalid")?;
     if record.schema != OUTBOX_SCHEMA
-        || record.schema_version != SCHEMA_VERSION
+        || record.schema_version != DELIVERY_SCHEMA_VERSION
         || record.package_ref != package_ref
         || !valid_ref("pkg_", &record.package_ref)
         || !valid_ref("env_", &record.envelope_ref)
@@ -493,7 +557,7 @@ fn load_outbox(
 fn load_receipt(
     receipt_dir: &Path,
     record: &OutboxRecord,
-) -> std::result::Result<Option<MaterializationReceipt>, &'static str> {
+) -> std::result::Result<Option<ActivationReceipt>, &'static str> {
     let path = receipt_path(receipt_dir, &record.package_ref);
     let metadata = match fs::symlink_metadata(&path) {
         Ok(metadata) => metadata,
@@ -509,10 +573,10 @@ fn load_receipt(
         return Err("dynamic_transport_receipt_invalid");
     }
     let raw = fs::read(path).map_err(|_| "dynamic_transport_receipt_unavailable")?;
-    let receipt: MaterializationReceipt =
+    let receipt: ActivationReceipt =
         serde_json::from_slice(&raw).map_err(|_| "dynamic_transport_receipt_invalid")?;
     if receipt.schema != RECEIPT_SCHEMA
-        || receipt.schema_version != SCHEMA_VERSION
+        || receipt.schema_version != TRANSPORT_SCHEMA_VERSION
         || receipt.host_ref != record.host_ref
         || receipt.service_ref != record.service_ref
         || receipt.environment_policy_ref != record.environment_policy_ref
@@ -521,12 +585,19 @@ fn load_receipt(
         || receipt.envelope_ref != record.envelope_ref
         || receipt.binding_ref != record.binding_ref
         || receipt.generation_ref != record.generation_ref
-        || receipt.phase != "materialized"
+        || receipt.reload_profile_ref != record.reload_profile_ref
+        || receipt.health_profile_ref != record.health_profile_ref
+        || receipt.phase != "active"
+        || receipt.reason_code != "dynamic_host_environment_active"
         || !matches!(
-            receipt.reason_code.as_str(),
+            receipt.materialization_reason_code.as_str(),
             "dynamic_host_environment_materialized" | "dynamic_host_materialization_idempotent"
         )
-        || receipt.observed_at_unix_secs < record.prepared_at_unix_secs
+        || receipt.materialized_at_unix_secs < record.prepared_at_unix_secs
+        || receipt.reloaded_at_unix_secs < receipt.materialized_at_unix_secs
+        || receipt.heartbeat_observed_at_unix_secs < receipt.reloaded_at_unix_secs
+        || receipt.process_observed_at_unix_secs < receipt.reloaded_at_unix_secs
+        || receipt.probe_observed_at_unix_secs < receipt.reloaded_at_unix_secs
         || receipt.packet_returned
         || receipt.value_returned
         || receipt.integrity_hash != receipt_hash(&receipt)?
@@ -536,7 +607,7 @@ fn load_receipt(
     Ok(Some(receipt))
 }
 
-fn receipt_hash(receipt: &MaterializationReceipt) -> std::result::Result<String, &'static str> {
+fn receipt_hash(receipt: &ActivationReceipt) -> std::result::Result<String, &'static str> {
     let mut unsigned = receipt.clone();
     unsigned.integrity_hash.clear();
     let encoded = serde_json::to_vec(&unsigned).map_err(|_| "dynamic_transport_receipt_invalid")?;
@@ -545,7 +616,7 @@ fn receipt_hash(receipt: &MaterializationReceipt) -> std::result::Result<String,
 
 fn write_receipt_create_new(
     path: &Path,
-    receipt: &MaterializationReceipt,
+    receipt: &ActivationReceipt,
 ) -> std::result::Result<(), &'static str> {
     let parent = path
         .parent()
@@ -626,7 +697,7 @@ fn receipt_path(receipt_dir: &Path, package_ref: &str) -> PathBuf {
 fn no_work(host_ref: &str) -> TransportResponse {
     TransportResponse {
         schema: RESPONSE_SCHEMA,
-        schema_version: SCHEMA_VERSION,
+        schema_version: TRANSPORT_SCHEMA_VERSION,
         action: "claim",
         host_ref: Some(host_ref.to_string()),
         service_ref: None,
@@ -636,6 +707,8 @@ fn no_work(host_ref: &str) -> TransportResponse {
         envelope_ref: None,
         binding_ref: None,
         generation_ref: None,
+        reload_profile_ref: None,
+        health_profile_ref: None,
         packet_base64: None,
         phase: "empty",
         reason_code: "dynamic_transport_no_package",
@@ -647,7 +720,7 @@ fn no_work(host_ref: &str) -> TransportResponse {
 fn denied(action: &'static str, reason_code: &'static str) -> TransportResponse {
     TransportResponse {
         schema: RESPONSE_SCHEMA,
-        schema_version: SCHEMA_VERSION,
+        schema_version: TRANSPORT_SCHEMA_VERSION,
         action,
         host_ref: None,
         service_ref: None,
@@ -657,6 +730,8 @@ fn denied(action: &'static str, reason_code: &'static str) -> TransportResponse 
         envelope_ref: None,
         binding_ref: None,
         generation_ref: None,
+        reload_profile_ref: None,
+        health_profile_ref: None,
         packet_base64: None,
         phase: "denied",
         reason_code,
@@ -830,8 +905,33 @@ mod tests {
         }
     }
 
+    fn activation_acknowledgement(record: &OutboxRecord) -> Acknowledgement {
+        Acknowledgement {
+            host_ref: record.host_ref.clone(),
+            service_ref: record.service_ref.clone(),
+            environment_policy_ref: record.environment_policy_ref.clone(),
+            operation_ref: record.operation_ref.clone(),
+            package_ref: record.package_ref.clone(),
+            envelope_ref: record.envelope_ref.clone(),
+            binding_ref: record.binding_ref.clone(),
+            generation_ref: record.generation_ref.clone(),
+            reload_profile_ref: record.reload_profile_ref.clone(),
+            health_profile_ref: record.health_profile_ref.clone(),
+            phase: "active".to_string(),
+            reason_code: "dynamic_host_environment_active".to_string(),
+            materialization_reason_code: "dynamic_host_environment_materialized".to_string(),
+            materialized_at_unix_secs: 1_800_000_005,
+            reloaded_at_unix_secs: 1_800_000_006,
+            heartbeat_observed_at_unix_secs: 1_800_000_010,
+            process_observed_at_unix_secs: 1_800_000_010,
+            probe_observed_at_unix_secs: 1_800_000_010,
+            packet_returned: false,
+            value_returned: false,
+        }
+    }
+
     #[test]
-    fn exact_host_claim_and_idempotent_receipt_are_value_free() {
+    fn exact_host_claim_and_idempotent_active_receipt_are_value_free() {
         let fixture = fixture();
         let now = UNIX_EPOCH + Duration::from_secs(1_800_000_010);
         let claimed = claim(
@@ -848,21 +948,15 @@ mod tests {
             claimed.packet_base64.as_deref(),
             Some(fixture.record.packet_base64.as_str())
         );
-        let acknowledgement = Acknowledgement {
-            host_ref: fixture.record.host_ref.clone(),
-            service_ref: fixture.record.service_ref.clone(),
-            environment_policy_ref: fixture.record.environment_policy_ref.clone(),
-            operation_ref: fixture.record.operation_ref.clone(),
-            package_ref: fixture.record.package_ref.clone(),
-            envelope_ref: fixture.record.envelope_ref.clone(),
-            binding_ref: fixture.record.binding_ref.clone(),
-            generation_ref: fixture.record.generation_ref.clone(),
-            phase: "materialized".to_string(),
-            reason_code: "dynamic_host_environment_materialized".to_string(),
-            observed_at_unix_secs: 1_800_000_010,
-            packet_returned: false,
-            value_returned: false,
-        };
+        assert_eq!(
+            claimed.reload_profile_ref.as_deref(),
+            Some(fixture.record.reload_profile_ref.as_str())
+        );
+        assert_eq!(
+            claimed.health_profile_ref.as_deref(),
+            Some(fixture.record.health_profile_ref.as_str())
+        );
+        let acknowledgement = activation_acknowledgement(&fixture.record);
         let first = acknowledge(
             &fixture.profiles,
             &fixture.receipt_dir,
@@ -877,8 +971,8 @@ mod tests {
             now,
         )
         .unwrap();
-        assert_eq!(first.phase, "materialized");
-        assert_eq!(second.phase, "materialized");
+        assert_eq!(first.phase, "active");
+        assert_eq!(second.phase, "active");
         assert!(!first.packet_returned && !first.value_returned);
         let empty = claim(
             &fixture.profiles,
@@ -903,7 +997,7 @@ mod tests {
     fn wire_protocol_requires_a_nested_value_free_receipt() {
         let raw = serde_json::json!({
             "schema": REQUEST_SCHEMA,
-            "schema_version": SCHEMA_VERSION,
+            "schema_version": TRANSPORT_SCHEMA_VERSION,
             "action": "acknowledge",
             "receipt": {
                 "host_ref": "host_7f94a1c8e912",
@@ -914,9 +1008,16 @@ mod tests {
                 "envelope_ref": "env_12345678abcdef00",
                 "binding_ref": "bind_12345678abcdef00",
                 "generation_ref": "gen_12345678abcdef00",
-                "phase": "materialized",
-                "reason_code": "dynamic_host_environment_materialized",
-                "observed_at_unix_secs": 1_800_000_010_u64,
+                "reload_profile_ref": "reload_12345678abcdef00",
+                "health_profile_ref": "health_12345678abcdef00",
+                "phase": "active",
+                "reason_code": "dynamic_host_environment_active",
+                "materialization_reason_code": "dynamic_host_environment_materialized",
+                "materialized_at_unix_secs": 1_800_000_005_u64,
+                "reloaded_at_unix_secs": 1_800_000_006_u64,
+                "heartbeat_observed_at_unix_secs": 1_800_000_010_u64,
+                "process_observed_at_unix_secs": 1_800_000_010_u64,
+                "probe_observed_at_unix_secs": 1_800_000_010_u64,
                 "packet_returned": false,
                 "value_returned": false
             }
@@ -944,21 +1045,13 @@ mod tests {
             .unwrap_err(),
             "dynamic_transport_host_denied"
         );
-        let acknowledgement = Acknowledgement {
-            host_ref: fixture.record.host_ref.clone(),
-            service_ref: fixture.record.service_ref.clone(),
-            environment_policy_ref: fixture.record.environment_policy_ref.clone(),
-            operation_ref: fixture.record.operation_ref.clone(),
-            package_ref: fixture.record.package_ref.clone(),
-            envelope_ref: fixture.record.envelope_ref.clone(),
-            binding_ref: fixture.record.binding_ref.clone(),
-            generation_ref: fixture.record.generation_ref.clone(),
-            phase: "materialized".to_string(),
-            reason_code: "dynamic_host_environment_materialized".to_string(),
-            observed_at_unix_secs: 1_800_000_010,
-            packet_returned: false,
-            value_returned: false,
-        };
+        let acknowledgement = activation_acknowledgement(&fixture.record);
+        let mut stale = acknowledgement.clone();
+        stale.heartbeat_observed_at_unix_secs = stale.reloaded_at_unix_secs - 1;
+        assert_eq!(
+            acknowledge(&fixture.profiles, &fixture.receipt_dir, &stale, now).unwrap_err(),
+            "dynamic_transport_receipt_invalid"
+        );
         acknowledge(
             &fixture.profiles,
             &fixture.receipt_dir,
@@ -967,7 +1060,8 @@ mod tests {
         )
         .unwrap();
         let mut conflicting = acknowledgement;
-        conflicting.reason_code = "dynamic_host_materialization_idempotent".to_string();
+        conflicting.materialization_reason_code =
+            "dynamic_host_materialization_idempotent".to_string();
         assert_eq!(
             acknowledge(&fixture.profiles, &fixture.receipt_dir, &conflicting, now,).unwrap_err(),
             "dynamic_transport_receipt_conflict"
