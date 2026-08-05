@@ -33,6 +33,9 @@ type managedDynamicSetupIntent struct {
 	EnvironmentPolicyFingerprint string `json:"environment_policy_fingerprint"`
 	DeclarationFingerprint       string `json:"declaration_fingerprint"`
 	EnvironmentName              string `json:"environment_name"`
+	BindingRef                   string `json:"binding_ref,omitempty"`
+	SecretRef                    string `json:"secret_ref,omitempty"`
+	GenerationRef                string `json:"generation_ref,omitempty"`
 	HumanSessionRef              string `json:"human_session_ref"`
 	IssuerRef                    string `json:"issuer_ref"`
 	AudienceRef                  string `json:"audience_ref"`
@@ -115,7 +118,7 @@ func (resolver managedDynamicDeclarationResolver) Resolve(intent managedDynamicS
 			declaration.DeclarationFingerprint != intent.DeclarationFingerprint ||
 			policy.EnvironmentPolicyRef != intent.EnvironmentPolicyRef ||
 			policy.EnvironmentPolicyFingerprint != intent.EnvironmentPolicyFingerprint ||
-			!containsManagedSource(policy.AllowedSources, intent.Source) ||
+			(intent.OperationKind != "remove" && !containsManagedSource(policy.AllowedSources, intent.Source)) ||
 			!managedDynamicPolicyAdmitsName(*policy, intent.EnvironmentName) {
 			continue
 		}
@@ -276,14 +279,16 @@ func validateManagedDynamicSetupIntent(intent managedDynamicSetupIntent) error {
 	if intent.Schema != managedDynamicSetupIntentSchema ||
 		intent.SchemaVersion != managedDynamicContractVersion ||
 		!validManagedRef("intent_", intent.IntentRef) ||
-		(intent.OperationKind != "create" && intent.OperationKind != "replace") ||
-		!validManagedSource(intent.Source) || intent.Source == "remove" ||
+		!matchesManagedDynamicOperationSource(intent.OperationKind, intent.Source) ||
 		!validManagedRef("host_", intent.HostRef) ||
 		!validManagedRef("svc_", intent.ServiceRef) ||
 		!validManagedRef("envpol_", intent.EnvironmentPolicyRef) ||
 		!validManagedRef("envpf_", intent.EnvironmentPolicyFingerprint) ||
 		!validManagedRef("decl_", intent.DeclarationFingerprint) ||
 		!validManagedEnvironmentName(intent.EnvironmentName) ||
+		(intent.OperationKind == "remove" && (!validManagedRef("bind_", intent.BindingRef) ||
+			!validManagedRef("sec_", intent.SecretRef) || !validManagedRef("gen_", intent.GenerationRef))) ||
+		(intent.OperationKind != "remove" && (intent.BindingRef != "" || intent.SecretRef != "" || intent.GenerationRef != "")) ||
 		!validManagedRef("hsn_", intent.HumanSessionRef) ||
 		!validManagedRef("sys_", intent.IssuerRef) ||
 		!validManagedRef("sys_", intent.AudienceRef) ||
@@ -294,6 +299,12 @@ func validateManagedDynamicSetupIntent(intent managedDynamicSetupIntent) error {
 		return errors.New("managed_intent_payload_invalid")
 	}
 	return nil
+}
+
+func matchesManagedDynamicOperationSource(operationKind, source string) bool {
+	return ((operationKind == "create" || operationKind == "replace") &&
+		(source == "generated" || source == "import")) ||
+		(operationKind == "remove" && source == "remove")
 }
 
 func validateManagedDynamicDeclaration(declaration managedDynamicDeclaration) error {

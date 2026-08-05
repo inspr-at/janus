@@ -1247,7 +1247,7 @@ form.managed-action-form .managed-source-choice {
 }
 .managed-removal-summary h2 { margin: 0 0 8px; }
 .managed-removal-summary p { margin: 6px 0; font-size: 12.5px; }
-.managed-removal-summary small { display: block; margin-top: 4px; color: var(--muted); }
+.managed-removal-summary small { display: block; margin-top: 4px; color: var(--ink); }
 .managed-trust-line {
   display: flex;
   gap: 8px;

@@ -16,8 +16,9 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 
 use super::{
-    read_private_regular, valid_ref, DynamicHostExecutorOutcome, DynamicHostReplacementControlV1,
-    HostEnvelopeControlV1, HostEnvelopeQuarantineControlV1, HostExecutor, HostExecutorOutcome,
+    read_private_regular, valid_ref, DynamicHostExecutorOutcome, DynamicHostRemovalControlV1,
+    DynamicHostReplacementControlV1, HostEnvelopeControlV1, HostEnvelopeQuarantineControlV1,
+    HostExecutor, HostExecutorOutcome,
 };
 
 const CONFIG_SCHEMA: &str = "inspr.janus.managed-host-agent-config.v2";
@@ -455,10 +456,10 @@ impl ManagedHostAgent {
         let materialized_at = unix_seconds()?;
         validate_dynamic_outcome(&claim, &outcome)?;
         if self.compose_up(profile).is_err() {
-            if claim.operation_kind != "replace" {
+            if claim.operation_kind == "create" {
                 return Err(ManagedHostAgentError::new("managed_dynamic_reload_failed"));
             }
-            let receipt = self.recover_dynamic_replacement(
+            let receipt = self.recover_dynamic_mutation(
                 executor,
                 &claim,
                 profile,
@@ -472,8 +473,8 @@ impl ManagedHostAgent {
         let reloaded_at = unix_seconds()?;
         let health = match self.verify_observation(profile) {
             Ok(health) => health,
-            Err(_) if claim.operation_kind == "replace" => {
-                let receipt = self.recover_dynamic_replacement(
+            Err(_) if claim.operation_kind != "create" => {
+                let receipt = self.recover_dynamic_mutation(
                     executor,
                     &claim,
                     profile,
@@ -491,6 +492,11 @@ impl ManagedHostAgent {
                 .commit_dynamic_replacement(&dynamic_replacement_control(&claim), SystemTime::now())
                 .map_err(|_| ManagedHostAgentError::new("managed_dynamic_commit_failed"))?;
             validate_dynamic_commit_outcome(&claim, &committed)?;
+        } else if claim.operation_kind == "remove" {
+            let committed = executor
+                .commit_dynamic_removal(&dynamic_removal_control(&claim), SystemTime::now())
+                .map_err(|_| ManagedHostAgentError::new("managed_dynamic_commit_failed"))?;
+            validate_dynamic_commit_outcome(&claim, &committed)?;
         }
         let receipt =
             dynamic_active_receipt(&claim, &outcome, materialized_at, reloaded_at, health)?;
@@ -498,7 +504,7 @@ impl ManagedHostAgent {
         Ok(true)
     }
 
-    fn recover_dynamic_replacement(
+    fn recover_dynamic_mutation(
         &self,
         executor: &HostExecutor,
         claim: &ManagedDynamicHostPackageClaimV3,
@@ -507,9 +513,20 @@ impl ManagedHostAgent {
         materialized_at_unix_secs: i64,
         failure_reason_code: &'static str,
     ) -> AgentResult<ManagedDynamicHostReceiptV3> {
-        let rolled_back = executor
-            .rollback_dynamic_replacement(&dynamic_replacement_control(claim), SystemTime::now())
-            .map_err(|_| ManagedHostAgentError::new("managed_dynamic_rollback_failed"))?;
+        let rolled_back = match claim.operation_kind.as_str() {
+            "replace" => executor.rollback_dynamic_replacement(
+                &dynamic_replacement_control(claim),
+                SystemTime::now(),
+            ),
+            "remove" => executor
+                .rollback_dynamic_removal(&dynamic_removal_control(claim), SystemTime::now()),
+            _ => {
+                return Err(ManagedHostAgentError::new(
+                    "managed_dynamic_rollback_failed",
+                ))
+            }
+        }
+        .map_err(|_| ManagedHostAgentError::new("managed_dynamic_rollback_failed"))?;
         validate_dynamic_rollback_outcome(claim, &rolled_back)?;
         self.compose_up(profile)
             .map_err(|_| ManagedHostAgentError::new("managed_dynamic_recovery_failed"))?;
@@ -575,7 +592,10 @@ impl ManagedHostAgent {
             || !valid_ref("svc_", &claim.service_ref)
             || !valid_ref("envpol_", &claim.environment_policy_ref)
             || !valid_ref("op_", &claim.operation_ref)
-            || !matches!(claim.operation_kind.as_str(), "create" | "replace")
+            || !matches!(
+                claim.operation_kind.as_str(),
+                "create" | "replace" | "remove"
+            )
             || !valid_ref("pkg_", &claim.package_ref)
             || !valid_ref("env_", &claim.envelope_ref)
             || !valid_ref("bind_", &claim.binding_ref)
@@ -1484,7 +1504,7 @@ fn validate_dynamic_outcome(
         || outcome.operation_ref.as_deref() != Some(claim.operation_ref.as_str())
         || outcome.binding_ref.as_deref() != Some(claim.binding_ref.as_str())
         || outcome.generation_ref.as_deref() != Some(claim.generation_ref.as_str())
-        || outcome.binding_count == 0
+        || (claim.operation_kind != "remove" && outcome.binding_count == 0)
         || outcome.phase != "materialized"
         || match claim.operation_kind.as_str() {
             "create" => {
@@ -1499,6 +1519,11 @@ fn validate_dynamic_outcome(
                 outcome.reason_code.as_str(),
                 "dynamic_host_replacement_materialized" | "dynamic_host_materialization_idempotent"
             ),
+            "remove" => {
+                outcome.reason_code != "dynamic_host_removal_materialized"
+                    || outcome.previous_binding_ref.is_some()
+                    || outcome.previous_generation_ref.is_some()
+            }
             _ => true,
         }
         || outcome.value_returned
@@ -1520,24 +1545,48 @@ fn dynamic_replacement_control(
     }
 }
 
+fn dynamic_removal_control(
+    claim: &ManagedDynamicHostPackageClaimV3,
+) -> DynamicHostRemovalControlV1 {
+    DynamicHostRemovalControlV1 {
+        operation_ref: claim.operation_ref.clone(),
+        binding_ref: claim.binding_ref.clone(),
+        generation_ref: claim.generation_ref.clone(),
+    }
+}
+
 fn validate_dynamic_commit_outcome(
     claim: &ManagedDynamicHostPackageClaimV3,
     outcome: &DynamicHostExecutorOutcome,
 ) -> AgentResult<()> {
-    if claim.operation_kind != "replace"
-        || outcome.action != "commit-dynamic-replacement"
+    let valid_terminal = match claim.operation_kind.as_str() {
+        "replace" => {
+            outcome.action == "commit-dynamic-replacement"
+                && outcome.binding_count > 0
+                && outcome.phase == "committed"
+                && matches!(
+                    outcome.reason_code.as_str(),
+                    "dynamic_host_replacement_committed"
+                        | "dynamic_host_replacement_commit_idempotent"
+                )
+        }
+        "remove" => {
+            outcome.action == "commit-dynamic-removal"
+                && outcome.phase == "removed"
+                && matches!(
+                    outcome.reason_code.as_str(),
+                    "dynamic_host_removal_committed" | "dynamic_host_removal_commit_idempotent"
+                )
+        }
+        _ => false,
+    };
+    if !valid_terminal
         || outcome.host_ref != claim.host_ref
         || outcome.service_ref != claim.service_ref
         || outcome.environment_policy_ref != claim.environment_policy_ref
         || outcome.operation_ref.as_deref() != Some(claim.operation_ref.as_str())
         || outcome.binding_ref.as_deref() != Some(claim.binding_ref.as_str())
         || outcome.generation_ref.as_deref() != Some(claim.generation_ref.as_str())
-        || outcome.binding_count == 0
-        || outcome.phase != "committed"
-        || !matches!(
-            outcome.reason_code.as_str(),
-            "dynamic_host_replacement_committed" | "dynamic_host_replacement_commit_idempotent"
-        )
         || outcome.value_returned
     {
         return Err(ManagedHostAgentError::new("managed_dynamic_commit_invalid"));
@@ -1549,29 +1598,37 @@ fn validate_dynamic_rollback_outcome(
     claim: &ManagedDynamicHostPackageClaimV3,
     outcome: &DynamicHostExecutorOutcome,
 ) -> AgentResult<()> {
-    if claim.operation_kind != "replace"
-        || outcome.action != "rollback-dynamic-replacement"
+    let valid_terminal = match claim.operation_kind.as_str() {
+        "replace" => {
+            outcome.action == "rollback-dynamic-replacement"
+                && outcome.binding_count > 0
+                && outcome.reason_code == "dynamic_host_replacement_rolled_back"
+                && outcome
+                    .previous_binding_ref
+                    .as_deref()
+                    .is_some_and(|value| valid_ref("bind_", value) && value != claim.binding_ref)
+                && outcome
+                    .previous_generation_ref
+                    .as_deref()
+                    .is_some_and(|value| valid_ref("gen_", value) && value != claim.generation_ref)
+        }
+        "remove" => {
+            outcome.action == "rollback-dynamic-removal"
+                && outcome.binding_count > 0
+                && outcome.reason_code == "dynamic_host_removal_rolled_back"
+                && outcome.previous_binding_ref.is_none()
+                && outcome.previous_generation_ref.is_none()
+        }
+        _ => false,
+    };
+    if !valid_terminal
         || outcome.host_ref != claim.host_ref
         || outcome.service_ref != claim.service_ref
         || outcome.environment_policy_ref != claim.environment_policy_ref
         || outcome.operation_ref.as_deref() != Some(claim.operation_ref.as_str())
         || outcome.binding_ref.as_deref() != Some(claim.binding_ref.as_str())
         || outcome.generation_ref.as_deref() != Some(claim.generation_ref.as_str())
-        || outcome
-            .previous_binding_ref
-            .as_deref()
-            .map_or(true, |value| {
-                !valid_ref("bind_", value) || value == claim.binding_ref
-            })
-        || outcome
-            .previous_generation_ref
-            .as_deref()
-            .map_or(true, |value| {
-                !valid_ref("gen_", value) || value == claim.generation_ref
-            })
-        || outcome.binding_count == 0
         || outcome.phase != "rolled_back"
-        || outcome.reason_code != "dynamic_host_replacement_rolled_back"
         || outcome.value_returned
     {
         return Err(ManagedHostAgentError::new(
@@ -1616,8 +1673,16 @@ fn dynamic_active_receipt(
         generation_ref: claim.generation_ref.clone(),
         reload_profile_ref: claim.reload_profile_ref.clone(),
         health_profile_ref: claim.health_profile_ref.clone(),
-        phase: "active",
-        reason_code: "dynamic_host_environment_active",
+        phase: if claim.operation_kind == "remove" {
+            "removed"
+        } else {
+            "active"
+        },
+        reason_code: if claim.operation_kind == "remove" {
+            "dynamic_host_environment_removed"
+        } else {
+            "dynamic_host_environment_active"
+        },
         materialization_reason_code: outcome.reason_code.clone(),
         failure_reason_code: None,
         restored_binding_ref: None,
@@ -1674,11 +1739,23 @@ fn dynamic_rollback_receipt(
         reload_profile_ref: claim.reload_profile_ref.clone(),
         health_profile_ref: claim.health_profile_ref.clone(),
         phase: "rolled_back",
-        reason_code: "dynamic_host_replacement_rolled_back",
+        reason_code: if claim.operation_kind == "remove" {
+            "dynamic_host_removal_rolled_back"
+        } else {
+            "dynamic_host_replacement_rolled_back"
+        },
         materialization_reason_code: materialized.reason_code.clone(),
         failure_reason_code: Some(failure_reason_code),
-        restored_binding_ref: rolled_back.previous_binding_ref.clone(),
-        restored_generation_ref: rolled_back.previous_generation_ref.clone(),
+        restored_binding_ref: if claim.operation_kind == "remove" {
+            Some(claim.binding_ref.clone())
+        } else {
+            rolled_back.previous_binding_ref.clone()
+        },
+        restored_generation_ref: if claim.operation_kind == "remove" {
+            Some(claim.generation_ref.clone())
+        } else {
+            rolled_back.previous_generation_ref.clone()
+        },
         materialized_at_unix_secs,
         reloaded_at_unix_secs: recovered_at_unix_secs,
         heartbeat_observed_at_unix_secs: health.heartbeat_observed_at_unix_secs,

@@ -76,6 +76,29 @@ func TestManagedDynamicRollbackReceiptRequiresExactDistinctPreviousGeneration(t 
 	}
 }
 
+func TestManagedDynamicRemovalReceiptRequiresExactHealthyOutcomeOrExactRollback(t *testing.T) {
+	receipt := dynamicTestReceipt()
+	receipt.OperationKind = "remove"
+	receipt.Phase = "removed"
+	receipt.ReasonCode = "dynamic_host_environment_removed"
+	receipt.MaterializationReasonCode = "dynamic_host_removal_materialized"
+	if err := validateManagedDynamicActivationReceipt(receipt); err != nil {
+		t.Fatalf("exact removed receipt denied: %v", err)
+	}
+	receipt.Phase = "rolled_back"
+	receipt.ReasonCode = "dynamic_host_removal_rolled_back"
+	receipt.FailureReasonCode = "dynamic_host_health_failed"
+	receipt.RestoredBindingRef = receipt.BindingRef
+	receipt.RestoredGenerationRef = receipt.GenerationRef
+	if err := validateManagedDynamicActivationReceipt(receipt); err != nil {
+		t.Fatalf("exact removal rollback denied: %v", err)
+	}
+	receipt.RestoredGenerationRef = "gen_wrongrestored0001"
+	if validateManagedDynamicActivationReceipt(receipt) == nil {
+		t.Fatal("removal rollback accepted a different generation")
+	}
+}
+
 func TestManagedDynamicTransportClientUsesExactValueFreeFrames(t *testing.T) {
 	clientConnection, serverConnection := net.Pipe()
 	client := newManagedDynamicTransportClient("/run/janus/dynamic-transport.sock")

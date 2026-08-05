@@ -97,9 +97,10 @@ pub async fn open_dynamic_custody(
     let metadata = fs::symlink_metadata(&path).map_err(map_store_io)?;
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
         if !metadata.is_file()
             || metadata.file_type().is_symlink()
+            || metadata.nlink() != 1
             || metadata.permissions().mode() & 0o077 != 0
             || metadata.len() == 0
             || metadata.len() > 2 * 1024 * 1024
@@ -123,6 +124,159 @@ pub async fn open_dynamic_custody(
         });
     }
     Ok(SecretValue::new(plaintext))
+}
+
+/// Value-free handle for an operation-bound dynamic custody quarantine.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DynamicAgeQuarantineMaterial {
+    pub secret_ref: janus_core::ManagedSecretRef,
+    pub operation_ref: String,
+    pub purge_not_before_unix_secs: u64,
+    pub value_returned: bool,
+}
+
+/// Move one exact dynamic ciphertext out of active custody without opening it.
+/// Repeating the same operation is idempotent; a conflicting quarantine fails.
+pub fn quarantine_dynamic_custody(
+    root_dir: &Path,
+    secret_ref: janus_core::ManagedSecretRef,
+    operation_ref: &str,
+    purge_not_before_unix_secs: u64,
+) -> JanusResult<DynamicAgeQuarantineMaterial> {
+    validate_dynamic_quarantine_contract(root_dir, operation_ref, purge_not_before_unix_secs)?;
+    let _lock = try_lock_store_exclusive(root_dir)?;
+    let active = root_dir.join(format!("{}.age", secret_ref.as_str()));
+    let quarantined = dynamic_quarantine_path(root_dir, &secret_ref, operation_ref);
+    if quarantined.is_file() && !active.exists() {
+        return Ok(DynamicAgeQuarantineMaterial {
+            secret_ref,
+            operation_ref: operation_ref.to_string(),
+            purge_not_before_unix_secs,
+            value_returned: false,
+        });
+    }
+    validate_private_ciphertext(&active)?;
+    if quarantined.exists() {
+        return Err(JanusError::StoreUnavailable {
+            detail: "dynamic age quarantine conflicts with active custody".to_string(),
+        });
+    }
+    fs::rename(&active, &quarantined).map_err(map_store_io)?;
+    sync_parent(&quarantined)?;
+    Ok(DynamicAgeQuarantineMaterial {
+        secret_ref,
+        operation_ref: operation_ref.to_string(),
+        purge_not_before_unix_secs,
+        value_returned: false,
+    })
+}
+
+/// Irreversibly purge an exact dynamic quarantine only after its fixed wait.
+pub fn purge_dynamic_custody_if_due(
+    root_dir: &Path,
+    material: &DynamicAgeQuarantineMaterial,
+    now: SystemTime,
+) -> JanusResult<AgeAdminOutcome> {
+    validate_dynamic_quarantine_contract(
+        root_dir,
+        &material.operation_ref,
+        material.purge_not_before_unix_secs,
+    )?;
+    if material.value_returned {
+        return Err(JanusError::StoreUnavailable {
+            detail: "dynamic age quarantine handle is invalid".to_string(),
+        });
+    }
+    if unix_seconds(now)? < material.purge_not_before_unix_secs {
+        return Err(JanusError::PolicyDenied {
+            reason_code: "dynamic_age_quarantine_not_due",
+            detail: "dynamic age quarantine recovery window is still open".to_string(),
+        });
+    }
+    let _lock = try_lock_store_exclusive(root_dir)?;
+    let active = root_dir.join(format!("{}.age", material.secret_ref.as_str()));
+    if active.exists() {
+        return Err(JanusError::StoreUnavailable {
+            detail: "dynamic age purge target became active".to_string(),
+        });
+    }
+    let quarantined =
+        dynamic_quarantine_path(root_dir, &material.secret_ref, &material.operation_ref);
+    if !quarantined.exists() {
+        return Ok(AgeAdminOutcome {
+            action: "dynamic.custody.purge",
+            changed: false,
+            present_secrets: 0,
+            recipient_count: 0,
+            value_returned: false,
+        });
+    }
+    validate_private_ciphertext(&quarantined)?;
+    fs::remove_file(&quarantined).map_err(map_store_io)?;
+    sync_parent(&quarantined)?;
+    Ok(AgeAdminOutcome {
+        action: "dynamic.custody.purge",
+        changed: true,
+        present_secrets: 0,
+        recipient_count: 0,
+        value_returned: false,
+    })
+}
+
+fn validate_dynamic_quarantine_contract(
+    root_dir: &Path,
+    operation_ref: &str,
+    purge_not_before_unix_secs: u64,
+) -> JanusResult<()> {
+    if !normalized_absolute_path(root_dir)
+        || !valid_dynamic_ref("op_", operation_ref)
+        || purge_not_before_unix_secs == 0
+    {
+        return Err(JanusError::StoreUnavailable {
+            detail: "dynamic age quarantine contract is invalid".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn dynamic_quarantine_path(
+    root_dir: &Path,
+    secret_ref: &janus_core::ManagedSecretRef,
+    operation_ref: &str,
+) -> PathBuf {
+    root_dir.join(format!(
+        "{}.age.quarantine.{operation_ref}",
+        secret_ref.as_str()
+    ))
+}
+
+fn valid_dynamic_ref(prefix: &str, value: &str) -> bool {
+    value.len() >= prefix.len() + 8
+        && value.len() <= 96
+        && value.starts_with(prefix)
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+}
+
+fn validate_private_ciphertext(path: &Path) -> JanusResult<()> {
+    let metadata = fs::symlink_metadata(path).map_err(map_store_io)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        if !metadata.is_file()
+            || metadata.file_type().is_symlink()
+            || metadata.nlink() != 1
+            || metadata.permissions().mode() & 0o077 != 0
+            || metadata.len() == 0
+            || metadata.len() > 2 * 1024 * 1024
+        {
+            return Err(JanusError::StoreUnavailable {
+                detail: "dynamic age custody ciphertext is invalid".to_string(),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn normalized_absolute_path(path: &Path) -> bool {
@@ -1778,6 +1932,63 @@ AAAEADBJvjZT8X6JRJI8xVq/1aU8nMVgOtVnmdwqWwrSlXG3sKLqeplhpW+uObz5dvMgjz
         assert_eq!(
             decrypt_file(&ciphertext, &[identity_file]).unwrap(),
             b"first-value"
+        );
+    }
+
+    #[tokio::test]
+    async fn dynamic_custody_quarantine_is_exact_due_only_and_idempotent() {
+        let temporary = TempDir::new().unwrap();
+        let custody = temporary.path().join("custody");
+        let identity = age::x25519::Identity::generate();
+        let secret_ref = janus_core::ManagedSecretRef::new("sec_dynamicremoval").unwrap();
+        create_dynamic_custody_if_absent(
+            custody.clone(),
+            secret_ref.clone(),
+            vec![identity.to_public().to_string()],
+            SecretValue::new(b"retire-without-opening".to_vec()),
+        )
+        .await
+        .unwrap();
+        let deadline = 1_800_086_410;
+        let operation_ref = "op_dynamicremoval1234";
+        let material =
+            quarantine_dynamic_custody(&custody, secret_ref.clone(), operation_ref, deadline)
+                .unwrap();
+        assert!(!material.value_returned);
+        assert_eq!(
+            quarantine_dynamic_custody(&custody, secret_ref, operation_ref, deadline).unwrap(),
+            material
+        );
+        assert!(!custody.join("sec_dynamicremoval.age").exists());
+        assert!(custody
+            .join("sec_dynamicremoval.age.quarantine.op_dynamicremoval1234")
+            .is_file());
+        assert!(matches!(
+            purge_dynamic_custody_if_due(
+                &custody,
+                &material,
+                UNIX_EPOCH + std::time::Duration::from_secs(deadline - 1),
+            ),
+            Err(JanusError::PolicyDenied {
+                reason_code: "dynamic_age_quarantine_not_due",
+                ..
+            })
+        ));
+        let purged = purge_dynamic_custody_if_due(
+            &custody,
+            &material,
+            UNIX_EPOCH + std::time::Duration::from_secs(deadline),
+        )
+        .unwrap();
+        assert!(purged.changed && !purged.value_returned);
+        assert!(
+            !purge_dynamic_custody_if_due(
+                &custody,
+                &material,
+                UNIX_EPOCH + std::time::Duration::from_secs(deadline),
+            )
+            .unwrap()
+            .changed
         );
     }
 

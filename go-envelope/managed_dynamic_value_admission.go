@@ -48,6 +48,12 @@ func (app *App) handleManagedDynamicValueAdmission(w http.ResponseWriter, r *htt
 		app.renderSafeFailure(w, r, http.StatusForbidden, "passwordless_step_up_required", "Confirm this exact setup request with your passkey again.", nil)
 		return
 	}
+	if proof.Target.OperationKind == "remove" &&
+		(r.ContentLength != int64(len(prefix)) || !requestBodyAtEOF(r.Body)) {
+		app.audit(r, "managed_environment.remove.prepare", "denied", session.Subject, "removal request carried value bytes")
+		app.renderSafeFailure(w, r, http.StatusBadRequest, "removal_request_invalid", "This removal request was not value-free. Start again from Pharos.", nil)
+		return
+	}
 	reservation, err := app.managedDynamicSetup.BeginValueAdmission(r.Context(), proof.Target, proof.OperationRef)
 	if err != nil {
 		if managedDynamicValueAlreadyAdmitted(err) {
@@ -59,6 +65,13 @@ func (app *App) handleManagedDynamicValueAdmission(w http.ResponseWriter, r *htt
 				return
 			}
 			if recoverErr == nil && recovered.ValueAdmissionStarted {
+				if proof.Target.OperationKind == "remove" &&
+					app.completeManagedDynamicRemoval(r, proof.Target, proof.OperationRef) == nil {
+					w.Header().Set("Clear-Site-Data", `"cache", "storage"`)
+					app.audit(r, "managed_environment.remove.prepare", "allowed", session.Subject, "lost removal response recovered without a value")
+					http.Redirect(w, r, "/managed-environment/setup?intent="+url.QueryEscape(proof.Target.IntentRef), http.StatusSeeOther)
+					return
+				}
 				custody, custodyErr := app.managedDynamicCustody.Recover(r.Context(), proof.Target, proof.OperationRef)
 				if custodyErr == nil {
 					delivery, deliveryErr := app.managedDynamicDelivery.Prepare(r.Context(), proof.Target, proof.OperationRef, custody)
@@ -85,6 +98,18 @@ func (app *App) handleManagedDynamicValueAdmission(w http.ResponseWriter, r *htt
 		app.clearManagedDynamicStepUpProofCookies(w)
 		app.audit(r, "managed_environment.value.admit", "denied", session.Subject, "value admission state invalid")
 		app.renderSafeFailure(w, r, http.StatusConflict, "value_admission_unavailable", "This value was not accepted. Start again from Pharos with a new setup request.", nil)
+		return
+	}
+	if proof.Target.OperationKind == "remove" {
+		if app.completeManagedDynamicRemoval(r, proof.Target, proof.OperationRef) != nil {
+			app.clearManagedDynamicStepUpProofCookies(w)
+			app.audit(r, "managed_environment.remove.prepare", "denied", session.Subject, "removal package unavailable")
+			app.renderSafeFailure(w, r, http.StatusServiceUnavailable, "removal_unavailable", "Janus could not prepare this safe removal. Start again from Pharos.", nil)
+			return
+		}
+		w.Header().Set("Clear-Site-Data", `"cache", "storage"`)
+		app.audit(r, "managed_environment.remove.prepare", "allowed", session.Subject, "value-free host removal package prepared")
+		http.Redirect(w, r, "/managed-environment/setup?intent="+url.QueryEscape(proof.Target.IntentRef), http.StatusSeeOther)
 		return
 	}
 
@@ -133,6 +158,25 @@ func (app *App) handleManagedDynamicValueAdmission(w http.ResponseWriter, r *htt
 	w.Header().Set("Clear-Site-Data", `"cache", "storage"`)
 	app.audit(r, "managed_environment.value.admit", "allowed", session.Subject, "one bounded value stored in custody and prepared as a host-bound package")
 	http.Redirect(w, r, "/managed-environment/setup?intent="+url.QueryEscape(proof.Target.IntentRef), http.StatusSeeOther)
+}
+
+func (app *App) completeManagedDynamicRemoval(r *http.Request, target managedDynamicStepUpTarget, operationRef string) error {
+	delivery, err := app.managedDynamicDelivery.Prepare(r.Context(), target, operationRef, managedDynamicCustodyResult{})
+	if err != nil || validateManagedDynamicDeliveryResult(delivery, operationRef) != nil {
+		return errors.New("dynamic removal delivery unavailable")
+	}
+	completed, err := app.managedDynamicSetup.CompleteValueAdmission(
+		r.Context(), target, operationRef, managedDynamicCustodyResult{}, delivery,
+	)
+	if err != nil || completed.OperationRef != operationRef ||
+		managedDynamicTargetFromInspection(completed.Inspection) != target ||
+		!completed.ValueAdmissionStarted || !completed.ValueAdmissionComplete ||
+		completed.BindingRef != target.BindingRef || completed.SecretRef != target.SecretRef ||
+		completed.GenerationRef != target.GenerationRef || completed.PackageRef != delivery.PackageRef ||
+		completed.EnvelopeRef != delivery.EnvelopeRef {
+		return errors.New("dynamic removal receipt unavailable")
+	}
+	return nil
 }
 
 func processManagedDynamicValue(reader io.Reader, remaining int64, source string, random io.Reader) ([]byte, error) {
