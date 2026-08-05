@@ -2,9 +2,9 @@
 //!
 //! This process never opens custody. It returns one already signed and
 //! host-encrypted packet to the trusted Go edge and persists only an exact,
-//! value-free activation receipt. Reload and health are performed by the
-//! exact pre-approved host profile; replacement, rollback, and removal remain
-//! outside this boundary.
+//! value-free activation or recovered-rollback receipt. Reload, health, and
+//! rollback are performed by the exact pre-approved host profile; removal
+//! remains outside this boundary.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
@@ -26,11 +26,13 @@ use super::dynamic_delivery::{
     ProfileKey, MAX_OUTBOX_BYTES, OUTBOX_SCHEMA, SCHEMA_VERSION as DELIVERY_SCHEMA_VERSION,
 };
 
-const REQUEST_SCHEMA: &str = "inspr.janus.managed-dynamic-transport-request.v3";
-const RESPONSE_SCHEMA: &str = "inspr.janus.managed-dynamic-transport-response.v3";
-const RECEIPT_SCHEMA: &str = "inspr.janus.managed-dynamic-host-receipt.v2";
-const TRANSPORT_SCHEMA_VERSION: u8 = 3;
-const RECEIPT_SCHEMA_VERSION: u8 = 2;
+const REQUEST_SCHEMA: &str = "inspr.janus.managed-dynamic-transport-request.v4";
+const RESPONSE_SCHEMA: &str = "inspr.janus.managed-dynamic-transport-response.v4";
+const RECEIPT_SCHEMA_V2: &str = "inspr.janus.managed-dynamic-host-receipt.v2";
+const RECEIPT_SCHEMA_V3: &str = "inspr.janus.managed-dynamic-host-receipt.v3";
+const TRANSPORT_SCHEMA_VERSION: u8 = 4;
+const RECEIPT_SCHEMA_VERSION_V2: u8 = 2;
+const RECEIPT_SCHEMA_VERSION_V3: u8 = 3;
 const SOCKET_ENV: &str = "JANUS_MANAGED_DYNAMIC_TRANSPORT_SOCKET";
 const PEER_UID_ENV: &str = "JANUS_MANAGED_DYNAMIC_TRANSPORT_ALLOWED_UID";
 const PROFILE_ENV: &str = "JANUS_MANAGED_DYNAMIC_TRANSPORT_PROFILE_FILE";
@@ -70,6 +72,7 @@ struct TransportStatusRequest {
     service_ref: String,
     environment_policy_ref: String,
     operation_ref: String,
+    operation_kind: String,
     package_ref: String,
     envelope_ref: String,
     binding_ref: String,
@@ -87,6 +90,7 @@ struct TransportAcknowledgementRequest {
     service_ref: String,
     environment_policy_ref: String,
     operation_ref: String,
+    operation_kind: String,
     package_ref: String,
     envelope_ref: String,
     binding_ref: String,
@@ -96,6 +100,9 @@ struct TransportAcknowledgementRequest {
     phase: String,
     reason_code: String,
     materialization_reason_code: String,
+    failure_reason_code: Option<String>,
+    restored_binding_ref: Option<String>,
+    restored_generation_ref: Option<String>,
     materialized_at_unix_secs: u64,
     reloaded_at_unix_secs: u64,
     heartbeat_observed_at_unix_secs: u64,
@@ -115,6 +122,7 @@ struct TransportResponse {
     service_ref: Option<String>,
     environment_policy_ref: Option<String>,
     operation_ref: Option<String>,
+    operation_kind: Option<String>,
     package_ref: Option<String>,
     envelope_ref: Option<String>,
     binding_ref: Option<String>,
@@ -137,6 +145,8 @@ struct ActivationReceipt {
     service_ref: String,
     environment_policy_ref: String,
     operation_ref: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    operation_kind: Option<String>,
     package_ref: String,
     envelope_ref: String,
     binding_ref: String,
@@ -146,6 +156,12 @@ struct ActivationReceipt {
     phase: String,
     reason_code: String,
     materialization_reason_code: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    failure_reason_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    restored_binding_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    restored_generation_ref: Option<String>,
     materialized_at_unix_secs: u64,
     reloaded_at_unix_secs: u64,
     heartbeat_observed_at_unix_secs: u64,
@@ -162,6 +178,7 @@ struct Acknowledgement {
     service_ref: String,
     environment_policy_ref: String,
     operation_ref: String,
+    operation_kind: String,
     package_ref: String,
     envelope_ref: String,
     binding_ref: String,
@@ -171,6 +188,9 @@ struct Acknowledgement {
     phase: String,
     reason_code: String,
     materialization_reason_code: String,
+    failure_reason_code: Option<String>,
+    restored_binding_ref: Option<String>,
+    restored_generation_ref: Option<String>,
     materialized_at_unix_secs: u64,
     reloaded_at_unix_secs: u64,
     heartbeat_observed_at_unix_secs: u64,
@@ -278,6 +298,7 @@ async fn handle_connection(
                 service_ref: receipt.service_ref,
                 environment_policy_ref: receipt.environment_policy_ref,
                 operation_ref: receipt.operation_ref,
+                operation_kind: receipt.operation_kind,
                 package_ref: receipt.package_ref,
                 envelope_ref: receipt.envelope_ref,
                 binding_ref: receipt.binding_ref,
@@ -287,6 +308,9 @@ async fn handle_connection(
                 phase: receipt.phase,
                 reason_code: receipt.reason_code,
                 materialization_reason_code: receipt.materialization_reason_code,
+                failure_reason_code: receipt.failure_reason_code,
+                restored_binding_ref: receipt.restored_binding_ref,
+                restored_generation_ref: receipt.restored_generation_ref,
                 materialized_at_unix_secs: receipt.materialized_at_unix_secs,
                 reloaded_at_unix_secs: receipt.reloaded_at_unix_secs,
                 heartbeat_observed_at_unix_secs: receipt.heartbeat_observed_at_unix_secs,
@@ -319,6 +343,7 @@ async fn handle_connection(
                     service_ref: query.service_ref,
                     environment_policy_ref: query.environment_policy_ref,
                     operation_ref: query.operation_ref,
+                    operation_kind: query.operation_kind,
                     package_ref: query.package_ref,
                     envelope_ref: query.envelope_ref,
                     binding_ref: query.binding_ref,
@@ -340,6 +365,7 @@ struct ActivationQuery {
     service_ref: String,
     environment_policy_ref: String,
     operation_ref: String,
+    operation_kind: String,
     package_ref: String,
     envelope_ref: String,
     binding_ref: String,
@@ -377,6 +403,7 @@ fn status(
         || record.service_ref != query.service_ref
         || record.environment_policy_ref != query.environment_policy_ref
         || record.operation_ref != query.operation_ref
+        || record.operation_kind != query.operation_kind
         || record.package_ref != query.package_ref
         || record.envelope_ref != query.envelope_ref
         || record.binding_ref != query.binding_ref
@@ -386,8 +413,12 @@ fn status(
     {
         return Err("dynamic_transport_status_denied");
     }
-    let (phase, reason_code) = if load_receipt(receipt_dir, &record)?.is_some() {
-        ("active", "dynamic_transport_environment_active")
+    let (phase, reason_code) = if let Some(receipt) = load_receipt(receipt_dir, &record)? {
+        match receipt.phase.as_str() {
+            "active" => ("active", "dynamic_transport_environment_active"),
+            "rolled_back" => ("rolled_back", "dynamic_transport_replacement_rolled_back"),
+            _ => return Err("dynamic_transport_receipt_invalid"),
+        }
     } else if now >= record.expires_at_unix_secs {
         ("expired", "dynamic_transport_package_expired")
     } else {
@@ -401,6 +432,7 @@ fn status(
         service_ref: Some(record.service_ref),
         environment_policy_ref: Some(record.environment_policy_ref),
         operation_ref: Some(record.operation_ref),
+        operation_kind: Some(record.operation_kind),
         package_ref: Some(record.package_ref),
         envelope_ref: Some(record.envelope_ref),
         binding_ref: Some(record.binding_ref),
@@ -420,6 +452,7 @@ fn validate_activation_query(query: &ActivationQuery) -> std::result::Result<(),
         || !valid_ref("svc_", &query.service_ref)
         || !valid_ref("envpol_", &query.environment_policy_ref)
         || !valid_ref("op_", &query.operation_ref)
+        || !matches!(query.operation_kind.as_str(), "create" | "replace")
         || !valid_ref("pkg_", &query.package_ref)
         || !valid_ref("env_", &query.envelope_ref)
         || !valid_ref("bind_", &query.binding_ref)
@@ -491,6 +524,7 @@ fn claim(
         service_ref: Some(record.service_ref),
         environment_policy_ref: Some(record.environment_policy_ref),
         operation_ref: Some(record.operation_ref),
+        operation_kind: Some(record.operation_kind),
         package_ref: Some(record.package_ref),
         envelope_ref: Some(record.envelope_ref),
         binding_ref: Some(record.binding_ref),
@@ -535,6 +569,7 @@ fn acknowledge(
         || record.service_ref != acknowledgement.service_ref
         || record.environment_policy_ref != acknowledgement.environment_policy_ref
         || record.operation_ref != acknowledgement.operation_ref
+        || record.operation_kind != acknowledgement.operation_kind
         || record.package_ref != acknowledgement.package_ref
         || record.envelope_ref != acknowledgement.envelope_ref
         || record.binding_ref != acknowledgement.binding_ref
@@ -560,12 +595,13 @@ fn acknowledge(
         return Err("dynamic_transport_receipt_denied");
     }
     let mut receipt = ActivationReceipt {
-        schema: RECEIPT_SCHEMA.to_string(),
-        schema_version: RECEIPT_SCHEMA_VERSION,
+        schema: RECEIPT_SCHEMA_V3.to_string(),
+        schema_version: RECEIPT_SCHEMA_VERSION_V3,
         host_ref: acknowledgement.host_ref.clone(),
         service_ref: acknowledgement.service_ref.clone(),
         environment_policy_ref: acknowledgement.environment_policy_ref.clone(),
         operation_ref: acknowledgement.operation_ref.clone(),
+        operation_kind: Some(acknowledgement.operation_kind.clone()),
         package_ref: acknowledgement.package_ref.clone(),
         envelope_ref: acknowledgement.envelope_ref.clone(),
         binding_ref: acknowledgement.binding_ref.clone(),
@@ -575,6 +611,9 @@ fn acknowledge(
         phase: acknowledgement.phase.clone(),
         reason_code: acknowledgement.reason_code.clone(),
         materialization_reason_code: acknowledgement.materialization_reason_code.clone(),
+        failure_reason_code: acknowledgement.failure_reason_code.clone(),
+        restored_binding_ref: acknowledgement.restored_binding_ref.clone(),
+        restored_generation_ref: acknowledgement.restored_generation_ref.clone(),
         materialized_at_unix_secs: acknowledgement.materialized_at_unix_secs,
         reloaded_at_unix_secs: acknowledgement.reloaded_at_unix_secs,
         heartbeat_observed_at_unix_secs: acknowledgement.heartbeat_observed_at_unix_secs,
@@ -601,6 +640,7 @@ fn acknowledge(
         service_ref: Some(receipt.service_ref),
         environment_policy_ref: Some(receipt.environment_policy_ref),
         operation_ref: Some(receipt.operation_ref),
+        operation_kind: receipt.operation_kind,
         package_ref: Some(receipt.package_ref),
         envelope_ref: Some(receipt.envelope_ref),
         binding_ref: Some(receipt.binding_ref),
@@ -608,7 +648,11 @@ fn acknowledge(
         reload_profile_ref: Some(receipt.reload_profile_ref),
         health_profile_ref: Some(receipt.health_profile_ref),
         packet_base64: None,
-        phase: "active",
+        phase: if acknowledgement.phase == "active" {
+            "active"
+        } else {
+            "rolled_back"
+        },
         reason_code: "dynamic_transport_receipt_recorded",
         packet_returned: false,
         value_returned: false,
@@ -628,11 +672,15 @@ fn validate_acknowledgement(
         || !valid_ref("gen_", &acknowledgement.generation_ref)
         || !valid_ref("reload_", &acknowledgement.reload_profile_ref)
         || !valid_ref("health_", &acknowledgement.health_profile_ref)
-        || acknowledgement.phase != "active"
-        || acknowledgement.reason_code != "dynamic_host_environment_active"
+        || !matches!(
+            acknowledgement.operation_kind.as_str(),
+            "create" | "replace"
+        )
         || !matches!(
             acknowledgement.materialization_reason_code.as_str(),
-            "dynamic_host_environment_materialized" | "dynamic_host_materialization_idempotent"
+            "dynamic_host_environment_materialized"
+                | "dynamic_host_materialization_idempotent"
+                | "dynamic_host_replacement_materialized"
         )
         || acknowledgement.materialized_at_unix_secs == 0
         || acknowledgement.reloaded_at_unix_secs < acknowledgement.materialized_at_unix_secs
@@ -641,6 +689,35 @@ fn validate_acknowledgement(
         || acknowledgement.probe_observed_at_unix_secs < acknowledgement.reloaded_at_unix_secs
         || acknowledgement.packet_returned
         || acknowledgement.value_returned
+        || match acknowledgement.phase.as_str() {
+            "active" => {
+                acknowledgement.reason_code != "dynamic_host_environment_active"
+                    || acknowledgement.failure_reason_code.is_some()
+                    || acknowledgement.restored_binding_ref.is_some()
+                    || acknowledgement.restored_generation_ref.is_some()
+            }
+            "rolled_back" => {
+                acknowledgement.operation_kind != "replace"
+                    || acknowledgement.reason_code != "dynamic_host_replacement_rolled_back"
+                    || !matches!(
+                        acknowledgement.failure_reason_code.as_deref(),
+                        Some("dynamic_host_reload_failed" | "dynamic_host_health_failed")
+                    )
+                    || acknowledgement
+                        .restored_binding_ref
+                        .as_deref()
+                        .map_or(true, |value| !valid_ref("bind_", value))
+                    || acknowledgement
+                        .restored_generation_ref
+                        .as_deref()
+                        .map_or(true, |value| !valid_ref("gen_", value))
+                    || acknowledgement.restored_binding_ref.as_deref()
+                        == Some(acknowledgement.binding_ref.as_str())
+                    || acknowledgement.restored_generation_ref.as_deref()
+                        == Some(acknowledgement.generation_ref.as_str())
+            }
+            _ => true,
+        }
     {
         return Err("dynamic_transport_receipt_invalid");
     }
@@ -671,7 +748,7 @@ fn load_outbox(
         || !valid_ref("pkg_", &record.package_ref)
         || !valid_ref("env_", &record.envelope_ref)
         || !valid_ref("op_", &record.operation_ref)
-        || record.operation_kind != "create"
+        || !matches!(record.operation_kind.as_str(), "create" | "replace")
         || !matches!(record.source.as_str(), "generated" | "import")
         || record.host_ref != profile.host_ref
         || record.service_ref != profile.service_ref
@@ -724,9 +801,24 @@ fn load_receipt(
     let raw = fs::read(path).map_err(|_| "dynamic_transport_receipt_unavailable")?;
     let receipt: ActivationReceipt =
         serde_json::from_slice(&raw).map_err(|_| "dynamic_transport_receipt_invalid")?;
-    if receipt.schema != RECEIPT_SCHEMA
-        || receipt.schema_version != RECEIPT_SCHEMA_VERSION
-        || receipt.host_ref != record.host_ref
+    let receipt_operation_kind = match (receipt.schema.as_str(), receipt.schema_version) {
+        (RECEIPT_SCHEMA_V2, RECEIPT_SCHEMA_VERSION_V2)
+            if receipt.operation_kind.is_none()
+                && receipt.failure_reason_code.is_none()
+                && receipt.restored_binding_ref.is_none()
+                && receipt.restored_generation_ref.is_none()
+                && record.operation_kind == "create" =>
+        {
+            "create"
+        }
+        (RECEIPT_SCHEMA_V3, RECEIPT_SCHEMA_VERSION_V3)
+            if receipt.operation_kind.as_deref() == Some(record.operation_kind.as_str()) =>
+        {
+            record.operation_kind.as_str()
+        }
+        _ => return Err("dynamic_transport_receipt_invalid"),
+    };
+    if receipt.host_ref != record.host_ref
         || receipt.service_ref != record.service_ref
         || receipt.environment_policy_ref != record.environment_policy_ref
         || receipt.operation_ref != record.operation_ref
@@ -736,12 +828,7 @@ fn load_receipt(
         || receipt.generation_ref != record.generation_ref
         || receipt.reload_profile_ref != record.reload_profile_ref
         || receipt.health_profile_ref != record.health_profile_ref
-        || receipt.phase != "active"
-        || receipt.reason_code != "dynamic_host_environment_active"
-        || !matches!(
-            receipt.materialization_reason_code.as_str(),
-            "dynamic_host_environment_materialized" | "dynamic_host_materialization_idempotent"
-        )
+        || !valid_receipt_outcome(&receipt, receipt_operation_kind)
         || receipt.materialized_at_unix_secs < record.prepared_at_unix_secs
         || receipt.reloaded_at_unix_secs < receipt.materialized_at_unix_secs
         || receipt.heartbeat_observed_at_unix_secs < receipt.reloaded_at_unix_secs
@@ -754,6 +841,50 @@ fn load_receipt(
         return Err("dynamic_transport_receipt_invalid");
     }
     Ok(Some(receipt))
+}
+
+fn valid_receipt_outcome(receipt: &ActivationReceipt, operation_kind: &str) -> bool {
+    let materialization_valid = match operation_kind {
+        "create" => matches!(
+            receipt.materialization_reason_code.as_str(),
+            "dynamic_host_environment_materialized" | "dynamic_host_materialization_idempotent"
+        ),
+        "replace" => matches!(
+            receipt.materialization_reason_code.as_str(),
+            "dynamic_host_replacement_materialized" | "dynamic_host_materialization_idempotent"
+        ),
+        _ => false,
+    };
+    materialization_valid
+        && match receipt.phase.as_str() {
+            "active" => {
+                receipt.reason_code == "dynamic_host_environment_active"
+                    && receipt.failure_reason_code.is_none()
+                    && receipt.restored_binding_ref.is_none()
+                    && receipt.restored_generation_ref.is_none()
+            }
+            "rolled_back" => {
+                operation_kind == "replace"
+                    && receipt.reason_code == "dynamic_host_replacement_rolled_back"
+                    && matches!(
+                        receipt.failure_reason_code.as_deref(),
+                        Some("dynamic_host_reload_failed" | "dynamic_host_health_failed")
+                    )
+                    && receipt
+                        .restored_binding_ref
+                        .as_deref()
+                        .is_some_and(|value| {
+                            valid_ref("bind_", value) && value != receipt.binding_ref
+                        })
+                    && receipt
+                        .restored_generation_ref
+                        .as_deref()
+                        .is_some_and(|value| {
+                            valid_ref("gen_", value) && value != receipt.generation_ref
+                        })
+            }
+            _ => false,
+        }
 }
 
 fn receipt_hash(receipt: &ActivationReceipt) -> std::result::Result<String, &'static str> {
@@ -852,6 +983,7 @@ fn no_work(host_ref: &str) -> TransportResponse {
         service_ref: None,
         environment_policy_ref: None,
         operation_ref: None,
+        operation_kind: None,
         package_ref: None,
         envelope_ref: None,
         binding_ref: None,
@@ -875,6 +1007,7 @@ fn denied(action: &'static str, reason_code: &'static str) -> TransportResponse 
         service_ref: None,
         environment_policy_ref: None,
         operation_ref: None,
+        operation_kind: None,
         package_ref: None,
         envelope_ref: None,
         binding_ref: None,
@@ -1060,6 +1193,7 @@ mod tests {
             service_ref: record.service_ref.clone(),
             environment_policy_ref: record.environment_policy_ref.clone(),
             operation_ref: record.operation_ref.clone(),
+            operation_kind: record.operation_kind.clone(),
             package_ref: record.package_ref.clone(),
             envelope_ref: record.envelope_ref.clone(),
             binding_ref: record.binding_ref.clone(),
@@ -1069,6 +1203,9 @@ mod tests {
             phase: "active".to_string(),
             reason_code: "dynamic_host_environment_active".to_string(),
             materialization_reason_code: "dynamic_host_environment_materialized".to_string(),
+            failure_reason_code: None,
+            restored_binding_ref: None,
+            restored_generation_ref: None,
             materialized_at_unix_secs: 1_800_000_005,
             reloaded_at_unix_secs: 1_800_000_006,
             heartbeat_observed_at_unix_secs: 1_800_000_010,
@@ -1085,6 +1222,7 @@ mod tests {
             service_ref: record.service_ref.clone(),
             environment_policy_ref: record.environment_policy_ref.clone(),
             operation_ref: record.operation_ref.clone(),
+            operation_kind: record.operation_kind.clone(),
             package_ref: record.package_ref.clone(),
             envelope_ref: record.envelope_ref.clone(),
             binding_ref: record.binding_ref.clone(),
@@ -1181,12 +1319,118 @@ mod tests {
         ))
         .unwrap();
         let persisted: ActivationReceipt = serde_json::from_slice(&receipt).unwrap();
-        assert_eq!(persisted.schema_version, RECEIPT_SCHEMA_VERSION);
+        assert_eq!(persisted.schema_version, RECEIPT_SCHEMA_VERSION_V3);
         assert_eq!(active.schema_version, TRANSPORT_SCHEMA_VERSION);
         assert!(!receipt
             .windows(b"signed-host-ciphertext".len())
             .any(|window| window == b"signed-host-ciphertext"));
         drop(fixture.temporary);
+    }
+
+    #[test]
+    fn replacement_rollback_is_terminal_exact_and_value_free() {
+        let mut fixture = fixture();
+        fixture.record.operation_kind = "replace".to_string();
+        fixture.record.integrity_hash.clear();
+        fixture.record.integrity_hash = outbox_hash(&fixture.record).unwrap();
+        let outbox_path = fixture
+            .profiles
+            .values()
+            .next()
+            .unwrap()
+            .outbox_dir
+            .join(format!("{}.json", fixture.record.package_ref));
+        fs::write(&outbox_path, serde_json::to_vec(&fixture.record).unwrap()).unwrap();
+        fs::set_permissions(&outbox_path, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let mut acknowledgement = activation_acknowledgement(&fixture.record);
+        acknowledgement.phase = "rolled_back".to_string();
+        acknowledgement.reason_code = "dynamic_host_replacement_rolled_back".to_string();
+        acknowledgement.materialization_reason_code =
+            "dynamic_host_replacement_materialized".to_string();
+        acknowledgement.failure_reason_code = Some("dynamic_host_health_failed".to_string());
+        acknowledgement.restored_binding_ref = Some("bind_previous000001".to_string());
+        acknowledgement.restored_generation_ref = Some("gen_previous000001".to_string());
+        let now = UNIX_EPOCH + Duration::from_secs(1_800_000_010);
+        let recorded = acknowledge(
+            &fixture.profiles,
+            &fixture.receipt_dir,
+            &acknowledgement,
+            now,
+        )
+        .unwrap();
+        assert_eq!(recorded.phase, "rolled_back");
+        let status = status(
+            &fixture.profiles,
+            &fixture.receipt_dir,
+            &activation_query(&fixture.record),
+            now,
+        )
+        .unwrap();
+        assert_eq!(status.phase, "rolled_back");
+        assert_eq!(
+            status.reason_code,
+            "dynamic_transport_replacement_rolled_back"
+        );
+        assert!(!status.packet_returned && !status.value_returned);
+        let receipt = fs::read(receipt_path(
+            &fixture.receipt_dir,
+            &fixture.record.package_ref,
+        ))
+        .unwrap();
+        assert!(!receipt.windows(6).any(|window| window == b"secret"));
+
+        let mut self_restore = acknowledgement;
+        self_restore.restored_generation_ref = Some(fixture.record.generation_ref.clone());
+        assert_eq!(
+            validate_acknowledgement(&self_restore).unwrap_err(),
+            "dynamic_transport_receipt_invalid"
+        );
+    }
+
+    #[test]
+    fn stored_v2_create_receipt_remains_readable() {
+        let fixture = fixture();
+        let acknowledgement = activation_acknowledgement(&fixture.record);
+        let mut receipt = ActivationReceipt {
+            schema: RECEIPT_SCHEMA_V2.to_string(),
+            schema_version: RECEIPT_SCHEMA_VERSION_V2,
+            host_ref: acknowledgement.host_ref,
+            service_ref: acknowledgement.service_ref,
+            environment_policy_ref: acknowledgement.environment_policy_ref,
+            operation_ref: acknowledgement.operation_ref,
+            operation_kind: None,
+            package_ref: acknowledgement.package_ref,
+            envelope_ref: acknowledgement.envelope_ref,
+            binding_ref: acknowledgement.binding_ref,
+            generation_ref: acknowledgement.generation_ref,
+            reload_profile_ref: acknowledgement.reload_profile_ref,
+            health_profile_ref: acknowledgement.health_profile_ref,
+            phase: acknowledgement.phase,
+            reason_code: acknowledgement.reason_code,
+            materialization_reason_code: acknowledgement.materialization_reason_code,
+            failure_reason_code: None,
+            restored_binding_ref: None,
+            restored_generation_ref: None,
+            materialized_at_unix_secs: acknowledgement.materialized_at_unix_secs,
+            reloaded_at_unix_secs: acknowledgement.reloaded_at_unix_secs,
+            heartbeat_observed_at_unix_secs: acknowledgement.heartbeat_observed_at_unix_secs,
+            process_observed_at_unix_secs: acknowledgement.process_observed_at_unix_secs,
+            probe_observed_at_unix_secs: acknowledgement.probe_observed_at_unix_secs,
+            packet_returned: false,
+            value_returned: false,
+            integrity_hash: String::new(),
+        };
+        receipt.integrity_hash = receipt_hash(&receipt).unwrap();
+        let path = receipt_path(&fixture.receipt_dir, &fixture.record.package_ref);
+        fs::write(&path, serde_json::to_vec(&receipt).unwrap()).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            load_receipt(&fixture.receipt_dir, &fixture.record)
+                .unwrap()
+                .unwrap(),
+            receipt
+        );
     }
 
     #[test]
@@ -1200,6 +1444,7 @@ mod tests {
                 "service_ref": "svc_24b7c8f0aa19",
                 "environment_policy_ref": "envpol_12345678abcdef00",
                 "operation_ref": "op_12345678abcdef00",
+                "operation_kind": "create",
                 "package_ref": "pkg_12345678abcdef00",
                 "envelope_ref": "env_12345678abcdef00",
                 "binding_ref": "bind_12345678abcdef00",
@@ -1235,6 +1480,7 @@ mod tests {
                 "service_ref": "svc_24b7c8f0aa19",
                 "environment_policy_ref": "envpol_12345678abcdef00",
                 "operation_ref": "op_12345678abcdef00",
+                "operation_kind": "create",
                 "package_ref": "pkg_12345678abcdef00",
                 "envelope_ref": "env_12345678abcdef00",
                 "binding_ref": "bind_12345678abcdef00",

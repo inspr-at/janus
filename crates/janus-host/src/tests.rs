@@ -1191,9 +1191,28 @@ fn dynamic_policy_collision_capacity_replace_and_invalid_values_fail_closed() {
         "replace",
         SERVICE_REF,
     );
+    let staged = executor
+        .install_dynamic(&replace, now())
+        .expect("exact existing name may be staged for replacement");
+    assert_eq!(staged.reason_code, "dynamic_host_replacement_materialized");
     assert_eq!(
-        executor.install_dynamic(&replace, now()).unwrap_err(),
-        HostEnvelopeError::new("dynamic_host_operation_denied")
+        fs::read(fixture.dynamic_runtime_target()).expect("replacement runtime"),
+        b"SERVICE_TOKEN=replace-canary\n"
+    );
+    let rolled_back = executor
+        .rollback_dynamic_replacement(
+            &DynamicHostReplacementControlV1 {
+                operation_ref: "op_replacevalue01".to_string(),
+                binding_ref: "bind_replacevalue01".to_string(),
+                generation_ref: "gen_replacevalue01".to_string(),
+            },
+            now(),
+        )
+        .expect("rollback replacement");
+    assert_eq!(rolled_back.phase, "rolled_back");
+    assert_eq!(
+        rolled_back.previous_generation_ref.as_deref(),
+        Some("gen_acceptedvalue1")
     );
     let reserved = fixture.dynamic_packet(
         "reservedvalue1",
@@ -1225,6 +1244,165 @@ fn dynamic_policy_collision_capacity_replace_and_invalid_values_fail_closed() {
         fs::read(fixture.dynamic_runtime_target()).expect("unchanged runtime"),
         expected
     );
+}
+
+#[test]
+fn dynamic_replacement_commit_is_idempotent_and_restores_only_the_new_generation() {
+    let fixture = Fixture::new();
+    let executor = fixture.dynamic_executor(2);
+    let original = fixture.dynamic_packet(
+        "originalvalue1",
+        "originalvalue1",
+        "originalvalue1",
+        "SERVICE_TOKEN",
+        b"original-canary",
+        "create",
+        SERVICE_REF,
+    );
+    let replacement = fixture.dynamic_packet(
+        "replacement01",
+        "replacement01",
+        "replacement01",
+        "SERVICE_TOKEN",
+        b"replacement-canary",
+        "replace",
+        SERVICE_REF,
+    );
+    executor
+        .install_dynamic(&original, now())
+        .expect("original create");
+    executor
+        .install_dynamic(&replacement, now())
+        .expect("replacement stage");
+    let control = DynamicHostReplacementControlV1 {
+        operation_ref: "op_replacement01".to_string(),
+        binding_ref: "bind_replacement01".to_string(),
+        generation_ref: "gen_replacement01".to_string(),
+    };
+    let committed = executor
+        .commit_dynamic_replacement(&control, now())
+        .expect("commit after healthy reload");
+    assert_eq!(committed.phase, "committed");
+    assert_eq!(
+        executor
+            .commit_dynamic_replacement(&control, now())
+            .expect("lost commit response is idempotent")
+            .reason_code,
+        "dynamic_host_replacement_commit_idempotent"
+    );
+    fs::remove_file(fixture.dynamic_runtime_target()).expect("remove volatile runtime");
+    executor
+        .restore_dynamic_all(UNIX_EPOCH + Duration::from_secs(NOW + 7200))
+        .expect("restore committed replacement after packet expiry");
+    assert_eq!(
+        fs::read(fixture.dynamic_runtime_target()).expect("committed runtime"),
+        b"SERVICE_TOKEN=replacement-canary\n"
+    );
+    assert!(!fixture
+        .dynamic_cache()
+        .join("bind_originalvalue1.envelope")
+        .exists());
+}
+
+#[test]
+fn dynamic_restore_rolls_back_an_unconfirmed_replacement() {
+    let fixture = Fixture::new();
+    let executor = fixture.dynamic_executor(2);
+    let original = fixture.dynamic_packet(
+        "crashoriginal1",
+        "crashoriginal1",
+        "crashoriginal1",
+        "SERVICE_TOKEN",
+        b"crash-original-canary",
+        "create",
+        SERVICE_REF,
+    );
+    let replacement = fixture.dynamic_packet(
+        "crashreplace01",
+        "crashreplace01",
+        "crashreplace01",
+        "SERVICE_TOKEN",
+        b"crash-replacement-canary",
+        "replace",
+        SERVICE_REF,
+    );
+    executor
+        .install_dynamic(&original, now())
+        .expect("original create");
+    executor
+        .install_dynamic(&replacement, now())
+        .expect("replacement stage");
+    fs::remove_file(fixture.dynamic_runtime_target()).expect("simulate reboot");
+    executor
+        .restore_dynamic_all(now())
+        .expect("unconfirmed replacement safely rolls back on reboot");
+    assert_eq!(
+        fs::read(fixture.dynamic_runtime_target()).expect("recovered runtime"),
+        b"SERVICE_TOKEN=crash-original-canary\n"
+    );
+    assert!(!fixture
+        .dynamic_cache()
+        .join("bind_crashreplace01.envelope")
+        .exists());
+}
+
+#[test]
+fn dynamic_restore_finishes_interrupted_replacement_commit_and_rollback() {
+    for (phase, remove_packet, expected) in [
+        (
+            "commit_pending",
+            true,
+            b"SERVICE_TOKEN=new-canary\n".as_slice(),
+        ),
+        (
+            "rollback_pending",
+            true,
+            b"SERVICE_TOKEN=old-canary\n".as_slice(),
+        ),
+    ] {
+        let fixture = Fixture::new();
+        let executor = fixture.dynamic_executor(2);
+        executor
+            .install_dynamic(
+                &fixture.dynamic_packet(
+                    "interruptold1",
+                    "interruptold1",
+                    "interruptold1",
+                    "SERVICE_TOKEN",
+                    b"old-canary",
+                    "create",
+                    SERVICE_REF,
+                ),
+                now(),
+            )
+            .expect("old create");
+        executor
+            .install_dynamic(
+                &fixture.dynamic_packet(
+                    "interruptnew1",
+                    "interruptnew1",
+                    "interruptnew1",
+                    "SERVICE_TOKEN",
+                    b"new-canary",
+                    "replace",
+                    SERVICE_REF,
+                ),
+                now(),
+            )
+            .expect("new stage");
+        executor
+            .test_interrupt_dynamic_replacement(SERVICE_REF, phase, remove_packet)
+            .expect("model interrupted terminalization");
+        fs::remove_file(fixture.dynamic_runtime_target()).expect("simulate reboot");
+        executor
+            .restore_dynamic_all(now())
+            .expect("deterministic replacement recovery");
+        assert_eq!(
+            fs::read(fixture.dynamic_runtime_target()).expect("recovered runtime"),
+            expected,
+            "phase={phase}"
+        );
+    }
 }
 
 #[test]

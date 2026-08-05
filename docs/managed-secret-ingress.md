@@ -28,8 +28,12 @@ lease is pending, and return a strict value-free materialization receipt.
 JANUS-401 binds that claim to the exact pre-approved reload and health profiles,
 force-recreates the fixed Compose service, and returns a strict value-free
 active receipt only after a fresh bounded healthy observation. It still
-performs no replacement, removal, deployment enablement, or Pharos/nixcfg
-change.
+performs no removal, deployment enablement, or Pharos/nixcfg change. JANUS-403
+adds exact-name replacement beneath the same policy: the host stages the new
+signed packet while retaining the previous one, commits only after the fixed
+reload plus fresh health succeeds, and otherwise restores the complete prior
+aggregate, reloads the same service, verifies recovered health, and records a
+strict value-free rolled-back receipt.
 The existing v1 declared-slot flow described below remains unchanged and is
 still the only production value-bearing path.
 
@@ -129,9 +133,10 @@ encrypted custody and a host-bound package in its private outbox, and the
 enrolled host agent can claim that package for the exact host, ask the version
 2 executor to materialize the pre-approved service's private aggregate, and
 return value-free active evidence after force-recreating the exact
-outbox-bound service and observing it healthy. There is still no Pharos
-operation registration, replacement, or removal claim. Each remains a
-separate reviewed slice.
+outbox-bound service and observing it healthy. An exact signed `replace`
+intent may now stage and either commit or safely roll back one existing name.
+There is still no Pharos operation registration or removal claim; production
+enablement and removal remain separate reviewed slices.
 
 ## Dynamic value admission boundary
 
@@ -227,19 +232,21 @@ request fails closed if any boundary, declaration, recipient, directory,
 receipt, ciphertext, peer identity, or release gate is invalid.
 
 The transport daemon is a third no-argv process. It never decrypts a packet,
-contacts a host, reloads a service, or inspects health. Its version 3 private
-wire contract exposes only exact host claim, exact activation-receipt, and
-exact value-free status operations to the Go envelope. The persisted receipt
-contract remains version 2 so existing active receipts stay readable. Every
-status lookup revalidates the private outbox record and all outbox-bound
-references before returning only `pending`, `expired`, or `active`:
+contacts a host, reloads a service, or inspects health. Its version 4 private
+wire contract exposes only exact host claim, exact activation-or-rollback
+receipt, and exact value-free status operations to the Go envelope. New
+receipts use version 3 and bind the operation kind plus either active or
+recovered-rollback outcome; existing version 2 create receipts remain readable.
+Every status lookup revalidates the private outbox record and all outbox-bound
+references before returning only `pending`, `expired`, `active`, or
+`rolled_back`:
 
 | Environment variable | Contract |
 | --- | --- |
 | `JANUS_MANAGED_DYNAMIC_TRANSPORT_SOCKET` | Absolute private Unix-socket path; shared with the Go envelope and distinct from custody and delivery. |
 | `JANUS_MANAGED_DYNAMIC_TRANSPORT_ALLOWED_UID` | Exact kernel-reported UID permitted to connect. |
 | `JANUS_MANAGED_DYNAMIC_TRANSPORT_PROFILE_FILE` | Existing strict delivery catalog used to locate and revalidate the exact host outbox. |
-| `JANUS_MANAGED_DYNAMIC_TRANSPORT_RECEIPT_DIR` | Separate private root for integrity-bound, create-new, value-free active receipts. |
+| `JANUS_MANAGED_DYNAMIC_TRANSPORT_RECEIPT_DIR` | Separate private root for integrity-bound, create-new, value-free active or recovered-rollback receipts. |
 
 When the dynamic capability is enabled, the Go envelope also requires
 `JANUS_MANAGED_DYNAMIC_HOST_TOKEN_GENERATION_DIR`, the existing private
@@ -251,7 +258,12 @@ references, force-recreates that service, and submits a receipt containing no
 packet or value only after a fresh bounded healthy observation. Lost responses
 retry idempotently; invalid earlier outbox state, cross-host claims, unknown or
 ambiguous runtime targets, mismatched outcomes, stale health, and conflicting
-receipts fail closed.
+receipts fail closed. For replacement, the host keeps the previous signed
+packet for five minutes. It commits the new packet before reporting active only
+after fresh health; reload or health failure restores the complete previous
+aggregate, reloads the same fixed target, requires fresh recovered health, and
+reports `rolled_back`. An unconfirmed staged replacement is rolled back during
+host restore, while an expired ambiguous rollback window blocks restore.
 
 ## Route and trust boundary
 

@@ -10,7 +10,8 @@ pub mod agent;
 mod dynamic;
 
 pub use dynamic::{
-    DynamicHostExecutorOutcome, HostDynamicEnvironmentPolicyV1, HostExecutorConfigV2,
+    DynamicHostExecutorOutcome, DynamicHostReplacementControlV1, HostDynamicEnvironmentPolicyV1,
+    HostExecutorConfigV2,
 };
 
 use std::collections::{BTreeMap, BTreeSet};

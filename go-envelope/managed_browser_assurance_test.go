@@ -71,10 +71,11 @@ func (authority *managedBrowserDynamicAuthority) Inspect(_ context.Context, inte
 	return authority.inspection, nil
 }
 
-func (authority *managedBrowserDynamicAuthority) reset(source string) {
+func (authority *managedBrowserDynamicAuthority) reset(source, operationKind string) {
 	authority.mu.Lock()
 	defer authority.mu.Unlock()
 	authority.inspection.Intent.Source = source
+	authority.inspection.Intent.OperationKind = operationKind
 	authority.reserved = nil
 }
 
@@ -452,12 +453,19 @@ func (harness *managedBrowserHarness) ServeHTTP(response http.ResponseWriter, re
 
 func (harness *managedBrowserHarness) session(response http.ResponseWriter, request *http.Request) {
 	kind := request.URL.Query().Get("kind")
-	if kind == "dynamic" || kind == "dynamic-generated" {
+	if kind == "dynamic" || kind == "dynamic-generated" || kind == "dynamic-replace-rollback" {
 		source := "import"
+		operationKind := "create"
 		if kind == "dynamic-generated" {
 			source = "generated"
 		}
-		harness.dynamicAuthority.reset(source)
+		if kind == "dynamic-replace-rollback" {
+			operationKind = "replace"
+			harness.app.managedDynamicTransport = &fakeManagedDynamicTransport{status: managedDynamicActivationRolledBack}
+		} else {
+			harness.app.managedDynamicTransport = &fakeManagedDynamicTransport{status: managedDynamicActivationActive}
+		}
+		harness.dynamicAuthority.reset(source, operationKind)
 		harness.executor.reset()
 		harness.writeSession(response)
 		response.Header().Set("Cache-Control", "no-store")

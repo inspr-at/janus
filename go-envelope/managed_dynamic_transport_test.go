@@ -33,7 +33,8 @@ func dynamicTestClaim() *managedDynamicPackageClaim {
 	return &managedDynamicPackageClaim{
 		HostRef: dynamicTestHost, ServiceRef: dynamicTestService,
 		EnvironmentPolicyRef: dynamicTestPolicy, OperationRef: dynamicTestOperation,
-		PackageRef: dynamicTestPackage, EnvelopeRef: dynamicTestEnvelope,
+		OperationKind: "create",
+		PackageRef:    dynamicTestPackage, EnvelopeRef: dynamicTestEnvelope,
 		BindingRef: dynamicTestBinding, GenerationRef: dynamicTestGeneration,
 		ReloadProfileRef: dynamicTestReload, HealthProfileRef: dynamicTestHealth,
 		Packet: []byte("synthetic-age-packet"),
@@ -44,7 +45,8 @@ func dynamicTestReceipt() managedDynamicActivationReceipt {
 	return managedDynamicActivationReceipt{
 		HostRef: dynamicTestHost, ServiceRef: dynamicTestService,
 		EnvironmentPolicyRef: dynamicTestPolicy, OperationRef: dynamicTestOperation,
-		PackageRef: dynamicTestPackage, EnvelopeRef: dynamicTestEnvelope,
+		OperationKind: "create",
+		PackageRef:    dynamicTestPackage, EnvelopeRef: dynamicTestEnvelope,
 		BindingRef: dynamicTestBinding, GenerationRef: dynamicTestGeneration,
 		ReloadProfileRef: dynamicTestReload, HealthProfileRef: dynamicTestHealth,
 		Phase: "active", ReasonCode: "dynamic_host_environment_active",
@@ -53,6 +55,24 @@ func dynamicTestReceipt() managedDynamicActivationReceipt {
 		HeartbeatObservedAtUnixSecs: 1_800_000_002,
 		ProcessObservedAtUnixSecs:   1_800_000_002,
 		ProbeObservedAtUnixSecs:     1_800_000_002,
+	}
+}
+
+func TestManagedDynamicRollbackReceiptRequiresExactDistinctPreviousGeneration(t *testing.T) {
+	receipt := dynamicTestReceipt()
+	receipt.OperationKind = "replace"
+	receipt.Phase = "rolled_back"
+	receipt.ReasonCode = "dynamic_host_replacement_rolled_back"
+	receipt.MaterializationReasonCode = "dynamic_host_replacement_materialized"
+	receipt.FailureReasonCode = "dynamic_host_health_failed"
+	receipt.RestoredBindingRef = "bind_previous000001"
+	receipt.RestoredGenerationRef = "gen_previous000001"
+	if err := validateManagedDynamicActivationReceipt(receipt); err != nil {
+		t.Fatalf("exact recovered rollback denied: %v", err)
+	}
+	receipt.RestoredGenerationRef = receipt.GenerationRef
+	if validateManagedDynamicActivationReceipt(receipt) == nil {
+		t.Fatal("replacement generation was accepted as its own rollback target")
 	}
 }
 
@@ -79,7 +99,8 @@ func TestManagedDynamicTransportClientUsesExactValueFreeFrames(t *testing.T) {
 			Schema: managedDynamicTransportResponseSchema, SchemaVersion: managedDynamicTransportSchemaVersion, Action: "claim",
 			HostRef: &claim.HostRef, ServiceRef: &claim.ServiceRef,
 			EnvironmentPolicyRef: &claim.EnvironmentPolicyRef, OperationRef: &claim.OperationRef,
-			PackageRef: &claim.PackageRef, EnvelopeRef: &claim.EnvelopeRef,
+			OperationKind: &claim.OperationKind,
+			PackageRef:    &claim.PackageRef, EnvelopeRef: &claim.EnvelopeRef,
 			BindingRef: &claim.BindingRef, GenerationRef: &claim.GenerationRef,
 			ReloadProfileRef: &claim.ReloadProfileRef, HealthProfileRef: &claim.HealthProfileRef,
 			PacketBase64: stringPointer(base64.RawStdEncoding.EncodeToString(claim.Packet)),
@@ -115,7 +136,8 @@ func TestManagedDynamicTransportClientUsesExactValueFreeFrames(t *testing.T) {
 			Schema: managedDynamicTransportResponseSchema, SchemaVersion: managedDynamicTransportSchemaVersion, Action: "acknowledge",
 			HostRef: &receipt.HostRef, ServiceRef: &receipt.ServiceRef,
 			EnvironmentPolicyRef: &receipt.EnvironmentPolicyRef, OperationRef: &receipt.OperationRef,
-			PackageRef: &receipt.PackageRef, EnvelopeRef: &receipt.EnvelopeRef,
+			OperationKind: &receipt.OperationKind,
+			PackageRef:    &receipt.PackageRef, EnvelopeRef: &receipt.EnvelopeRef,
 			BindingRef: &receipt.BindingRef, GenerationRef: &receipt.GenerationRef,
 			ReloadProfileRef: &receipt.ReloadProfileRef, HealthProfileRef: &receipt.HealthProfileRef,
 			Phase: "active", ReasonCode: "dynamic_transport_receipt_recorded",
@@ -149,7 +171,8 @@ func TestManagedDynamicTransportClientUsesExactValueFreeFrames(t *testing.T) {
 			Schema: managedDynamicTransportResponseSchema, SchemaVersion: managedDynamicTransportSchemaVersion, Action: "status",
 			HostRef: &query.HostRef, ServiceRef: &query.ServiceRef,
 			EnvironmentPolicyRef: &query.EnvironmentPolicyRef, OperationRef: &query.OperationRef,
-			PackageRef: &query.PackageRef, EnvelopeRef: &query.EnvelopeRef,
+			OperationKind: &query.OperationKind,
+			PackageRef:    &query.PackageRef, EnvelopeRef: &query.EnvelopeRef,
 			BindingRef: &query.BindingRef, GenerationRef: &query.GenerationRef,
 			ReloadProfileRef: &query.ReloadProfileRef, HealthProfileRef: &query.HealthProfileRef,
 			Phase: "active", ReasonCode: "dynamic_transport_environment_active",
@@ -170,7 +193,8 @@ func dynamicTestActivationQuery() managedDynamicActivationQuery {
 	return managedDynamicActivationQuery{
 		HostRef: dynamicTestHost, ServiceRef: dynamicTestService,
 		EnvironmentPolicyRef: dynamicTestPolicy, OperationRef: dynamicTestOperation,
-		PackageRef: dynamicTestPackage, EnvelopeRef: dynamicTestEnvelope,
+		OperationKind: "create",
+		PackageRef:    dynamicTestPackage, EnvelopeRef: dynamicTestEnvelope,
 		BindingRef: dynamicTestBinding, GenerationRef: dynamicTestGeneration,
 		ReloadProfileRef: dynamicTestReload, HealthProfileRef: dynamicTestHealth,
 	}
@@ -193,7 +217,8 @@ func TestManagedDynamicTransportClientAcceptsPacketFramesAboveTheControlLimit(t 
 			Schema: managedDynamicTransportResponseSchema, SchemaVersion: managedDynamicTransportSchemaVersion, Action: "claim",
 			HostRef: &claim.HostRef, ServiceRef: &claim.ServiceRef,
 			EnvironmentPolicyRef: &claim.EnvironmentPolicyRef, OperationRef: &claim.OperationRef,
-			PackageRef: &claim.PackageRef, EnvelopeRef: &claim.EnvelopeRef,
+			OperationKind: &claim.OperationKind,
+			PackageRef:    &claim.PackageRef, EnvelopeRef: &claim.EnvelopeRef,
 			BindingRef: &claim.BindingRef, GenerationRef: &claim.GenerationRef,
 			ReloadProfileRef: &claim.ReloadProfileRef, HealthProfileRef: &claim.HealthProfileRef,
 			PacketBase64: stringPointer(base64.RawStdEncoding.EncodeToString(packet)),
@@ -275,7 +300,8 @@ func TestManagedDynamicHostRoutesBindTokenHostAndReceipt(t *testing.T) {
 		Schema: managedDynamicHostReceiptSchema, SchemaVersion: managedDynamicHostSchemaVersion,
 		HostRef: dynamicTestHost, ServiceRef: dynamicTestService,
 		EnvironmentPolicyRef: dynamicTestPolicy, OperationRef: dynamicTestOperation,
-		PackageRef: dynamicTestPackage, EnvelopeRef: dynamicTestEnvelope,
+		OperationKind: "create",
+		PackageRef:    dynamicTestPackage, EnvelopeRef: dynamicTestEnvelope,
 		BindingRef: dynamicTestBinding, GenerationRef: dynamicTestGeneration,
 		ReloadProfileRef: dynamicTestReload, HealthProfileRef: dynamicTestHealth,
 		Phase: "active", ReasonCode: "dynamic_host_environment_active",

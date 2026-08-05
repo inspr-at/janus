@@ -118,11 +118,20 @@ func managedDynamicAdmissionFixture(
 	t *testing.T,
 	source string,
 ) (*App, *fakeManagedDynamicIntentAuthority, Session, *http.Cookie, *http.Cookie) {
+	return managedDynamicAdmissionFixtureForOperation(t, source, "create")
+}
+
+func managedDynamicAdmissionFixtureForOperation(
+	t *testing.T,
+	source string,
+	operationKind string,
+) (*App, *fakeManagedDynamicIntentAuthority, Session, *http.Cookie, *http.Cookie) {
 	t.Helper()
 	app, authority, session, sessionCookie, _ := managedDynamicSessionFixture(t)
 	app.managedDynamicCustody = &fakeManagedDynamicCustodyExecutor{}
 	app.managedDynamicDelivery = &fakeManagedDynamicDeliveryExecutor{}
 	authority.inspection.Intent.Source = source
+	authority.inspection.Intent.OperationKind = operationKind
 	target := managedDynamicTargetFromInspection(authority.inspection)
 	reservation, err := authority.Reserve(t.Context(), target.IntentRef, target.HumanSessionRef)
 	if err != nil {
@@ -191,6 +200,31 @@ func TestManagedDynamicImportReachesEncryptedCustodyOnce(t *testing.T) {
 	app.routes().ServeHTTP(unavailableResponse, view)
 	if unavailableResponse.Code != http.StatusOK || !strings.Contains(unavailableResponse.Body.String(), "Activation could not be checked") || strings.Contains(unavailableResponse.Body.String(), "Environment variable active") {
 		t.Fatalf("unavailable activation evidence was presented as active: status=%d body=%s", unavailableResponse.Code, unavailableResponse.Body.String())
+	}
+}
+
+func TestManagedDynamicReplacementShowsOnlyRecoveredRollbackStatus(t *testing.T) {
+	app, authority, session, sessionCookie, proofCookie := managedDynamicAdmissionFixtureForOperation(t, "import", "replace")
+	transport := &fakeManagedDynamicTransport{status: managedDynamicActivationRolledBack}
+	app.managedDynamicTransport = transport
+	canary := "replacement-rollback-canary"
+	request, _ := managedDynamicAdmissionRequest(t, app, session, sessionCookie, proofCookie, "import", url.QueryEscape(canary))
+	response := httptest.NewRecorder()
+	app.routes().ServeHTTP(response, request)
+	if response.Code != http.StatusSeeOther {
+		t.Fatalf("replacement admission failed: %d %s", response.Code, response.Body.String())
+	}
+	view := httptest.NewRequest(http.MethodGet, response.Header().Get("Location"), nil)
+	view.AddCookie(sessionCookie)
+	view.AddCookie(proofCookie)
+	viewResponse := httptest.NewRecorder()
+	app.routes().ServeHTTP(viewResponse, view)
+	body := viewResponse.Body.String()
+	if viewResponse.Code != http.StatusOK || !strings.Contains(body, "Replacement rolled back safely") || !strings.Contains(body, "Old value active") || !strings.Contains(body, "fresh recovered health") || strings.Contains(body, canary) || strings.Contains(body, "Environment variable active") {
+		t.Fatalf("rollback status was not exact and value-free: status=%d body=%s", viewResponse.Code, body)
+	}
+	if transport.statusQuery.OperationKind != "replace" || transport.statusQuery.OperationRef != authority.reservation.OperationRef {
+		t.Fatalf("rollback lookup was not replacement-bound: %#v", transport.statusQuery)
 	}
 }
 

@@ -10,9 +10,9 @@ import (
 )
 
 const (
-	managedDynamicHostClaimSchema   = "inspr.janus.managed-dynamic-host-package-claim.v2"
-	managedDynamicHostReceiptSchema = "inspr.janus.managed-dynamic-host-receipt-submission.v2"
-	managedDynamicHostSchemaVersion = 2
+	managedDynamicHostClaimSchema   = "inspr.janus.managed-dynamic-host-package-claim.v3"
+	managedDynamicHostReceiptSchema = "inspr.janus.managed-dynamic-host-receipt-submission.v3"
+	managedDynamicHostSchemaVersion = 3
 	managedDynamicHostMaxBytes      = int64(32 * 1024)
 )
 
@@ -23,6 +23,7 @@ type managedDynamicHostClaimResponse struct {
 	ServiceRef           string `json:"service_ref"`
 	EnvironmentPolicyRef string `json:"environment_policy_ref"`
 	OperationRef         string `json:"operation_ref"`
+	OperationKind        string `json:"operation_kind"`
 	PackageRef           string `json:"package_ref"`
 	EnvelopeRef          string `json:"envelope_ref"`
 	BindingRef           string `json:"binding_ref"`
@@ -43,6 +44,7 @@ type managedDynamicHostReceiptRequest struct {
 	ServiceRef                  string `json:"service_ref"`
 	EnvironmentPolicyRef        string `json:"environment_policy_ref"`
 	OperationRef                string `json:"operation_ref"`
+	OperationKind               string `json:"operation_kind"`
 	PackageRef                  string `json:"package_ref"`
 	EnvelopeRef                 string `json:"envelope_ref"`
 	BindingRef                  string `json:"binding_ref"`
@@ -52,6 +54,9 @@ type managedDynamicHostReceiptRequest struct {
 	Phase                       string `json:"phase"`
 	ReasonCode                  string `json:"reason_code"`
 	MaterializationReasonCode   string `json:"materialization_reason_code"`
+	FailureReasonCode           string `json:"failure_reason_code,omitempty"`
+	RestoredBindingRef          string `json:"restored_binding_ref,omitempty"`
+	RestoredGenerationRef       string `json:"restored_generation_ref,omitempty"`
 	MaterializedAtUnixSecs      int64  `json:"materialized_at_unix_secs"`
 	ReloadedAtUnixSecs          int64  `json:"reloaded_at_unix_secs"`
 	HeartbeatObservedAtUnixSecs int64  `json:"heartbeat_observed_at_unix_secs"`
@@ -85,7 +90,7 @@ func (app *App) handleManagedDynamicHostPackage(w http.ResponseWriter, r *http.R
 	response := managedDynamicHostClaimResponse{
 		Schema: managedDynamicHostClaimSchema, SchemaVersion: managedDynamicHostSchemaVersion,
 		HostRef: claim.HostRef, ServiceRef: claim.ServiceRef, EnvironmentPolicyRef: claim.EnvironmentPolicyRef,
-		OperationRef: claim.OperationRef, PackageRef: claim.PackageRef, EnvelopeRef: claim.EnvelopeRef,
+		OperationRef: claim.OperationRef, OperationKind: claim.OperationKind, PackageRef: claim.PackageRef, EnvelopeRef: claim.EnvelopeRef,
 		BindingRef: claim.BindingRef, GenerationRef: claim.GenerationRef,
 		ReloadProfileRef: claim.ReloadProfileRef, HealthProfileRef: claim.HealthProfileRef,
 		PacketBase64: base64Raw(claim.Packet), Phase: "claimed", ReasonCode: "dynamic_transport_package_claimed",
@@ -126,12 +131,14 @@ func (app *App) handleManagedDynamicHostReceipt(w http.ResponseWriter, r *http.R
 	}
 	receipt := managedDynamicActivationReceipt{
 		HostRef: request.HostRef, ServiceRef: request.ServiceRef, EnvironmentPolicyRef: request.EnvironmentPolicyRef,
-		OperationRef: request.OperationRef, PackageRef: request.PackageRef, EnvelopeRef: request.EnvelopeRef,
+		OperationRef: request.OperationRef, OperationKind: request.OperationKind, PackageRef: request.PackageRef, EnvelopeRef: request.EnvelopeRef,
 		BindingRef: request.BindingRef, GenerationRef: request.GenerationRef,
 		ReloadProfileRef: request.ReloadProfileRef, HealthProfileRef: request.HealthProfileRef,
 		Phase: request.Phase, ReasonCode: request.ReasonCode,
 		MaterializationReasonCode: request.MaterializationReasonCode,
-		MaterializedAtUnixSecs:    request.MaterializedAtUnixSecs, ReloadedAtUnixSecs: request.ReloadedAtUnixSecs,
+		FailureReasonCode:         request.FailureReasonCode, RestoredBindingRef: request.RestoredBindingRef,
+		RestoredGenerationRef:  request.RestoredGenerationRef,
+		MaterializedAtUnixSecs: request.MaterializedAtUnixSecs, ReloadedAtUnixSecs: request.ReloadedAtUnixSecs,
 		HeartbeatObservedAtUnixSecs: request.HeartbeatObservedAtUnixSecs,
 		ProcessObservedAtUnixSecs:   request.ProcessObservedAtUnixSecs,
 		ProbeObservedAtUnixSecs:     request.ProbeObservedAtUnixSecs,
