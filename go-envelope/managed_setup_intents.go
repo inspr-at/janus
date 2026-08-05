@@ -1142,16 +1142,20 @@ func validateManagedReplayDocument(document managedReplayDocument) error {
 }
 
 func atomicWriteManagedJSON(path string, value any) error {
-	parent := filepath.Dir(path)
-	if err := os.MkdirAll(parent, 0700); err != nil {
-		return err
-	}
 	encoded, err := json.Marshal(value)
 	if err != nil {
 		return err
 	}
 	if int64(len(encoded)) > managedReplayMaxBytes {
 		return errors.New("managed replay store exceeds its bounded contract")
+	}
+	return atomicWritePrivateFile(path, encoded)
+}
+
+func atomicWritePrivateFile(path string, encoded []byte) error {
+	parent := filepath.Dir(path)
+	if err := os.MkdirAll(parent, 0700); err != nil {
+		return err
 	}
 	temporary, err := os.CreateTemp(parent, "."+filepath.Base(path)+".tmp-*")
 	if err != nil {

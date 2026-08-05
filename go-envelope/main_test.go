@@ -4159,6 +4159,77 @@ func TestPermitStorePersistsAndReloadsValueFreeRecords(t *testing.T) {
 	}
 }
 
+func TestPermitStorePersistenceFailuresLeaveMemoryAndDiskUnchanged(t *testing.T) {
+	for _, stage := range []string{"write", "sync", "rename"} {
+		t.Run(stage, func(t *testing.T) {
+			dataDir := t.TempDir()
+			store, err := NewPermitStore(dataDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			createdAt := time.Now().UTC()
+			original := Permit{
+				ID:            "p_existing",
+				SecretRef:     "zitadel-janus-oidc",
+				Action:        "metadata_use",
+				Reason:        "original",
+				Status:        "approved_metadata_only",
+				PrincipalHash: "actor-hash",
+				CreatedAt:     createdAt,
+				ExpiresAt:     createdAt.Add(time.Minute),
+			}
+			if err := store.Put(original); err != nil {
+				t.Fatal(err)
+			}
+			permitFile := filepath.Join(dataDir, "permits.json")
+			before, err := os.ReadFile(permitFile)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			store.persist = func(string, permitStoreSnapshot) error {
+				return errors.New("injected " + stage + " failure")
+			}
+			replacement := original
+			replacement.Reason = "replacement"
+			replacement.ValueReturned = true
+			if err := store.Put(replacement); err == nil || !strings.Contains(err.Error(), stage) {
+				t.Fatalf("expected injected %s failure, got %v", stage, err)
+			}
+			if got, ok := store.Get(original.ID); !ok || !reflect.DeepEqual(got, original) {
+				t.Fatalf("failed replacement changed memory: got=%#v ok=%t", got, ok)
+			}
+
+			newPermit := original
+			newPermit.ID = "p_new"
+			if err := store.Put(newPermit); err == nil || !strings.Contains(err.Error(), stage) {
+				t.Fatalf("expected injected %s failure, got %v", stage, err)
+			}
+			if got, ok := store.Get(newPermit.ID); ok {
+				t.Fatalf("failed create left a permit active in memory: %#v", got)
+			}
+
+			after, err := os.ReadFile(permitFile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(after, before) {
+				t.Fatal("failed persistence changed the durable permit snapshot")
+			}
+			reloaded, err := NewPermitStore(dataDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got, ok := reloaded.Get(original.ID); !ok || !reflect.DeepEqual(got, original) {
+				t.Fatalf("reload did not preserve the prior permit: got=%#v ok=%t", got, ok)
+			}
+			if got, ok := reloaded.Get(newPermit.ID); ok {
+				t.Fatalf("failed create became active after reload: %#v", got)
+			}
+		})
+	}
+}
+
 func TestPermitStoreRejectsCorruptPersistenceFile(t *testing.T) {
 	dataDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dataDir, "permits.json"), []byte("{"), 0o600); err != nil {

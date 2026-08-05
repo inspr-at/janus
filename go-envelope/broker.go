@@ -241,6 +241,7 @@ type PermitStore struct {
 	mu      sync.RWMutex
 	file    string
 	permits map[string]Permit
+	persist func(string, permitStoreSnapshot) error
 }
 
 type PermitPosture struct {
@@ -256,7 +257,10 @@ type permitStoreSnapshot struct {
 }
 
 func NewPermitStore(dataDir string) (*PermitStore, error) {
-	store := &PermitStore{permits: make(map[string]Permit)}
+	store := &PermitStore{
+		permits: make(map[string]Permit),
+		persist: persistPermitStoreSnapshot,
+	}
 	if strings.TrimSpace(dataDir) == "" {
 		return store, nil
 	}
@@ -298,44 +302,52 @@ func (s *PermitStore) Put(permit Permit) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	permit.ValueReturned = false
-	s.permits[permit.ID] = permit
-	return s.persistLocked()
+	candidate := clonePermits(s.permits)
+	candidate[permit.ID] = permit
+	if s.file != "" {
+		if err := s.persist(s.file, permitSnapshot(candidate)); err != nil {
+			return err
+		}
+	}
+	s.permits = candidate
+	return nil
 }
 
-func (s *PermitStore) persistLocked() error {
-	if s.file == "" {
-		return nil
-	}
-	permits := make([]Permit, 0, len(s.permits))
-	for _, permit := range s.permits {
+func clonePermits(permits map[string]Permit) map[string]Permit {
+	cloned := make(map[string]Permit, len(permits))
+	for id, permit := range permits {
 		permit.ValueReturned = false
-		permits = append(permits, permit)
+		cloned[id] = permit
 	}
-	sort.Slice(permits, func(i, j int) bool {
-		return permits[i].CreatedAt.After(permits[j].CreatedAt)
+	return cloned
+}
+
+func permitSnapshot(permits map[string]Permit) permitStoreSnapshot {
+	ordered := make([]Permit, 0, len(permits))
+	for _, permit := range permits {
+		permit.ValueReturned = false
+		ordered = append(ordered, permit)
+	}
+	sort.Slice(ordered, func(i, j int) bool {
+		if ordered[i].CreatedAt.Equal(ordered[j].CreatedAt) {
+			return ordered[i].ID < ordered[j].ID
+		}
+		return ordered[i].CreatedAt.After(ordered[j].CreatedAt)
 	})
-	raw, err := json.MarshalIndent(permitStoreSnapshot{
+	return permitStoreSnapshot{
 		Version:       1,
-		Permits:       permits,
+		Permits:       ordered,
 		ValueReturned: false,
-	}, "", "  ")
+	}
+}
+
+func persistPermitStoreSnapshot(path string, snapshot permitStoreSnapshot) error {
+	raw, err := json.MarshalIndent(snapshot, "", "  ")
 	if err != nil {
 		return err
 	}
 	raw = append(raw, '\n')
-	tmp := s.file + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
-		return err
-	}
-	if err := os.Chmod(tmp, 0o600); err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	if err := os.Rename(tmp, s.file); err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	return nil
+	return atomicWritePrivateFile(path, raw)
 }
 
 func (s *PermitStore) Get(id string) (Permit, bool) {
