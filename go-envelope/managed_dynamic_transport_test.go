@@ -25,6 +25,8 @@ const (
 	dynamicTestEnvelope   = "env_0123456789abcdef"
 	dynamicTestBinding    = "bind_0123456789abcdef"
 	dynamicTestGeneration = "gen_0123456789abcdef"
+	dynamicTestReload     = "reload_0123456789abcdef"
+	dynamicTestHealth     = "health_0123456789abcdef"
 )
 
 func dynamicTestClaim() *managedDynamicPackageClaim {
@@ -33,18 +35,24 @@ func dynamicTestClaim() *managedDynamicPackageClaim {
 		EnvironmentPolicyRef: dynamicTestPolicy, OperationRef: dynamicTestOperation,
 		PackageRef: dynamicTestPackage, EnvelopeRef: dynamicTestEnvelope,
 		BindingRef: dynamicTestBinding, GenerationRef: dynamicTestGeneration,
+		ReloadProfileRef: dynamicTestReload, HealthProfileRef: dynamicTestHealth,
 		Packet: []byte("synthetic-age-packet"),
 	}
 }
 
-func dynamicTestReceipt() managedDynamicMaterializationReceipt {
-	return managedDynamicMaterializationReceipt{
+func dynamicTestReceipt() managedDynamicActivationReceipt {
+	return managedDynamicActivationReceipt{
 		HostRef: dynamicTestHost, ServiceRef: dynamicTestService,
 		EnvironmentPolicyRef: dynamicTestPolicy, OperationRef: dynamicTestOperation,
 		PackageRef: dynamicTestPackage, EnvelopeRef: dynamicTestEnvelope,
 		BindingRef: dynamicTestBinding, GenerationRef: dynamicTestGeneration,
-		Phase: "materialized", ReasonCode: "dynamic_host_environment_materialized",
-		ObservedAtUnixSecs: 1_800_000_000,
+		ReloadProfileRef: dynamicTestReload, HealthProfileRef: dynamicTestHealth,
+		Phase: "active", ReasonCode: "dynamic_host_environment_active",
+		MaterializationReasonCode: "dynamic_host_environment_materialized",
+		MaterializedAtUnixSecs:    1_800_000_000, ReloadedAtUnixSecs: 1_800_000_001,
+		HeartbeatObservedAtUnixSecs: 1_800_000_002,
+		ProcessObservedAtUnixSecs:   1_800_000_002,
+		ProbeObservedAtUnixSecs:     1_800_000_002,
 	}
 }
 
@@ -68,11 +76,12 @@ func TestManagedDynamicTransportClientUsesExactValueFreeFrames(t *testing.T) {
 		}
 		claim := dynamicTestClaim()
 		response := managedDynamicTransportResponse{
-			Schema: managedDynamicTransportResponseSchema, SchemaVersion: 1, Action: "claim",
+			Schema: managedDynamicTransportResponseSchema, SchemaVersion: managedDynamicTransportSchemaVersion, Action: "claim",
 			HostRef: &claim.HostRef, ServiceRef: &claim.ServiceRef,
 			EnvironmentPolicyRef: &claim.EnvironmentPolicyRef, OperationRef: &claim.OperationRef,
 			PackageRef: &claim.PackageRef, EnvelopeRef: &claim.EnvelopeRef,
 			BindingRef: &claim.BindingRef, GenerationRef: &claim.GenerationRef,
+			ReloadProfileRef: &claim.ReloadProfileRef, HealthProfileRef: &claim.HealthProfileRef,
 			PacketBase64: stringPointer(base64.RawStdEncoding.EncodeToString(claim.Packet)),
 			Phase:        "claimed", ReasonCode: "dynamic_transport_package_claimed", PacketReturned: true,
 		}
@@ -103,12 +112,13 @@ func TestManagedDynamicTransportClientUsesExactValueFreeFrames(t *testing.T) {
 		}
 		receipt := dynamicTestReceipt()
 		response := managedDynamicTransportResponse{
-			Schema: managedDynamicTransportResponseSchema, SchemaVersion: 1, Action: "acknowledge",
+			Schema: managedDynamicTransportResponseSchema, SchemaVersion: managedDynamicTransportSchemaVersion, Action: "acknowledge",
 			HostRef: &receipt.HostRef, ServiceRef: &receipt.ServiceRef,
 			EnvironmentPolicyRef: &receipt.EnvironmentPolicyRef, OperationRef: &receipt.OperationRef,
 			PackageRef: &receipt.PackageRef, EnvelopeRef: &receipt.EnvelopeRef,
 			BindingRef: &receipt.BindingRef, GenerationRef: &receipt.GenerationRef,
-			Phase: "materialized", ReasonCode: "dynamic_transport_receipt_recorded",
+			ReloadProfileRef: &receipt.ReloadProfileRef, HealthProfileRef: &receipt.HealthProfileRef,
+			Phase: "active", ReasonCode: "dynamic_transport_receipt_recorded",
 		}
 		encoded, _ := json.Marshal(response)
 		done <- writeManagedTransactionFrame(serverConnection, encoded)
@@ -135,11 +145,12 @@ func TestManagedDynamicTransportClientAcceptsPacketFramesAboveTheControlLimit(t 
 		}
 		claim := dynamicTestClaim()
 		response := managedDynamicTransportResponse{
-			Schema: managedDynamicTransportResponseSchema, SchemaVersion: 1, Action: "claim",
+			Schema: managedDynamicTransportResponseSchema, SchemaVersion: managedDynamicTransportSchemaVersion, Action: "claim",
 			HostRef: &claim.HostRef, ServiceRef: &claim.ServiceRef,
 			EnvironmentPolicyRef: &claim.EnvironmentPolicyRef, OperationRef: &claim.OperationRef,
 			PackageRef: &claim.PackageRef, EnvelopeRef: &claim.EnvelopeRef,
 			BindingRef: &claim.BindingRef, GenerationRef: &claim.GenerationRef,
+			ReloadProfileRef: &claim.ReloadProfileRef, HealthProfileRef: &claim.HealthProfileRef,
 			PacketBase64: stringPointer(base64.RawStdEncoding.EncodeToString(packet)),
 			Phase:        "claimed", ReasonCode: "dynamic_transport_package_claimed", PacketReturned: true,
 		}
@@ -160,7 +171,7 @@ func stringPointer(value string) *string { return &value }
 type fakeManagedDynamicTransport struct {
 	claim          *managedDynamicPackageClaim
 	claimedHost    string
-	receipt        managedDynamicMaterializationReceipt
+	receipt        managedDynamicActivationReceipt
 	claimErr       error
 	acknowledgeErr error
 }
@@ -170,7 +181,7 @@ func (fake *fakeManagedDynamicTransport) Claim(_ context.Context, hostRef string
 	return fake.claim, fake.claimErr
 }
 
-func (fake *fakeManagedDynamicTransport) Acknowledge(_ context.Context, receipt managedDynamicMaterializationReceipt) error {
+func (fake *fakeManagedDynamicTransport) Acknowledge(_ context.Context, receipt managedDynamicActivationReceipt) error {
 	fake.receipt = receipt
 	return fake.acknowledgeErr
 }
@@ -208,13 +219,18 @@ func TestManagedDynamicHostRoutesBindTokenHostAndReceipt(t *testing.T) {
 	}
 
 	receipt := managedDynamicHostReceiptRequest{
-		Schema: managedDynamicHostReceiptSchema, SchemaVersion: 1,
+		Schema: managedDynamicHostReceiptSchema, SchemaVersion: managedDynamicHostSchemaVersion,
 		HostRef: dynamicTestHost, ServiceRef: dynamicTestService,
 		EnvironmentPolicyRef: dynamicTestPolicy, OperationRef: dynamicTestOperation,
 		PackageRef: dynamicTestPackage, EnvelopeRef: dynamicTestEnvelope,
 		BindingRef: dynamicTestBinding, GenerationRef: dynamicTestGeneration,
-		Phase: "materialized", ReasonCode: "dynamic_host_environment_materialized",
-		ObservedAtUnixSecs: 1_800_000_000,
+		ReloadProfileRef: dynamicTestReload, HealthProfileRef: dynamicTestHealth,
+		Phase: "active", ReasonCode: "dynamic_host_environment_active",
+		MaterializationReasonCode: "dynamic_host_environment_materialized",
+		MaterializedAtUnixSecs:    1_800_000_000, ReloadedAtUnixSecs: 1_800_000_001,
+		HeartbeatObservedAtUnixSecs: 1_800_000_002,
+		ProcessObservedAtUnixSecs:   1_800_000_002,
+		ProbeObservedAtUnixSecs:     1_800_000_002,
 	}
 	body, _ := json.Marshal(receipt)
 	receiptRequest := httptest.NewRequest(http.MethodPost, "/internal/managed-environment-host-packages/"+dynamicTestHost+"/"+dynamicTestOperation+"/receipt", bytes.NewReader(body))
@@ -226,6 +242,18 @@ func TestManagedDynamicHostRoutesBindTokenHostAndReceipt(t *testing.T) {
 		t.Fatalf("receipt was not bound: %d %#v", receiptResponse.Code, fake.receipt)
 	}
 
+	receipt.HeartbeatObservedAtUnixSecs = receipt.ReloadedAtUnixSecs - 1
+	body, _ = json.Marshal(receipt)
+	staleRequest := httptest.NewRequest(http.MethodPost, "/internal/managed-environment-host-packages/"+dynamicTestHost+"/"+dynamicTestOperation+"/receipt", bytes.NewReader(body))
+	staleRequest.Header.Set("Authorization", "Bearer "+token)
+	staleRequest.Header.Set("Content-Type", "application/json")
+	staleResponse := httptest.NewRecorder()
+	app.routes().ServeHTTP(staleResponse, staleRequest)
+	if staleResponse.Code != http.StatusBadRequest {
+		t.Fatalf("stale health evidence admitted: %d", staleResponse.Code)
+	}
+
+	receipt.HeartbeatObservedAtUnixSecs = 1_800_000_002
 	receipt.OperationRef = "op_attacker000001"
 	body, _ = json.Marshal(receipt)
 	mismatchRequest := httptest.NewRequest(http.MethodPost, "/internal/managed-environment-host-packages/"+dynamicTestHost+"/"+dynamicTestOperation+"/receipt", bytes.NewReader(body))

@@ -1,7 +1,7 @@
 {
   "schema": "inspr.janus.managed-service-ux-assurance.v1",
   "schema_version": 1,
-  "reviewed_on": "2026-08-04",
+  "reviewed_on": "2026-08-05",
   "review_valid_days": 90,
   "timeout_seconds": 120,
   "required_families": [
@@ -389,23 +389,23 @@
       "value_returned": false
     },
     {
-      "id": "dynamic-exact-host-transport-receipt",
+      "id": "dynamic-exact-host-active-receipt",
       "family": "host-custody",
       "stack": "rust",
       "runner": "cargo",
       "working_directory": ".",
       "target": "janusd",
-      "test_name": "runtime::lifecycle_entry::dynamic_transport::tests::exact_host_claim_and_idempotent_receipt_are_value_free",
+      "test_name": "runtime::lifecycle_entry::dynamic_transport::tests::exact_host_claim_and_idempotent_active_receipt_are_value_free",
       "value_returned": false
     },
     {
-      "id": "dynamic-host-agent-exact-outcome-receipt",
+      "id": "dynamic-host-agent-health-gated-active-receipt",
       "family": "workflow-recovery",
       "stack": "rust",
       "runner": "cargo",
       "working_directory": ".",
       "target": "janus-host",
-      "test_name": "agent::tests::dynamic_receipt_requires_exact_value_free_materialization",
+      "test_name": "agent::tests::dynamic_receipt_requires_exact_value_free_activation_evidence",
       "value_returned": false
     },
     {

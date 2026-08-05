@@ -36,9 +36,11 @@ now carry root-owned dynamic policies and accept a signed `create` packet that
 matches one policy exactly. This is only the local host acceptance and private
 aggregate-file boundary. A separate transport daemon and the existing enrolled
 host agent can now carry that still-encrypted packet to the exact host and
-record value-free materialization evidence. They add no reload, health,
-activation, replacement, removal, deployment enablement, or Pharos/nixcfg
-change.
+record value-free activation evidence. The agent resolves only the exact
+pre-approved reload and health profiles already present in its root-owned
+configuration, force-recreates that fixed service, and records active only
+after a fresh bounded healthy observation. This adds no replacement, removal,
+deployment enablement, or Pharos/nixcfg change.
 
 ## Authority and state
 
@@ -180,11 +182,12 @@ no v1 work is pending may it claim one dynamic package through Janus using the
 token bound to its exact host reference. Janus's separate transport daemon
 revalidates the private outbox record and never decrypts it. After
 `install-dynamic`, the agent accepts only an exact, value-free materialized or
-idempotent outcome and submits matching value-free evidence. Lost responses
-retry safely; cross-host claims, invalid earlier outbox state, mismatched
-executor outcomes, and conflicting receipts fail closed. This transport slice
-does not reload or inspect the service and therefore cannot claim healthy or
-active.
+idempotent outcome. It then force-recreates the fixed Compose service selected
+by the outbox-bound reload and health references and submits value-free active
+evidence only after a fresh bounded Docker health observation. Lost responses
+retry safely; cross-host claims, unknown or ambiguous runtime targets, invalid
+earlier outbox state, mismatched executor outcomes, stale health, and
+conflicting receipts fail closed.
 
 The current ciphertext restores the runtime file after reboot without central
 Janus. Once committed, delivery expiry does not destroy that offline recovery

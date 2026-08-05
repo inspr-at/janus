@@ -10,8 +10,9 @@ import (
 )
 
 const (
-	managedDynamicHostClaimSchema   = "inspr.janus.managed-dynamic-host-package-claim.v1"
-	managedDynamicHostReceiptSchema = "inspr.janus.managed-dynamic-host-receipt-submission.v1"
+	managedDynamicHostClaimSchema   = "inspr.janus.managed-dynamic-host-package-claim.v2"
+	managedDynamicHostReceiptSchema = "inspr.janus.managed-dynamic-host-receipt-submission.v2"
+	managedDynamicHostSchemaVersion = 2
 	managedDynamicHostMaxBytes      = int64(32 * 1024)
 )
 
@@ -26,6 +27,8 @@ type managedDynamicHostClaimResponse struct {
 	EnvelopeRef          string `json:"envelope_ref"`
 	BindingRef           string `json:"binding_ref"`
 	GenerationRef        string `json:"generation_ref"`
+	ReloadProfileRef     string `json:"reload_profile_ref"`
+	HealthProfileRef     string `json:"health_profile_ref"`
 	PacketBase64         string `json:"packet_base64"`
 	Phase                string `json:"phase"`
 	ReasonCode           string `json:"reason_code"`
@@ -34,21 +37,28 @@ type managedDynamicHostClaimResponse struct {
 }
 
 type managedDynamicHostReceiptRequest struct {
-	Schema               string `json:"schema"`
-	SchemaVersion        int    `json:"schema_version"`
-	HostRef              string `json:"host_ref"`
-	ServiceRef           string `json:"service_ref"`
-	EnvironmentPolicyRef string `json:"environment_policy_ref"`
-	OperationRef         string `json:"operation_ref"`
-	PackageRef           string `json:"package_ref"`
-	EnvelopeRef          string `json:"envelope_ref"`
-	BindingRef           string `json:"binding_ref"`
-	GenerationRef        string `json:"generation_ref"`
-	Phase                string `json:"phase"`
-	ReasonCode           string `json:"reason_code"`
-	ObservedAtUnixSecs   int64  `json:"observed_at_unix_secs"`
-	PacketReturned       bool   `json:"packet_returned"`
-	ValueReturned        bool   `json:"value_returned"`
+	Schema                      string `json:"schema"`
+	SchemaVersion               int    `json:"schema_version"`
+	HostRef                     string `json:"host_ref"`
+	ServiceRef                  string `json:"service_ref"`
+	EnvironmentPolicyRef        string `json:"environment_policy_ref"`
+	OperationRef                string `json:"operation_ref"`
+	PackageRef                  string `json:"package_ref"`
+	EnvelopeRef                 string `json:"envelope_ref"`
+	BindingRef                  string `json:"binding_ref"`
+	GenerationRef               string `json:"generation_ref"`
+	ReloadProfileRef            string `json:"reload_profile_ref"`
+	HealthProfileRef            string `json:"health_profile_ref"`
+	Phase                       string `json:"phase"`
+	ReasonCode                  string `json:"reason_code"`
+	MaterializationReasonCode   string `json:"materialization_reason_code"`
+	MaterializedAtUnixSecs      int64  `json:"materialized_at_unix_secs"`
+	ReloadedAtUnixSecs          int64  `json:"reloaded_at_unix_secs"`
+	HeartbeatObservedAtUnixSecs int64  `json:"heartbeat_observed_at_unix_secs"`
+	ProcessObservedAtUnixSecs   int64  `json:"process_observed_at_unix_secs"`
+	ProbeObservedAtUnixSecs     int64  `json:"probe_observed_at_unix_secs"`
+	PacketReturned              bool   `json:"packet_returned"`
+	ValueReturned               bool   `json:"value_returned"`
 }
 
 func (app *App) handleManagedDynamicHostPackage(w http.ResponseWriter, r *http.Request) {
@@ -73,10 +83,11 @@ func (app *App) handleManagedDynamicHostPackage(w http.ResponseWriter, r *http.R
 		return
 	}
 	response := managedDynamicHostClaimResponse{
-		Schema: managedDynamicHostClaimSchema, SchemaVersion: 1,
+		Schema: managedDynamicHostClaimSchema, SchemaVersion: managedDynamicHostSchemaVersion,
 		HostRef: claim.HostRef, ServiceRef: claim.ServiceRef, EnvironmentPolicyRef: claim.EnvironmentPolicyRef,
 		OperationRef: claim.OperationRef, PackageRef: claim.PackageRef, EnvelopeRef: claim.EnvelopeRef,
 		BindingRef: claim.BindingRef, GenerationRef: claim.GenerationRef,
+		ReloadProfileRef: claim.ReloadProfileRef, HealthProfileRef: claim.HealthProfileRef,
 		PacketBase64: base64Raw(claim.Packet), Phase: "claimed", ReasonCode: "dynamic_transport_package_claimed",
 		PacketReturned: true, ValueReturned: false,
 	}
@@ -109,17 +120,23 @@ func (app *App) handleManagedDynamicHostReceipt(w http.ResponseWriter, r *http.R
 		return
 	}
 	var request managedDynamicHostReceiptRequest
-	if decodeStrictJSON(raw, &request) != nil || request.Schema != managedDynamicHostReceiptSchema || request.SchemaVersion != 1 || request.HostRef != hostRef || request.OperationRef != operationRef || request.PacketReturned || request.ValueReturned {
+	if decodeStrictJSON(raw, &request) != nil || request.Schema != managedDynamicHostReceiptSchema || request.SchemaVersion != managedDynamicHostSchemaVersion || request.HostRef != hostRef || request.OperationRef != operationRef || request.PacketReturned || request.ValueReturned {
 		app.renderSafeFailure(w, r, http.StatusBadRequest, "dynamic_transport_receipt_invalid", "Dynamic host evidence was invalid.", nil)
 		return
 	}
-	receipt := managedDynamicMaterializationReceipt{
+	receipt := managedDynamicActivationReceipt{
 		HostRef: request.HostRef, ServiceRef: request.ServiceRef, EnvironmentPolicyRef: request.EnvironmentPolicyRef,
 		OperationRef: request.OperationRef, PackageRef: request.PackageRef, EnvelopeRef: request.EnvelopeRef,
-		BindingRef: request.BindingRef, GenerationRef: request.GenerationRef, Phase: request.Phase,
-		ReasonCode: request.ReasonCode, ObservedAtUnixSecs: request.ObservedAtUnixSecs,
+		BindingRef: request.BindingRef, GenerationRef: request.GenerationRef,
+		ReloadProfileRef: request.ReloadProfileRef, HealthProfileRef: request.HealthProfileRef,
+		Phase: request.Phase, ReasonCode: request.ReasonCode,
+		MaterializationReasonCode: request.MaterializationReasonCode,
+		MaterializedAtUnixSecs:    request.MaterializedAtUnixSecs, ReloadedAtUnixSecs: request.ReloadedAtUnixSecs,
+		HeartbeatObservedAtUnixSecs: request.HeartbeatObservedAtUnixSecs,
+		ProcessObservedAtUnixSecs:   request.ProcessObservedAtUnixSecs,
+		ProbeObservedAtUnixSecs:     request.ProbeObservedAtUnixSecs,
 	}
-	if validateManagedDynamicMaterializationReceipt(receipt) != nil {
+	if validateManagedDynamicActivationReceipt(receipt) != nil {
 		app.renderSafeFailure(w, r, http.StatusBadRequest, "dynamic_transport_receipt_invalid", "Dynamic host evidence was invalid.", nil)
 		return
 	}
