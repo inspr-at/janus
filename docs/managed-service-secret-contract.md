@@ -42,6 +42,12 @@ configuration, force-recreates that fixed service, and records active only
 after a fresh bounded healthy observation. This adds no replacement, removal,
 deployment enablement, or Pharos/nixcfg change.
 
+The Janus setup page may read that outcome only through the private transport's
+strict value-free status action. `Active` requires the exact host, service,
+policy, operation, package, envelope, binding, generation, reload profile, and
+health profile to match the integrity-bound receipt. Missing, expired,
+mismatched, malformed, or unavailable evidence never becomes a success claim.
+
 ## Authority and state
 
 No one system may claim an end-to-end outcome by itself.

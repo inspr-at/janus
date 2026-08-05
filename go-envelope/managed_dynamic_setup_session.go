@@ -115,6 +115,9 @@ type managedDynamicSetupPageData struct {
 	StepUpReady                  bool
 	ValueAdmissionStarted        bool
 	ValueAdmissionComplete       bool
+	ActivationActive             bool
+	ActivationExpired            bool
+	ActivationUnavailable        bool
 	BindingRef                   string
 	SecretRef                    string
 	GenerationRef                string
@@ -149,6 +152,8 @@ func (app *App) handleManagedDynamicSetup(w http.ResponseWriter, r *http.Request
 	generationRef := ""
 	packageRef := ""
 	envelopeRef := ""
+	activationStatus := managedDynamicActivationStatus("")
+	activationUnavailable := false
 	if proofOK && proof.Target == target {
 		reservation, reservationErr := app.managedDynamicSetup.RecoverReservation(
 			r.Context(),
@@ -167,6 +172,21 @@ func (app *App) handleManagedDynamicSetup(w http.ResponseWriter, r *http.Request
 			generationRef = reservation.GenerationRef
 			packageRef = reservation.PackageRef
 			envelopeRef = reservation.EnvelopeRef
+			if valueAdmissionComplete {
+				if app.managedDynamicTransport == nil {
+					activationUnavailable = true
+				} else {
+					activationStatus, reservationErr = app.managedDynamicTransport.Status(r.Context(), managedDynamicActivationQuery{
+						HostRef: target.HostRef, ServiceRef: target.ServiceRef,
+						EnvironmentPolicyRef: target.EnvironmentPolicyRef, OperationRef: reservation.OperationRef,
+						PackageRef: reservation.PackageRef, EnvelopeRef: reservation.EnvelopeRef,
+						BindingRef: reservation.BindingRef, GenerationRef: reservation.GenerationRef,
+						ReloadProfileRef: inspection.Context.ReloadProfileRef,
+						HealthProfileRef: inspection.Context.HealthProfileRef,
+					})
+					activationUnavailable = reservationErr != nil
+				}
+			}
 		}
 	}
 	if proofOK && !stepUpReady {
@@ -196,6 +216,9 @@ func (app *App) handleManagedDynamicSetup(w http.ResponseWriter, r *http.Request
 		StepUpReady:                  stepUpReady,
 		ValueAdmissionStarted:        valueAdmissionStarted,
 		ValueAdmissionComplete:       valueAdmissionComplete,
+		ActivationActive:             activationStatus == managedDynamicActivationActive,
+		ActivationExpired:            activationStatus == managedDynamicActivationExpired,
+		ActivationUnavailable:        activationUnavailable,
 		BindingRef:                   bindingRef,
 		SecretRef:                    secretRef,
 		GenerationRef:                generationRef,

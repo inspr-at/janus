@@ -26,10 +26,11 @@ use super::dynamic_delivery::{
     ProfileKey, MAX_OUTBOX_BYTES, OUTBOX_SCHEMA, SCHEMA_VERSION as DELIVERY_SCHEMA_VERSION,
 };
 
-const REQUEST_SCHEMA: &str = "inspr.janus.managed-dynamic-transport-request.v2";
-const RESPONSE_SCHEMA: &str = "inspr.janus.managed-dynamic-transport-response.v2";
+const REQUEST_SCHEMA: &str = "inspr.janus.managed-dynamic-transport-request.v3";
+const RESPONSE_SCHEMA: &str = "inspr.janus.managed-dynamic-transport-response.v3";
 const RECEIPT_SCHEMA: &str = "inspr.janus.managed-dynamic-host-receipt.v2";
-const TRANSPORT_SCHEMA_VERSION: u8 = 2;
+const TRANSPORT_SCHEMA_VERSION: u8 = 3;
+const RECEIPT_SCHEMA_VERSION: u8 = 2;
 const SOCKET_ENV: &str = "JANUS_MANAGED_DYNAMIC_TRANSPORT_SOCKET";
 const PEER_UID_ENV: &str = "JANUS_MANAGED_DYNAMIC_TRANSPORT_ALLOWED_UID";
 const PROFILE_ENV: &str = "JANUS_MANAGED_DYNAMIC_TRANSPORT_PROFILE_FILE";
@@ -55,6 +56,28 @@ enum TransportRequest {
         schema_version: u8,
         receipt: Box<TransportAcknowledgementRequest>,
     },
+    Status {
+        schema: String,
+        schema_version: u8,
+        query: Box<TransportStatusRequest>,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TransportStatusRequest {
+    host_ref: String,
+    service_ref: String,
+    environment_policy_ref: String,
+    operation_ref: String,
+    package_ref: String,
+    envelope_ref: String,
+    binding_ref: String,
+    generation_ref: String,
+    reload_profile_ref: String,
+    health_profile_ref: String,
+    packet_returned: bool,
+    value_returned: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -279,8 +302,134 @@ async fn handle_connection(
                     .unwrap_or_else(|reason| denied("acknowledge", reason))
             }
         }
+        TransportRequest::Status {
+            schema,
+            schema_version,
+            query,
+        } => {
+            if schema != REQUEST_SCHEMA
+                || schema_version != TRANSPORT_SCHEMA_VERSION
+                || query.packet_returned
+                || query.value_returned
+            {
+                denied("status", "dynamic_transport_request_invalid")
+            } else {
+                let query = ActivationQuery {
+                    host_ref: query.host_ref,
+                    service_ref: query.service_ref,
+                    environment_policy_ref: query.environment_policy_ref,
+                    operation_ref: query.operation_ref,
+                    package_ref: query.package_ref,
+                    envelope_ref: query.envelope_ref,
+                    binding_ref: query.binding_ref,
+                    generation_ref: query.generation_ref,
+                    reload_profile_ref: query.reload_profile_ref,
+                    health_profile_ref: query.health_profile_ref,
+                };
+                status(profiles, receipt_dir, &query, now)
+                    .unwrap_or_else(|reason| denied("status", reason))
+            }
+        }
     };
     let _ = write_response(&mut stream, response).await;
+}
+
+#[derive(Clone)]
+struct ActivationQuery {
+    host_ref: String,
+    service_ref: String,
+    environment_policy_ref: String,
+    operation_ref: String,
+    package_ref: String,
+    envelope_ref: String,
+    binding_ref: String,
+    generation_ref: String,
+    reload_profile_ref: String,
+    health_profile_ref: String,
+}
+
+fn status(
+    profiles: &BTreeMap<ProfileKey, DeliveryProfile>,
+    receipt_dir: &Path,
+    query: &ActivationQuery,
+    now: SystemTime,
+) -> std::result::Result<TransportResponse, &'static str> {
+    validate_activation_query(query)?;
+    let now = unix_seconds(now)?;
+    let profile_matches = profiles
+        .values()
+        .filter(|profile| {
+            profile.host_ref == query.host_ref && profile.service_ref == query.service_ref
+        })
+        .collect::<Vec<_>>();
+    if profile_matches.len() != 1 {
+        return Err("dynamic_transport_status_denied");
+    }
+    let profile = profile_matches[0];
+    let record = load_outbox(
+        &profile
+            .outbox_dir
+            .join(format!("{}.json", query.package_ref)),
+        &query.package_ref,
+        profile,
+    )?;
+    if record.host_ref != query.host_ref
+        || record.service_ref != query.service_ref
+        || record.environment_policy_ref != query.environment_policy_ref
+        || record.operation_ref != query.operation_ref
+        || record.package_ref != query.package_ref
+        || record.envelope_ref != query.envelope_ref
+        || record.binding_ref != query.binding_ref
+        || record.generation_ref != query.generation_ref
+        || record.reload_profile_ref != query.reload_profile_ref
+        || record.health_profile_ref != query.health_profile_ref
+    {
+        return Err("dynamic_transport_status_denied");
+    }
+    let (phase, reason_code) = if load_receipt(receipt_dir, &record)?.is_some() {
+        ("active", "dynamic_transport_environment_active")
+    } else if now >= record.expires_at_unix_secs {
+        ("expired", "dynamic_transport_package_expired")
+    } else {
+        ("pending", "dynamic_transport_activation_pending")
+    };
+    Ok(TransportResponse {
+        schema: RESPONSE_SCHEMA,
+        schema_version: TRANSPORT_SCHEMA_VERSION,
+        action: "status",
+        host_ref: Some(record.host_ref),
+        service_ref: Some(record.service_ref),
+        environment_policy_ref: Some(record.environment_policy_ref),
+        operation_ref: Some(record.operation_ref),
+        package_ref: Some(record.package_ref),
+        envelope_ref: Some(record.envelope_ref),
+        binding_ref: Some(record.binding_ref),
+        generation_ref: Some(record.generation_ref),
+        reload_profile_ref: Some(record.reload_profile_ref),
+        health_profile_ref: Some(record.health_profile_ref),
+        packet_base64: None,
+        phase,
+        reason_code,
+        packet_returned: false,
+        value_returned: false,
+    })
+}
+
+fn validate_activation_query(query: &ActivationQuery) -> std::result::Result<(), &'static str> {
+    if !valid_ref("host_", &query.host_ref)
+        || !valid_ref("svc_", &query.service_ref)
+        || !valid_ref("envpol_", &query.environment_policy_ref)
+        || !valid_ref("op_", &query.operation_ref)
+        || !valid_ref("pkg_", &query.package_ref)
+        || !valid_ref("env_", &query.envelope_ref)
+        || !valid_ref("bind_", &query.binding_ref)
+        || !valid_ref("gen_", &query.generation_ref)
+        || !valid_ref("reload_", &query.reload_profile_ref)
+        || !valid_ref("health_", &query.health_profile_ref)
+    {
+        return Err("dynamic_transport_status_invalid");
+    }
+    Ok(())
 }
 
 fn claim(
@@ -412,7 +561,7 @@ fn acknowledge(
     }
     let mut receipt = ActivationReceipt {
         schema: RECEIPT_SCHEMA.to_string(),
-        schema_version: TRANSPORT_SCHEMA_VERSION,
+        schema_version: RECEIPT_SCHEMA_VERSION,
         host_ref: acknowledgement.host_ref.clone(),
         service_ref: acknowledgement.service_ref.clone(),
         environment_policy_ref: acknowledgement.environment_policy_ref.clone(),
@@ -576,7 +725,7 @@ fn load_receipt(
     let receipt: ActivationReceipt =
         serde_json::from_slice(&raw).map_err(|_| "dynamic_transport_receipt_invalid")?;
     if receipt.schema != RECEIPT_SCHEMA
-        || receipt.schema_version != TRANSPORT_SCHEMA_VERSION
+        || receipt.schema_version != RECEIPT_SCHEMA_VERSION
         || receipt.host_ref != record.host_ref
         || receipt.service_ref != record.service_ref
         || receipt.environment_policy_ref != record.environment_policy_ref
@@ -930,10 +1079,44 @@ mod tests {
         }
     }
 
+    fn activation_query(record: &OutboxRecord) -> ActivationQuery {
+        ActivationQuery {
+            host_ref: record.host_ref.clone(),
+            service_ref: record.service_ref.clone(),
+            environment_policy_ref: record.environment_policy_ref.clone(),
+            operation_ref: record.operation_ref.clone(),
+            package_ref: record.package_ref.clone(),
+            envelope_ref: record.envelope_ref.clone(),
+            binding_ref: record.binding_ref.clone(),
+            generation_ref: record.generation_ref.clone(),
+            reload_profile_ref: record.reload_profile_ref.clone(),
+            health_profile_ref: record.health_profile_ref.clone(),
+        }
+    }
+
     #[test]
     fn exact_host_claim_and_idempotent_active_receipt_are_value_free() {
         let fixture = fixture();
         let now = UNIX_EPOCH + Duration::from_secs(1_800_000_010);
+        let pending = status(
+            &fixture.profiles,
+            &fixture.receipt_dir,
+            &activation_query(&fixture.record),
+            now,
+        )
+        .unwrap();
+        assert_eq!(pending.phase, "pending");
+        assert_eq!(pending.reason_code, "dynamic_transport_activation_pending");
+        assert!(!pending.packet_returned && !pending.value_returned);
+        let expired = status(
+            &fixture.profiles,
+            &fixture.receipt_dir,
+            &activation_query(&fixture.record),
+            UNIX_EPOCH + Duration::from_secs(fixture.record.expires_at_unix_secs),
+        )
+        .unwrap();
+        assert_eq!(expired.phase, "expired");
+        assert_eq!(expired.reason_code, "dynamic_transport_package_expired");
         let claimed = claim(
             &fixture.profiles,
             &fixture.receipt_dir,
@@ -974,6 +1157,16 @@ mod tests {
         assert_eq!(first.phase, "active");
         assert_eq!(second.phase, "active");
         assert!(!first.packet_returned && !first.value_returned);
+        let active = status(
+            &fixture.profiles,
+            &fixture.receipt_dir,
+            &activation_query(&fixture.record),
+            now,
+        )
+        .unwrap();
+        assert_eq!(active.phase, "active");
+        assert_eq!(active.reason_code, "dynamic_transport_environment_active");
+        assert!(!active.packet_returned && !active.value_returned);
         let empty = claim(
             &fixture.profiles,
             &fixture.receipt_dir,
@@ -987,6 +1180,9 @@ mod tests {
             &fixture.record.package_ref,
         ))
         .unwrap();
+        let persisted: ActivationReceipt = serde_json::from_slice(&receipt).unwrap();
+        assert_eq!(persisted.schema_version, RECEIPT_SCHEMA_VERSION);
+        assert_eq!(active.schema_version, TRANSPORT_SCHEMA_VERSION);
         assert!(!receipt
             .windows(b"signed-host-ciphertext".len())
             .any(|window| window == b"signed-host-ciphertext"));
@@ -1029,6 +1225,33 @@ mod tests {
         let mut leaking = raw;
         leaking["receipt"]["secret_value"] = serde_json::json!("SENSITIVE_CANARY");
         assert!(serde_json::from_value::<TransportRequest>(leaking).is_err());
+
+        let status = serde_json::json!({
+            "schema": REQUEST_SCHEMA,
+            "schema_version": TRANSPORT_SCHEMA_VERSION,
+            "action": "status",
+            "query": {
+                "host_ref": "host_7f94a1c8e912",
+                "service_ref": "svc_24b7c8f0aa19",
+                "environment_policy_ref": "envpol_12345678abcdef00",
+                "operation_ref": "op_12345678abcdef00",
+                "package_ref": "pkg_12345678abcdef00",
+                "envelope_ref": "env_12345678abcdef00",
+                "binding_ref": "bind_12345678abcdef00",
+                "generation_ref": "gen_12345678abcdef00",
+                "reload_profile_ref": "reload_12345678abcdef00",
+                "health_profile_ref": "health_12345678abcdef00",
+                "packet_returned": false,
+                "value_returned": false
+            }
+        });
+        assert!(matches!(
+            serde_json::from_value::<TransportRequest>(status.clone()).unwrap(),
+            TransportRequest::Status { .. }
+        ));
+        let mut leaking_status = status;
+        leaking_status["query"]["secret_value"] = serde_json::json!("SENSITIVE_CANARY");
+        assert!(serde_json::from_value::<TransportRequest>(leaking_status).is_err());
     }
 
     #[test]
@@ -1044,6 +1267,18 @@ mod tests {
             )
             .unwrap_err(),
             "dynamic_transport_host_denied"
+        );
+        let mut mismatched_query = activation_query(&fixture.record);
+        mismatched_query.generation_ref = "gen_aaaaaaaaaaaaaaaa".to_string();
+        assert_eq!(
+            status(
+                &fixture.profiles,
+                &fixture.receipt_dir,
+                &mismatched_query,
+                now,
+            )
+            .unwrap_err(),
+            "dynamic_transport_status_denied"
         );
         let acknowledgement = activation_acknowledgement(&fixture.record);
         let mut stale = acknowledgement.clone();

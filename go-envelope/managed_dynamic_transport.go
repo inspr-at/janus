@@ -11,9 +11,9 @@ import (
 )
 
 const (
-	managedDynamicTransportRequestSchema  = "inspr.janus.managed-dynamic-transport-request.v2"
-	managedDynamicTransportResponseSchema = "inspr.janus.managed-dynamic-transport-response.v2"
-	managedDynamicTransportSchemaVersion  = 2
+	managedDynamicTransportRequestSchema  = "inspr.janus.managed-dynamic-transport-request.v3"
+	managedDynamicTransportResponseSchema = "inspr.janus.managed-dynamic-transport-response.v3"
+	managedDynamicTransportSchemaVersion  = 3
 	managedDynamicTransportTimeout        = 10 * time.Second
 	managedDynamicTransportMaxFrameBytes  = 768 * 1024
 	managedDynamicTransportMaxPacketBytes = 256 * 1024
@@ -33,6 +33,28 @@ type managedDynamicTransportAcknowledgeRequest struct {
 	SchemaVersion int                            `json:"schema_version"`
 	Action        string                         `json:"action"`
 	Receipt       managedDynamicTransportReceipt `json:"receipt"`
+}
+
+type managedDynamicTransportStatusRequest struct {
+	Schema        string                             `json:"schema"`
+	SchemaVersion int                                `json:"schema_version"`
+	Action        string                             `json:"action"`
+	Query         managedDynamicTransportStatusQuery `json:"query"`
+}
+
+type managedDynamicTransportStatusQuery struct {
+	HostRef              string `json:"host_ref"`
+	ServiceRef           string `json:"service_ref"`
+	EnvironmentPolicyRef string `json:"environment_policy_ref"`
+	OperationRef         string `json:"operation_ref"`
+	PackageRef           string `json:"package_ref"`
+	EnvelopeRef          string `json:"envelope_ref"`
+	BindingRef           string `json:"binding_ref"`
+	GenerationRef        string `json:"generation_ref"`
+	ReloadProfileRef     string `json:"reload_profile_ref"`
+	HealthProfileRef     string `json:"health_profile_ref"`
+	PacketReturned       bool   `json:"packet_returned"`
+	ValueReturned        bool   `json:"value_returned"`
 }
 
 type managedDynamicTransportReceipt struct {
@@ -114,9 +136,31 @@ type managedDynamicActivationReceipt struct {
 	ProbeObservedAtUnixSecs     int64
 }
 
+type managedDynamicActivationQuery struct {
+	HostRef              string
+	ServiceRef           string
+	EnvironmentPolicyRef string
+	OperationRef         string
+	PackageRef           string
+	EnvelopeRef          string
+	BindingRef           string
+	GenerationRef        string
+	ReloadProfileRef     string
+	HealthProfileRef     string
+}
+
+type managedDynamicActivationStatus string
+
+const (
+	managedDynamicActivationPending managedDynamicActivationStatus = "pending"
+	managedDynamicActivationActive  managedDynamicActivationStatus = "active"
+	managedDynamicActivationExpired managedDynamicActivationStatus = "expired"
+)
+
 type managedDynamicTransportExecutor interface {
 	Claim(context.Context, string) (*managedDynamicPackageClaim, error)
 	Acknowledge(context.Context, managedDynamicActivationReceipt) error
+	Status(context.Context, managedDynamicActivationQuery) (managedDynamicActivationStatus, error)
 }
 
 type managedDynamicTransportClient struct {
@@ -195,6 +239,40 @@ func (client *managedDynamicTransportClient) Acknowledge(ctx context.Context, re
 	return nil
 }
 
+func (client *managedDynamicTransportClient) Status(ctx context.Context, query managedDynamicActivationQuery) (managedDynamicActivationStatus, error) {
+	if client == nil || !managedDynamicCleanAbsolutePath(client.socketPath) || validateManagedDynamicActivationQuery(query) != nil {
+		return "", errors.New("dynamic_transport_request_invalid")
+	}
+	response, err := client.request(ctx, managedDynamicTransportStatusRequest{
+		Schema: managedDynamicTransportRequestSchema, SchemaVersion: managedDynamicTransportSchemaVersion,
+		Action: "status",
+		Query: managedDynamicTransportStatusQuery{
+			HostRef: query.HostRef, ServiceRef: query.ServiceRef,
+			EnvironmentPolicyRef: query.EnvironmentPolicyRef, OperationRef: query.OperationRef,
+			PackageRef: query.PackageRef, EnvelopeRef: query.EnvelopeRef, BindingRef: query.BindingRef,
+			GenerationRef: query.GenerationRef, ReloadProfileRef: query.ReloadProfileRef,
+			HealthProfileRef: query.HealthProfileRef, PacketReturned: false, ValueReturned: false,
+		},
+	})
+	if err != nil {
+		return "", err
+	}
+	if response.Action != "status" || response.PacketReturned || response.ValueReturned || response.PacketBase64 != nil ||
+		response.HostRef == nil || *response.HostRef != query.HostRef || response.ServiceRef == nil || *response.ServiceRef != query.ServiceRef || response.EnvironmentPolicyRef == nil || *response.EnvironmentPolicyRef != query.EnvironmentPolicyRef || response.OperationRef == nil || *response.OperationRef != query.OperationRef || response.PackageRef == nil || *response.PackageRef != query.PackageRef || response.EnvelopeRef == nil || *response.EnvelopeRef != query.EnvelopeRef || response.BindingRef == nil || *response.BindingRef != query.BindingRef || response.GenerationRef == nil || *response.GenerationRef != query.GenerationRef || response.ReloadProfileRef == nil || *response.ReloadProfileRef != query.ReloadProfileRef || response.HealthProfileRef == nil || *response.HealthProfileRef != query.HealthProfileRef {
+		return "", errors.New("dynamic_transport_protocol_invalid")
+	}
+	switch {
+	case response.Phase == "pending" && response.ReasonCode == "dynamic_transport_activation_pending":
+		return managedDynamicActivationPending, nil
+	case response.Phase == "active" && response.ReasonCode == "dynamic_transport_environment_active":
+		return managedDynamicActivationActive, nil
+	case response.Phase == "expired" && response.ReasonCode == "dynamic_transport_package_expired":
+		return managedDynamicActivationExpired, nil
+	default:
+		return "", errors.New("dynamic_transport_protocol_invalid")
+	}
+}
+
 func (client *managedDynamicTransportClient) request(ctx context.Context, request any) (managedDynamicTransportResponse, error) {
 	connection, err := client.dial(ctx, "unix", client.socketPath)
 	if err != nil {
@@ -226,6 +304,13 @@ func (client *managedDynamicTransportClient) request(ctx context.Context, reques
 func validateManagedDynamicActivationReceipt(receipt managedDynamicActivationReceipt) error {
 	if !validManagedRef("host_", receipt.HostRef) || !validManagedRef("svc_", receipt.ServiceRef) || !validManagedRef("envpol_", receipt.EnvironmentPolicyRef) || !validManagedRef("op_", receipt.OperationRef) || !validManagedRef("pkg_", receipt.PackageRef) || !validManagedRef("env_", receipt.EnvelopeRef) || !validManagedRef("bind_", receipt.BindingRef) || !validManagedRef("gen_", receipt.GenerationRef) || !validManagedRef("reload_", receipt.ReloadProfileRef) || !validManagedRef("health_", receipt.HealthProfileRef) || receipt.Phase != "active" || receipt.ReasonCode != "dynamic_host_environment_active" || (receipt.MaterializationReasonCode != "dynamic_host_environment_materialized" && receipt.MaterializationReasonCode != "dynamic_host_materialization_idempotent") || receipt.MaterializedAtUnixSecs <= 0 || receipt.ReloadedAtUnixSecs < receipt.MaterializedAtUnixSecs || receipt.HeartbeatObservedAtUnixSecs < receipt.ReloadedAtUnixSecs || receipt.ProcessObservedAtUnixSecs < receipt.ReloadedAtUnixSecs || receipt.ProbeObservedAtUnixSecs < receipt.ReloadedAtUnixSecs {
 		return errors.New("dynamic_transport_receipt_invalid")
+	}
+	return nil
+}
+
+func validateManagedDynamicActivationQuery(query managedDynamicActivationQuery) error {
+	if !validManagedRef("host_", query.HostRef) || !validManagedRef("svc_", query.ServiceRef) || !validManagedRef("envpol_", query.EnvironmentPolicyRef) || !validManagedRef("op_", query.OperationRef) || !validManagedRef("pkg_", query.PackageRef) || !validManagedRef("env_", query.EnvelopeRef) || !validManagedRef("bind_", query.BindingRef) || !validManagedRef("gen_", query.GenerationRef) || !validManagedRef("reload_", query.ReloadProfileRef) || !validManagedRef("health_", query.HealthProfileRef) {
+		return errors.New("dynamic_transport_status_invalid")
 	}
 	return nil
 }
