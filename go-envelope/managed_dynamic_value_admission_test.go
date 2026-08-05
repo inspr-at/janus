@@ -49,6 +49,9 @@ func (executor *fakeManagedDynamicDeliveryExecutor) Prepare(_ context.Context, _
 	if executor.prepareErr != nil {
 		return managedDynamicDeliveryResult{}, executor.prepareErr
 	}
+	if custody == (managedDynamicCustodyResult{}) {
+		return managedDynamicDeliveryTestResult(operationRef), nil
+	}
 	if validateManagedDynamicCustodyResult(custody, operationRef) != nil {
 		return managedDynamicDeliveryResult{}, managedDynamicDeliveryError("dynamic_delivery_request_invalid")
 	}
@@ -132,6 +135,11 @@ func managedDynamicAdmissionFixtureForOperation(
 	app.managedDynamicDelivery = &fakeManagedDynamicDeliveryExecutor{}
 	authority.inspection.Intent.Source = source
 	authority.inspection.Intent.OperationKind = operationKind
+	if operationKind == "remove" {
+		authority.inspection.Intent.BindingRef = "bind_fixture0001"
+		authority.inspection.Intent.SecretRef = "sec_fixture0001"
+		authority.inspection.Intent.GenerationRef = "gen_fixture0001"
+	}
 	target := managedDynamicTargetFromInspection(authority.inspection)
 	reservation, err := authority.Reserve(t.Context(), target.IntentRef, target.HumanSessionRef)
 	if err != nil {
@@ -225,6 +233,49 @@ func TestManagedDynamicReplacementShowsOnlyRecoveredRollbackStatus(t *testing.T)
 	}
 	if transport.statusQuery.OperationKind != "replace" || transport.statusQuery.OperationRef != authority.reservation.OperationRef {
 		t.Fatalf("rollback lookup was not replacement-bound: %#v", transport.statusQuery)
+	}
+}
+
+func TestManagedDynamicRemovalUsesNoValueAndShowsRemovedOrRecoveredStatus(t *testing.T) {
+	app, authority, session, sessionCookie, proofCookie := managedDynamicAdmissionFixtureForOperation(t, "remove", "remove")
+	transport := &fakeManagedDynamicTransport{status: managedDynamicActivationRemoved}
+	app.managedDynamicTransport = transport
+	request, reader := managedDynamicAdmissionRequest(t, app, session, sessionCookie, proofCookie, "remove", "")
+	response := httptest.NewRecorder()
+	app.routes().ServeHTTP(response, request)
+	if response.Code != http.StatusSeeOther || reader.offset != len(reader.value) {
+		t.Fatalf("value-free removal preparation failed: %d %s", response.Code, response.Body.String())
+	}
+	if app.managedDynamicCustody.(*fakeManagedDynamicCustodyExecutor).count != 0 {
+		t.Fatal("removal entered plaintext custody")
+	}
+	view := httptest.NewRequest(http.MethodGet, response.Header().Get("Location"), nil)
+	view.AddCookie(sessionCookie)
+	view.AddCookie(proofCookie)
+	removed := httptest.NewRecorder()
+	app.routes().ServeHTTP(removed, view)
+	body := removed.Body.String()
+	if removed.Code != http.StatusOK || !strings.Contains(body, "Environment variable removed") || !strings.Contains(body, "Service healthy") || strings.Contains(body, `type="password"`) {
+		t.Fatalf("removed status was not exact and value-free: %d %s", removed.Code, body)
+	}
+	if transport.statusQuery.BindingRef != authority.inspection.Intent.BindingRef || transport.statusQuery.GenerationRef != authority.inspection.Intent.GenerationRef {
+		t.Fatalf("removal status was not exact: %#v", transport.statusQuery)
+	}
+	transport.status = managedDynamicActivationRolledBack
+	recovered := httptest.NewRecorder()
+	app.routes().ServeHTTP(recovered, view)
+	if !strings.Contains(recovered.Body.String(), "Removal rolled back safely") || !strings.Contains(recovered.Body.String(), "Variable still active") {
+		t.Fatalf("removal rollback was not surfaced: %s", recovered.Body.String())
+	}
+}
+
+func TestManagedDynamicRemovalRejectsValueBytesBeforeSpendingReservation(t *testing.T) {
+	app, authority, session, sessionCookie, proofCookie := managedDynamicAdmissionFixtureForOperation(t, "remove", "remove")
+	request, _ := managedDynamicAdmissionRequest(t, app, session, sessionCookie, proofCookie, "remove", "must-not-cross-removal")
+	response := httptest.NewRecorder()
+	app.routes().ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest || authority.beginCount != 0 || authority.completeCount != 0 || app.managedDynamicCustody.(*fakeManagedDynamicCustodyExecutor).count != 0 || strings.Contains(response.Body.String(), "must-not-cross-removal") {
+		t.Fatalf("value-bearing removal crossed the boundary: status=%d begin=%d complete=%d body=%s", response.Code, authority.beginCount, authority.completeCount, response.Body.String())
 	}
 }
 

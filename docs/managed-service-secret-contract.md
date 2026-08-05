@@ -32,16 +32,18 @@ There is no case folding or other name normalization.
 The canonical fixture is
 `contracts/managed-service-dynamic-env-contract-v2.json`; the v1 parser and
 fixture remain unchanged. Janus's version 2 host-executor configuration may
-now carry root-owned dynamic policies and accept a signed `create` packet or an
-exact-existing-name `replace` packet that matches one policy exactly. A
+now carry root-owned dynamic policies and accept a signed `create` packet, an
+exact-existing-name `replace` packet, or a value-free exact-current `remove`
+packet that matches one policy exactly. A
 separate transport daemon and the existing enrolled host agent carry that
 still-encrypted packet to the exact host and record value-free activation or
 recovered-rollback evidence. The agent resolves only the exact pre-approved
 reload and health profiles already present in its root-owned configuration.
 Replacement retains the previous signed packet for a bounded window, commits
 only after fresh health, and otherwise restores the full previous aggregate
-before requiring recovered health. This adds no removal, deployment
-enablement, or Pharos/nixcfg change.
+before requiring recovered health. Removal applies the same health gate and
+restores the exact binding on failure. This adds no deployment enablement or
+Pharos/nixcfg change.
 
 The Janus setup page may read that outcome only through the private transport's
 strict version 4 value-free status action. New version 3 receipts bind the
@@ -149,12 +151,13 @@ Copying an operation or encrypted envelope to another host must fail.
 `commit`, `rollback`, and `status` unchanged. With a strict version 2
 configuration it additionally accepts `install-dynamic` and
 `restore-dynamic`. Dynamic install reads one bounded signed packet from
-standard input and accepts only create or exact-existing-name replacement;
+standard input and accepts only create, exact-existing-name replacement, or an
+exact value-free removal control for the current binding and generation;
 dynamic restore rebuilds configured aggregates from the signed cache and
-rolls back an unconfirmed staged replacement. Replacement commit and rollback
-use an exact value-free operation, binding, and generation control. These
-actions do not transport a packet, reload a service, inspect health, activate a
-binding, or remove a binding. The root-owned configuration fixes the host, scope, Janus producer
+rolls back an unconfirmed staged replacement or removal. Replacement and
+removal commit/rollback use an exact value-free operation, binding, and
+generation control. These actions do not transport a value, reload a service,
+inspect health, or choose a binding. The root-owned configuration fixes the host, scope, Janus producer
 verification keys, revocation epoch, declared slots, declaration fingerprints,
 generation floors, rollback windows, and—only in version 2—dynamic service
 policies.
@@ -202,6 +205,11 @@ earlier outbox state, mismatched executor outcomes, stale health, and
 conflicting receipts fail closed. A replacement reload or health failure invokes
 the exact executor rollback, force-recreates the same service, and requires
 fresh recovered health before the value-free rolled-back receipt is accepted.
+A removal stages the aggregate without the exact current binding while retaining
+its signed packet. Failed reload or health restores it and verifies recovered
+health; success deletes only that cached packet and emits `removed`. The central
+Age ciphertext is quarantined only after that exact receipt and is purged
+idempotently after 24 hours without ever being opened by transport.
 
 The current ciphertext restores the runtime file after reboot without central
 Janus. Once committed, delivery expiry does not destroy that offline recovery

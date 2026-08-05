@@ -53,6 +53,9 @@ type managedDynamicStepUpTarget struct {
 	EnvironmentPolicyFingerprint string `json:"environment_policy_fingerprint"`
 	DeclarationFingerprint       string `json:"declaration_fingerprint"`
 	EnvironmentName              string `json:"environment_name"`
+	BindingRef                   string `json:"binding_ref,omitempty"`
+	SecretRef                    string `json:"secret_ref,omitempty"`
+	GenerationRef                string `json:"generation_ref,omitempty"`
 	HumanSessionRef              string `json:"human_session_ref"`
 	IssuerRef                    string `json:"issuer_ref"`
 	AudienceRef                  string `json:"audience_ref"`
@@ -116,6 +119,7 @@ type managedDynamicSetupPageData struct {
 	ValueAdmissionStarted        bool
 	ValueAdmissionComplete       bool
 	ActivationActive             bool
+	ActivationRemoved            bool
 	ActivationExpired            bool
 	ActivationRolledBack         bool
 	ActivationUnavailable        bool
@@ -219,6 +223,7 @@ func (app *App) handleManagedDynamicSetup(w http.ResponseWriter, r *http.Request
 		ValueAdmissionStarted:        valueAdmissionStarted,
 		ValueAdmissionComplete:       valueAdmissionComplete,
 		ActivationActive:             activationStatus == managedDynamicActivationActive,
+		ActivationRemoved:            activationStatus == managedDynamicActivationRemoved,
 		ActivationExpired:            activationStatus == managedDynamicActivationExpired,
 		ActivationRolledBack:         activationStatus == managedDynamicActivationRolledBack,
 		ActivationUnavailable:        activationUnavailable,
@@ -316,7 +321,7 @@ func (app *App) inspectManagedDynamicSetupIntent(ctx context.Context, session Se
 		declaration.ConsumerKind != "managed_service" ||
 		declaration.DeliveryKind != "private_env_file" ||
 		declaration.NamePolicy != "portable_secret_env_v1" ||
-		!containsManagedSource(declaration.AllowedSources, intent.Source) ||
+		(intent.OperationKind != "remove" && !containsManagedSource(declaration.AllowedSources, intent.Source)) ||
 		!validManagedRef("delivery_", declaration.DeliveryProfileRef) ||
 		!validManagedRef("reload_", declaration.ReloadProfileRef) ||
 		!validManagedRef("health_", declaration.HealthProfileRef) ||
@@ -342,6 +347,9 @@ func managedDynamicTargetFromInspection(inspection managedDynamicSetupInspection
 		EnvironmentPolicyFingerprint: intent.EnvironmentPolicyFingerprint,
 		DeclarationFingerprint:       intent.DeclarationFingerprint,
 		EnvironmentName:              intent.EnvironmentName,
+		BindingRef:                   intent.BindingRef,
+		SecretRef:                    intent.SecretRef,
+		GenerationRef:                intent.GenerationRef,
 		HumanSessionRef:              intent.HumanSessionRef,
 		IssuerRef:                    intent.IssuerRef,
 		AudienceRef:                  intent.AudienceRef,
@@ -354,8 +362,7 @@ func managedDynamicTargetFromInspection(inspection managedDynamicSetupInspection
 
 func validManagedDynamicStepUpTarget(target managedDynamicStepUpTarget) bool {
 	return validManagedRef("intent_", target.IntentRef) &&
-		(target.OperationKind == "create" || target.OperationKind == "replace") &&
-		validManagedSource(target.Source) && target.Source != "remove" &&
+		matchesManagedDynamicOperationSource(target.OperationKind, target.Source) &&
 		validManagedRef("host_", target.HostRef) &&
 		validManagedRef("svc_", target.ServiceRef) &&
 		validManagedRef("envpol_", target.EnvironmentPolicyRef) &&
@@ -369,7 +376,10 @@ func validManagedDynamicStepUpTarget(target managedDynamicStepUpTarget) bool {
 		target.IntentIssuedAt > 0 &&
 		target.IntentExpiresAt > target.IntentIssuedAt &&
 		target.IntentExpiresAt-target.IntentIssuedAt <= managedIntentMaxTTLSeconds &&
-		target.ReturnTarget == "pharos_service"
+		target.ReturnTarget == "pharos_service" &&
+		((target.OperationKind == "remove" && validManagedRef("bind_", target.BindingRef) &&
+			validManagedRef("sec_", target.SecretRef) && validManagedRef("gen_", target.GenerationRef)) ||
+			(target.OperationKind != "remove" && target.BindingRef == "" && target.SecretRef == "" && target.GenerationRef == ""))
 }
 
 func (app *App) writeManagedDynamicStepUpFlow(w http.ResponseWriter, flow managedDynamicStepUpFlow) {

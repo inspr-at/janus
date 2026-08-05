@@ -15,9 +15,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine as _};
 use ed25519_dalek::SigningKey;
-use janus_core::{ManagedSecretRef, ManagedServiceDeclarationV2};
+use janus_core::{ManagedEnvironmentName, ManagedSecretRef, ManagedServiceDeclarationV2};
 use janus_host::{
-    seal_dynamic_host_envelope, DynamicHostEnvelopeBindingV1, DynamicHostEnvelopeSealRequest,
+    seal_dynamic_host_envelope, seal_dynamic_host_removal, DynamicHostEnvelopeBindingV1,
+    DynamicHostEnvelopeSealRequest, DynamicHostRemovalSealRequest,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -251,33 +252,37 @@ async fn prepare(
     now: SystemTime,
 ) -> std::result::Result<DeliveryResponse, &'static str> {
     validate_request(request)?;
-    let handoff = super::dynamic_custody::validate_delivery_handoff(
-        declarations,
-        receipt_dir,
-        store_dir,
-        super::dynamic_custody::CustodyHandoffRequest {
-            operation_ref: &request.operation_ref,
-            operation_kind: &request.operation_kind,
-            source: &request.source,
-            host_ref: &request.host_ref,
-            service_ref: &request.service_ref,
-            environment_policy_ref: &request.environment_policy_ref,
-            environment_policy_fingerprint: &request.environment_policy_fingerprint,
-            declaration_fingerprint: &request.declaration_fingerprint,
-            environment_name: &request.environment_name,
-            binding_ref: &request.binding_ref,
-            secret_ref: &request.secret_ref,
-            generation_ref: &request.generation_ref,
-        },
-    )?;
-    if handoff.binding_ref != request.binding_ref
-        || handoff.secret_ref != request.secret_ref
-        || handoff.generation_ref != request.generation_ref
-    {
-        return Err("dynamic_delivery_custody_invalid");
-    }
-    let policy = handoff
-        .declaration
+    let declaration = if request.operation_kind == "remove" {
+        resolve_removal_declaration(declarations, request)?.clone()
+    } else {
+        let handoff = super::dynamic_custody::validate_delivery_handoff(
+            declarations,
+            receipt_dir,
+            store_dir,
+            super::dynamic_custody::CustodyHandoffRequest {
+                operation_ref: &request.operation_ref,
+                operation_kind: &request.operation_kind,
+                source: &request.source,
+                host_ref: &request.host_ref,
+                service_ref: &request.service_ref,
+                environment_policy_ref: &request.environment_policy_ref,
+                environment_policy_fingerprint: &request.environment_policy_fingerprint,
+                declaration_fingerprint: &request.declaration_fingerprint,
+                environment_name: &request.environment_name,
+                binding_ref: &request.binding_ref,
+                secret_ref: &request.secret_ref,
+                generation_ref: &request.generation_ref,
+            },
+        )?;
+        if handoff.binding_ref != request.binding_ref
+            || handoff.secret_ref != request.secret_ref
+            || handoff.generation_ref != request.generation_ref
+        {
+            return Err("dynamic_delivery_custody_invalid");
+        }
+        handoff.declaration
+    };
+    let policy = declaration
         .dynamic_environment_policy()
         .ok_or("dynamic_delivery_declaration_denied")?;
     let profile = profiles
@@ -299,46 +304,56 @@ async fn prepare(
     let expires_at = prepared_at
         .checked_add(profile.envelope_ttl_seconds)
         .ok_or("dynamic_delivery_clock_invalid")?;
-    let secret_ref = ManagedSecretRef::new(request.secret_ref.clone())
-        .map_err(|_| "dynamic_delivery_request_invalid")?;
-    let value = janus_provider_age::open_dynamic_custody(
-        store_dir.to_path_buf(),
-        secret_ref,
-        identity_files.to_vec(),
-        MAX_CUSTODY_PLAINTEXT_BYTES,
-    )
-    .await
-    .map_err(|_| "dynamic_delivery_custody_unavailable")?;
     let signing_key = load_signing_key(profile)?;
-    let packet = seal_dynamic_host_envelope(DynamicHostEnvelopeSealRequest {
-        binding: DynamicHostEnvelopeBindingV1 {
-            schema: HOST_PAYLOAD_SCHEMA.to_string(),
-            schema_version: SCHEMA_VERSION,
-            envelope_ref: envelope_ref.clone(),
-            operation_ref: request.operation_ref.clone(),
-            operation_kind: request.operation_kind.clone(),
-            source: request.source.clone(),
-            host_ref: request.host_ref.clone(),
-            service_ref: request.service_ref.clone(),
-            binding_ref: request.binding_ref.clone(),
-            secret_ref: request.secret_ref.clone(),
-            generation_ref: request.generation_ref.clone(),
-            environment_policy_ref: request.environment_policy_ref.clone(),
-            environment_policy_fingerprint: request.environment_policy_fingerprint.clone(),
-            declaration_fingerprint: request.declaration_fingerprint.clone(),
-            environment_name: request.environment_name.clone(),
-            delivery_profile_ref: policy.delivery_profile_ref().as_str().to_string(),
-            reload_profile_ref: policy.reload_profile_ref().as_str().to_string(),
-            health_profile_ref: policy.health_profile_ref().as_str().to_string(),
-            revocation_epoch: profile.revocation_epoch,
-            issued_at_unix_secs: prepared_at,
-            expires_at_unix_secs: expires_at,
-        },
-        host_recipient: &profile.host_recipient,
-        signing_key_id: &profile.producer_key_id,
-        signing_key: &signing_key,
-        value,
-    })
+    let binding = DynamicHostEnvelopeBindingV1 {
+        schema: HOST_PAYLOAD_SCHEMA.to_string(),
+        schema_version: SCHEMA_VERSION,
+        envelope_ref: envelope_ref.clone(),
+        operation_ref: request.operation_ref.clone(),
+        operation_kind: request.operation_kind.clone(),
+        source: request.source.clone(),
+        host_ref: request.host_ref.clone(),
+        service_ref: request.service_ref.clone(),
+        binding_ref: request.binding_ref.clone(),
+        secret_ref: request.secret_ref.clone(),
+        generation_ref: request.generation_ref.clone(),
+        environment_policy_ref: request.environment_policy_ref.clone(),
+        environment_policy_fingerprint: request.environment_policy_fingerprint.clone(),
+        declaration_fingerprint: request.declaration_fingerprint.clone(),
+        environment_name: request.environment_name.clone(),
+        delivery_profile_ref: policy.delivery_profile_ref().as_str().to_string(),
+        reload_profile_ref: policy.reload_profile_ref().as_str().to_string(),
+        health_profile_ref: policy.health_profile_ref().as_str().to_string(),
+        revocation_epoch: profile.revocation_epoch,
+        issued_at_unix_secs: prepared_at,
+        expires_at_unix_secs: expires_at,
+    };
+    let packet = if request.operation_kind == "remove" {
+        seal_dynamic_host_removal(DynamicHostRemovalSealRequest {
+            binding,
+            host_recipient: &profile.host_recipient,
+            signing_key_id: &profile.producer_key_id,
+            signing_key: &signing_key,
+        })
+    } else {
+        let secret_ref = ManagedSecretRef::new(request.secret_ref.clone())
+            .map_err(|_| "dynamic_delivery_request_invalid")?;
+        let value = janus_provider_age::open_dynamic_custody(
+            store_dir.to_path_buf(),
+            secret_ref,
+            identity_files.to_vec(),
+            MAX_CUSTODY_PLAINTEXT_BYTES,
+        )
+        .await
+        .map_err(|_| "dynamic_delivery_custody_unavailable")?;
+        seal_dynamic_host_envelope(DynamicHostEnvelopeSealRequest {
+            binding,
+            host_recipient: &profile.host_recipient,
+            signing_key_id: &profile.producer_key_id,
+            signing_key: &signing_key,
+            value,
+        })
+    }
     .map_err(|_| "dynamic_delivery_seal_failed")?;
     let mut record = OutboxRecord {
         schema: OUTBOX_SCHEMA.to_string(),
@@ -490,8 +505,10 @@ fn validate_request(request: &DeliveryRequest) -> std::result::Result<(), &'stat
     if request.schema != REQUEST_SCHEMA
         || request.schema_version != SCHEMA_VERSION
         || !valid_ref("op_", &request.operation_ref)
-        || !matches!(request.operation_kind.as_str(), "create" | "replace")
-        || !matches!(request.source.as_str(), "generated" | "import")
+        || !matches!(
+            (request.operation_kind.as_str(), request.source.as_str()),
+            ("create" | "replace", "generated" | "import") | ("remove", "remove")
+        )
         || !valid_ref("host_", &request.host_ref)
         || !valid_ref("svc_", &request.service_ref)
         || !valid_ref("envpol_", &request.environment_policy_ref)
@@ -505,6 +522,33 @@ fn validate_request(request: &DeliveryRequest) -> std::result::Result<(), &'stat
         return Err("dynamic_delivery_request_invalid");
     }
     Ok(())
+}
+
+fn resolve_removal_declaration<'a>(
+    declarations: &'a [ManagedServiceDeclarationV2],
+    request: &DeliveryRequest,
+) -> std::result::Result<&'a ManagedServiceDeclarationV2, &'static str> {
+    let environment_name = ManagedEnvironmentName::new(request.environment_name.clone())
+        .map_err(|_| "dynamic_delivery_request_invalid")?;
+    let mut matching = declarations.iter().filter(|declaration| {
+        let Some(policy) = declaration.dynamic_environment_policy() else {
+            return false;
+        };
+        declaration.host_ref().as_str() == request.host_ref
+            && declaration.service_ref().as_str() == request.service_ref
+            && declaration.declaration_fingerprint().as_str() == request.declaration_fingerprint
+            && policy.environment_policy_ref().as_str() == request.environment_policy_ref
+            && policy.environment_policy_fingerprint().as_str()
+                == request.environment_policy_fingerprint
+            && policy.admits_name(&environment_name)
+    });
+    let declaration = matching
+        .next()
+        .ok_or("dynamic_delivery_declaration_denied")?;
+    if matching.next().is_some() {
+        return Err("dynamic_delivery_declaration_denied");
+    }
+    Ok(declaration)
 }
 
 fn load_bound_outbox(

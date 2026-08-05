@@ -3,8 +3,9 @@
 //! This process never opens custody. It returns one already signed and
 //! host-encrypted packet to the trusted Go edge and persists only an exact,
 //! value-free activation or recovered-rollback receipt. Reload, health, and
-//! rollback are performed by the exact pre-approved host profile; removal
-//! remains outside this boundary.
+//! rollback are performed by the exact pre-approved host profile. After one
+//! exact healthy removal receipt, this boundary may move only the matching Age
+//! ciphertext into operation-bound quarantine; it never opens custody.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
@@ -37,6 +38,8 @@ const SOCKET_ENV: &str = "JANUS_MANAGED_DYNAMIC_TRANSPORT_SOCKET";
 const PEER_UID_ENV: &str = "JANUS_MANAGED_DYNAMIC_TRANSPORT_ALLOWED_UID";
 const PROFILE_ENV: &str = "JANUS_MANAGED_DYNAMIC_TRANSPORT_PROFILE_FILE";
 const RECEIPT_DIR_ENV: &str = "JANUS_MANAGED_DYNAMIC_TRANSPORT_RECEIPT_DIR";
+const CUSTODY_DIR_ENV: &str = "JANUS_MANAGED_DYNAMIC_TRANSPORT_CUSTODY_DIR";
+const REMOVAL_RETENTION_SECS: u64 = 24 * 60 * 60;
 const MAX_REQUEST_BYTES: usize = 32 * 1024;
 const MAX_RESPONSE_BYTES: usize = 768 * 1024;
 const MAX_RECEIPT_BYTES: usize = 32 * 1024;
@@ -204,8 +207,10 @@ pub(crate) async fn run_from_env() -> Result<()> {
     let socket_path = required_absolute_path(SOCKET_ENV)?;
     let profile_path = required_absolute_path(PROFILE_ENV)?;
     let receipt_dir = required_absolute_path(RECEIPT_DIR_ENV)?;
+    let custody_dir = required_absolute_path(CUSTODY_DIR_ENV)?;
     let profiles = load_catalog(&profile_path)?;
     validate_receipt_separation(&receipt_dir, &profiles)?;
+    validate_custody_separation(&custody_dir, &receipt_dir, &profiles)?;
     super::ensure_private_dir(&receipt_dir).context("dynamic transport receipt root invalid")?;
     let allowed_uid = required_uid()?;
 
@@ -239,7 +244,14 @@ pub(crate) async fn run_from_env() -> Result<()> {
             .await;
             continue;
         }
-        handle_connection(stream, &profiles, &receipt_dir, SystemTime::now()).await;
+        handle_connection(
+            stream,
+            &profiles,
+            &receipt_dir,
+            &custody_dir,
+            SystemTime::now(),
+        )
+        .await;
     }
 }
 
@@ -247,6 +259,7 @@ async fn handle_connection(
     mut stream: UnixStream,
     profiles: &BTreeMap<ProfileKey, DeliveryProfile>,
     receipt_dir: &Path,
+    custody_dir: &Path,
     now: SystemTime,
 ) {
     let request = match timeout(REQUEST_WAIT, read_request(&mut stream)).await {
@@ -323,6 +336,18 @@ async fn handle_connection(
                 denied("acknowledge", "dynamic_transport_request_invalid")
             } else {
                 acknowledge(profiles, receipt_dir, &acknowledgement, now)
+                    .and_then(|response| {
+                        if acknowledgement.phase == "removed" {
+                            retire_removed_custody(
+                                profiles,
+                                receipt_dir,
+                                custody_dir,
+                                &acknowledgement.package_ref,
+                                now,
+                            )?;
+                        }
+                        Ok(response)
+                    })
                     .unwrap_or_else(|reason| denied("acknowledge", reason))
             }
         }
@@ -352,6 +377,18 @@ async fn handle_connection(
                     health_profile_ref: query.health_profile_ref,
                 };
                 status(profiles, receipt_dir, &query, now)
+                    .and_then(|response| {
+                        if response.phase == "removed" {
+                            retire_removed_custody(
+                                profiles,
+                                receipt_dir,
+                                custody_dir,
+                                &query.package_ref,
+                                now,
+                            )?;
+                        }
+                        Ok(response)
+                    })
                     .unwrap_or_else(|reason| denied("status", reason))
             }
         }
@@ -416,6 +453,10 @@ fn status(
     let (phase, reason_code) = if let Some(receipt) = load_receipt(receipt_dir, &record)? {
         match receipt.phase.as_str() {
             "active" => ("active", "dynamic_transport_environment_active"),
+            "removed" => ("removed", "dynamic_transport_environment_removed"),
+            "rolled_back" if record.operation_kind == "remove" => {
+                ("rolled_back", "dynamic_transport_removal_rolled_back")
+            }
             "rolled_back" => ("rolled_back", "dynamic_transport_replacement_rolled_back"),
             _ => return Err("dynamic_transport_receipt_invalid"),
         }
@@ -452,7 +493,10 @@ fn validate_activation_query(query: &ActivationQuery) -> std::result::Result<(),
         || !valid_ref("svc_", &query.service_ref)
         || !valid_ref("envpol_", &query.environment_policy_ref)
         || !valid_ref("op_", &query.operation_ref)
-        || !matches!(query.operation_kind.as_str(), "create" | "replace")
+        || !matches!(
+            query.operation_kind.as_str(),
+            "create" | "replace" | "remove"
+        )
         || !valid_ref("pkg_", &query.package_ref)
         || !valid_ref("env_", &query.envelope_ref)
         || !valid_ref("bind_", &query.binding_ref)
@@ -648,15 +692,68 @@ fn acknowledge(
         reload_profile_ref: Some(receipt.reload_profile_ref),
         health_profile_ref: Some(receipt.health_profile_ref),
         packet_base64: None,
-        phase: if acknowledgement.phase == "active" {
-            "active"
-        } else {
-            "rolled_back"
+        phase: match acknowledgement.phase.as_str() {
+            "active" => "active",
+            "removed" => "removed",
+            _ => "rolled_back",
         },
         reason_code: "dynamic_transport_receipt_recorded",
         packet_returned: false,
         value_returned: false,
     })
+}
+
+fn retire_removed_custody(
+    profiles: &BTreeMap<ProfileKey, DeliveryProfile>,
+    receipt_dir: &Path,
+    custody_dir: &Path,
+    package_ref: &str,
+    now: SystemTime,
+) -> std::result::Result<(), &'static str> {
+    let matches = profiles
+        .values()
+        .filter_map(|profile| {
+            let path = profile.outbox_dir.join(format!("{package_ref}.json"));
+            path.exists().then_some((profile, path))
+        })
+        .collect::<Vec<_>>();
+    if matches.len() != 1 {
+        return Err("dynamic_transport_custody_denied");
+    }
+    let (profile, path) = &matches[0];
+    let record = load_outbox(path, package_ref, profile)?;
+    let receipt = load_receipt(receipt_dir, &record)?
+        .filter(|receipt| receipt.phase == "removed" && record.operation_kind == "remove")
+        .ok_or("dynamic_transport_custody_denied")?;
+    let secret_ref = janus_core::ManagedSecretRef::new(record.secret_ref.clone())
+        .map_err(|_| "dynamic_transport_custody_denied")?;
+    let purge_not_before = receipt
+        .probe_observed_at_unix_secs
+        .checked_add(REMOVAL_RETENTION_SECS)
+        .ok_or("dynamic_transport_custody_denied")?;
+    let material = janus_provider_age::DynamicAgeQuarantineMaterial {
+        secret_ref: secret_ref.clone(),
+        operation_ref: record.operation_ref.clone(),
+        purge_not_before_unix_secs: purge_not_before,
+        value_returned: false,
+    };
+    let now_secs = unix_seconds(now)?;
+    if janus_provider_age::quarantine_dynamic_custody(
+        custody_dir,
+        secret_ref,
+        &record.operation_ref,
+        purge_not_before,
+    )
+    .is_err()
+        && now_secs < purge_not_before
+    {
+        return Err("dynamic_transport_custody_unavailable");
+    }
+    if now_secs >= purge_not_before {
+        janus_provider_age::purge_dynamic_custody_if_due(custody_dir, &material, now)
+            .map_err(|_| "dynamic_transport_custody_unavailable")?;
+    }
+    Ok(())
 }
 
 fn validate_acknowledgement(
@@ -674,13 +771,14 @@ fn validate_acknowledgement(
         || !valid_ref("health_", &acknowledgement.health_profile_ref)
         || !matches!(
             acknowledgement.operation_kind.as_str(),
-            "create" | "replace"
+            "create" | "replace" | "remove"
         )
         || !matches!(
             acknowledgement.materialization_reason_code.as_str(),
             "dynamic_host_environment_materialized"
                 | "dynamic_host_materialization_idempotent"
                 | "dynamic_host_replacement_materialized"
+                | "dynamic_host_removal_materialized"
         )
         || acknowledgement.materialized_at_unix_secs == 0
         || acknowledgement.reloaded_at_unix_secs < acknowledgement.materialized_at_unix_secs
@@ -691,14 +789,27 @@ fn validate_acknowledgement(
         || acknowledgement.value_returned
         || match acknowledgement.phase.as_str() {
             "active" => {
-                acknowledgement.reason_code != "dynamic_host_environment_active"
+                acknowledgement.operation_kind == "remove"
+                    || acknowledgement.reason_code != "dynamic_host_environment_active"
+                    || acknowledgement.failure_reason_code.is_some()
+                    || acknowledgement.restored_binding_ref.is_some()
+                    || acknowledgement.restored_generation_ref.is_some()
+            }
+            "removed" => {
+                acknowledgement.operation_kind != "remove"
+                    || acknowledgement.reason_code != "dynamic_host_environment_removed"
                     || acknowledgement.failure_reason_code.is_some()
                     || acknowledgement.restored_binding_ref.is_some()
                     || acknowledgement.restored_generation_ref.is_some()
             }
             "rolled_back" => {
-                acknowledgement.operation_kind != "replace"
-                    || acknowledgement.reason_code != "dynamic_host_replacement_rolled_back"
+                !matches!(
+                    acknowledgement.operation_kind.as_str(),
+                    "replace" | "remove"
+                ) || (acknowledgement.operation_kind == "replace"
+                    && acknowledgement.reason_code != "dynamic_host_replacement_rolled_back")
+                    || (acknowledgement.operation_kind == "remove"
+                        && acknowledgement.reason_code != "dynamic_host_removal_rolled_back")
                     || !matches!(
                         acknowledgement.failure_reason_code.as_deref(),
                         Some("dynamic_host_reload_failed" | "dynamic_host_health_failed")
@@ -711,10 +822,18 @@ fn validate_acknowledgement(
                         .restored_generation_ref
                         .as_deref()
                         .map_or(true, |value| !valid_ref("gen_", value))
-                    || acknowledgement.restored_binding_ref.as_deref()
-                        == Some(acknowledgement.binding_ref.as_str())
-                    || acknowledgement.restored_generation_ref.as_deref()
-                        == Some(acknowledgement.generation_ref.as_str())
+                    || (acknowledgement.operation_kind == "replace"
+                        && acknowledgement.restored_binding_ref.as_deref()
+                            == Some(acknowledgement.binding_ref.as_str()))
+                    || (acknowledgement.operation_kind == "replace"
+                        && acknowledgement.restored_generation_ref.as_deref()
+                            == Some(acknowledgement.generation_ref.as_str()))
+                    || (acknowledgement.operation_kind == "remove"
+                        && acknowledgement.restored_binding_ref.as_deref()
+                            != Some(acknowledgement.binding_ref.as_str()))
+                    || (acknowledgement.operation_kind == "remove"
+                        && acknowledgement.restored_generation_ref.as_deref()
+                            != Some(acknowledgement.generation_ref.as_str()))
             }
             _ => true,
         }
@@ -748,8 +867,10 @@ fn load_outbox(
         || !valid_ref("pkg_", &record.package_ref)
         || !valid_ref("env_", &record.envelope_ref)
         || !valid_ref("op_", &record.operation_ref)
-        || !matches!(record.operation_kind.as_str(), "create" | "replace")
-        || !matches!(record.source.as_str(), "generated" | "import")
+        || !matches!(
+            (record.operation_kind.as_str(), record.source.as_str()),
+            ("create" | "replace", "generated" | "import") | ("remove", "remove")
+        )
         || record.host_ref != profile.host_ref
         || record.service_ref != profile.service_ref
         || !valid_ref("bind_", &record.binding_ref)
@@ -853,19 +974,31 @@ fn valid_receipt_outcome(receipt: &ActivationReceipt, operation_kind: &str) -> b
             receipt.materialization_reason_code.as_str(),
             "dynamic_host_replacement_materialized" | "dynamic_host_materialization_idempotent"
         ),
+        "remove" => receipt.materialization_reason_code == "dynamic_host_removal_materialized",
         _ => false,
     };
     materialization_valid
         && match receipt.phase.as_str() {
             "active" => {
-                receipt.reason_code == "dynamic_host_environment_active"
+                operation_kind != "remove"
+                    && receipt.reason_code == "dynamic_host_environment_active"
+                    && receipt.failure_reason_code.is_none()
+                    && receipt.restored_binding_ref.is_none()
+                    && receipt.restored_generation_ref.is_none()
+            }
+            "removed" => {
+                operation_kind == "remove"
+                    && receipt.reason_code == "dynamic_host_environment_removed"
                     && receipt.failure_reason_code.is_none()
                     && receipt.restored_binding_ref.is_none()
                     && receipt.restored_generation_ref.is_none()
             }
             "rolled_back" => {
-                operation_kind == "replace"
-                    && receipt.reason_code == "dynamic_host_replacement_rolled_back"
+                matches!(operation_kind, "replace" | "remove")
+                    && ((operation_kind == "replace"
+                        && receipt.reason_code == "dynamic_host_replacement_rolled_back")
+                        || (operation_kind == "remove"
+                            && receipt.reason_code == "dynamic_host_removal_rolled_back"))
                     && matches!(
                         receipt.failure_reason_code.as_deref(),
                         Some("dynamic_host_reload_failed" | "dynamic_host_health_failed")
@@ -874,14 +1007,22 @@ fn valid_receipt_outcome(receipt: &ActivationReceipt, operation_kind: &str) -> b
                         .restored_binding_ref
                         .as_deref()
                         .is_some_and(|value| {
-                            valid_ref("bind_", value) && value != receipt.binding_ref
+                            valid_ref("bind_", value)
+                                && (operation_kind == "remove" || value != receipt.binding_ref)
                         })
                     && receipt
                         .restored_generation_ref
                         .as_deref()
                         .is_some_and(|value| {
-                            valid_ref("gen_", value) && value != receipt.generation_ref
+                            valid_ref("gen_", value)
+                                && (operation_kind == "remove" || value != receipt.generation_ref)
                         })
+                    && (operation_kind != "remove"
+                        || receipt.restored_binding_ref.as_deref()
+                            == Some(receipt.binding_ref.as_str()))
+                    && (operation_kind != "remove"
+                        || receipt.restored_generation_ref.as_deref()
+                            == Some(receipt.generation_ref.as_str()))
             }
             _ => false,
         }
@@ -966,6 +1107,26 @@ fn validate_receipt_separation(
             || profile.producer_signing_key_file.starts_with(receipt_dir)
     }) {
         anyhow::bail!("dynamic transport receipt root must be separate");
+    }
+    Ok(())
+}
+
+fn validate_custody_separation(
+    custody_dir: &Path,
+    receipt_dir: &Path,
+    profiles: &BTreeMap<ProfileKey, DeliveryProfile>,
+) -> Result<()> {
+    if custody_dir == receipt_dir
+        || custody_dir.starts_with(receipt_dir)
+        || receipt_dir.starts_with(custody_dir)
+        || profiles.values().any(|profile| {
+            custody_dir.starts_with(&profile.outbox_dir)
+                || profile.outbox_dir.starts_with(custody_dir)
+                || custody_dir.starts_with(&profile.producer_signing_key_file)
+                || profile.producer_signing_key_file.starts_with(custody_dir)
+        })
+    {
+        anyhow::bail!("dynamic transport custody root must be separate");
     }
     Ok(())
 }
@@ -1187,6 +1348,18 @@ mod tests {
         }
     }
 
+    fn removal_fixture() -> Fixture {
+        let mut fixture = fixture();
+        fixture.record.operation_kind = "remove".to_string();
+        fixture.record.source = "remove".to_string();
+        fixture.record.integrity_hash = outbox_hash(&fixture.record).unwrap();
+        let outbox_dir = &fixture.profiles.values().next().unwrap().outbox_dir;
+        let path = outbox_dir.join(format!("{}.json", fixture.record.package_ref));
+        fs::write(&path, serde_json::to_vec(&fixture.record).unwrap()).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        fixture
+    }
+
     fn activation_acknowledgement(record: &OutboxRecord) -> Acknowledgement {
         Acknowledgement {
             host_ref: record.host_ref.clone(),
@@ -1325,6 +1498,102 @@ mod tests {
             .windows(b"signed-host-ciphertext".len())
             .any(|window| window == b"signed-host-ciphertext"));
         drop(fixture.temporary);
+    }
+
+    #[test]
+    fn exact_removed_receipt_quarantines_then_due_purges_custody() {
+        let fixture = removal_fixture();
+        let now = UNIX_EPOCH + Duration::from_secs(1_800_000_010);
+        let mut acknowledgement = activation_acknowledgement(&fixture.record);
+        acknowledgement.phase = "removed".to_string();
+        acknowledgement.reason_code = "dynamic_host_environment_removed".to_string();
+        acknowledgement.materialization_reason_code =
+            "dynamic_host_removal_materialized".to_string();
+        acknowledge(
+            &fixture.profiles,
+            &fixture.receipt_dir,
+            &acknowledgement,
+            now,
+        )
+        .unwrap();
+        let custody_dir = fixture.temporary.path().join("custody");
+        private_dir(&custody_dir);
+        let active = custody_dir.join(format!("{}.age", fixture.record.secret_ref));
+        fs::write(&active, b"encrypted-custody-canary").unwrap();
+        fs::set_permissions(&active, fs::Permissions::from_mode(0o600)).unwrap();
+
+        retire_removed_custody(
+            &fixture.profiles,
+            &fixture.receipt_dir,
+            &custody_dir,
+            &fixture.record.package_ref,
+            now,
+        )
+        .unwrap();
+        let quarantined = custody_dir.join(format!(
+            "{}.age.quarantine.{}",
+            fixture.record.secret_ref, fixture.record.operation_ref
+        ));
+        assert!(!active.exists() && quarantined.is_file());
+        let due = UNIX_EPOCH
+            + Duration::from_secs(
+                acknowledgement.probe_observed_at_unix_secs + REMOVAL_RETENTION_SECS,
+            );
+        retire_removed_custody(
+            &fixture.profiles,
+            &fixture.receipt_dir,
+            &custody_dir,
+            &fixture.record.package_ref,
+            due,
+        )
+        .unwrap();
+        assert!(!quarantined.exists());
+        retire_removed_custody(
+            &fixture.profiles,
+            &fixture.receipt_dir,
+            &custody_dir,
+            &fixture.record.package_ref,
+            due,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn rolled_back_removal_cannot_retire_custody() {
+        let fixture = removal_fixture();
+        let now = UNIX_EPOCH + Duration::from_secs(1_800_000_010);
+        let mut acknowledgement = activation_acknowledgement(&fixture.record);
+        acknowledgement.phase = "rolled_back".to_string();
+        acknowledgement.reason_code = "dynamic_host_removal_rolled_back".to_string();
+        acknowledgement.materialization_reason_code =
+            "dynamic_host_removal_materialized".to_string();
+        acknowledgement.failure_reason_code = Some("dynamic_host_health_failed".to_string());
+        acknowledgement.restored_binding_ref = Some(fixture.record.binding_ref.clone());
+        acknowledgement.restored_generation_ref = Some(fixture.record.generation_ref.clone());
+        acknowledge(
+            &fixture.profiles,
+            &fixture.receipt_dir,
+            &acknowledgement,
+            now,
+        )
+        .unwrap();
+        let custody_dir = fixture.temporary.path().join("custody");
+        private_dir(&custody_dir);
+        let active = custody_dir.join(format!("{}.age", fixture.record.secret_ref));
+        fs::write(&active, b"encrypted-custody-canary").unwrap();
+        fs::set_permissions(&active, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            retire_removed_custody(
+                &fixture.profiles,
+                &fixture.receipt_dir,
+                &custody_dir,
+                &fixture.record.package_ref,
+                now,
+            )
+            .unwrap_err(),
+            "dynamic_transport_custody_denied"
+        );
+        assert!(active.is_file());
     }
 
     #[test]

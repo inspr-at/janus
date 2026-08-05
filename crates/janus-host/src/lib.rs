@@ -10,8 +10,8 @@ pub mod agent;
 mod dynamic;
 
 pub use dynamic::{
-    DynamicHostExecutorOutcome, DynamicHostReplacementControlV1, HostDynamicEnvironmentPolicyV1,
-    HostExecutorConfigV2,
+    DynamicHostExecutorOutcome, DynamicHostRemovalControlV1, DynamicHostReplacementControlV1,
+    HostDynamicEnvironmentPolicyV1, HostExecutorConfigV2,
 };
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -164,6 +164,14 @@ pub struct DynamicHostEnvelopeSealRequest<'a> {
     pub signing_key_id: &'a str,
     pub signing_key: &'a SigningKey,
     pub value: SecretValue,
+}
+
+/// Input to the value-free dynamic host-removal seal boundary.
+pub struct DynamicHostRemovalSealRequest<'a> {
+    pub binding: DynamicHostEnvelopeBindingV1,
+    pub host_recipient: &'a str,
+    pub signing_key_id: &'a str,
+    pub signing_key: &'a SigningKey,
 }
 
 /// A separately signed dynamic host packet.
@@ -399,6 +407,59 @@ pub fn seal_dynamic_host_envelope(
     plaintext.extend_from_slice(&(metadata.len() as u32).to_be_bytes());
     plaintext.extend_from_slice(&metadata);
     plaintext.extend_from_slice(value);
+    let ciphertext = encrypt_for_recipient(request.host_recipient, &plaintext);
+    plaintext.zeroize();
+    let ciphertext = ciphertext?;
+    if ciphertext.len() > MAX_CIPHERTEXT_BYTES {
+        return Err(HostEnvelopeError::new(
+            "dynamic_host_envelope_ciphertext_oversized",
+        ));
+    }
+    let signature = request.signing_key.sign(&dynamic_signature_message(
+        request.signing_key_id,
+        &ciphertext,
+    ));
+    let packet = SignedDynamicHostEnvelopeV1 {
+        schema: DYNAMIC_ENVELOPE_SCHEMA.to_string(),
+        schema_version: SCHEMA_VERSION,
+        key_id: request.signing_key_id.to_string(),
+        ciphertext: STANDARD_NO_PAD.encode(ciphertext),
+        signature: STANDARD_NO_PAD.encode(signature.to_bytes()),
+    };
+    let encoded = serde_json::to_vec(&packet)
+        .map_err(|_| HostEnvelopeError::new("dynamic_host_envelope_packet_invalid"))?;
+    if encoded.len() > MAX_PACKET_BYTES {
+        return Err(HostEnvelopeError::new(
+            "dynamic_host_envelope_packet_oversized",
+        ));
+    }
+    Ok(encoded)
+}
+
+/// Seal one exact dynamic removal control for one enrolled host. The encrypted
+/// plaintext contains only the signed binding metadata and no secret value.
+pub fn seal_dynamic_host_removal(
+    request: DynamicHostRemovalSealRequest<'_>,
+) -> HostResult<Vec<u8>> {
+    validate_dynamic_binding(&request.binding)?;
+    if request.binding.operation_kind != "remove"
+        || request.binding.source != "remove"
+        || !valid_ref("key_", request.signing_key_id)
+    {
+        return Err(HostEnvelopeError::new(
+            "dynamic_host_envelope_binding_invalid",
+        ));
+    }
+    let metadata = serde_json::to_vec(&request.binding)
+        .map_err(|_| HostEnvelopeError::new("dynamic_host_envelope_metadata_invalid"))?;
+    if metadata.len() > MAX_PAYLOAD_METADATA_BYTES {
+        return Err(HostEnvelopeError::new(
+            "dynamic_host_envelope_metadata_oversized",
+        ));
+    }
+    let mut plaintext = Vec::with_capacity(4 + metadata.len());
+    plaintext.extend_from_slice(&(metadata.len() as u32).to_be_bytes());
+    plaintext.extend_from_slice(&metadata);
     let ciphertext = encrypt_for_recipient(request.host_recipient, &plaintext);
     plaintext.zeroize();
     let ciphertext = ciphertext?;
@@ -1580,8 +1641,10 @@ fn validate_dynamic_binding(binding: &DynamicHostEnvelopeBindingV1) -> HostResul
         || binding.schema_version != SCHEMA_VERSION
         || !valid_ref("env_", &binding.envelope_ref)
         || !valid_ref("op_", &binding.operation_ref)
-        || !matches!(binding.operation_kind.as_str(), "create" | "replace")
-        || !matches!(binding.source.as_str(), "generated" | "import")
+        || !matches!(
+            (binding.operation_kind.as_str(), binding.source.as_str()),
+            ("create" | "replace", "generated" | "import") | ("remove", "remove")
+        )
         || !valid_ref("host_", &binding.host_ref)
         || !valid_ref("svc_", &binding.service_ref)
         || !valid_ref("bind_", &binding.binding_ref)

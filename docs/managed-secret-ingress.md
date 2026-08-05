@@ -34,6 +34,13 @@ signed packet while retaining the previous one, commits only after the fixed
 reload plus fresh health succeeds, and otherwise restores the complete prior
 aggregate, reloads the same service, verifies recovered health, and records a
 strict value-free rolled-back receipt.
+JANUS-404 adds exact removal of one currently active binding. The signed intent
+binds its existing binding, secret, and generation references and carries no
+value. The host stages the complete aggregate without that name, reloads the
+fixed service, restores the exact prior aggregate on failed fresh health, and
+commits deletion of only the matching cached packet after success. Only the
+exact healthy `removed` receipt moves the central Age ciphertext into an
+operation-bound 24-hour quarantine; due purge and retries are idempotent.
 The existing v1 declared-slot flow described below remains unchanged and is
 still the only production value-bearing path.
 
@@ -50,7 +57,9 @@ requires exact equality for:
 
 - host, service, declaration fingerprint, environment-policy reference, and
   environment-policy fingerprint;
-- operation kind (`create` or `replace`) and one policy-allowed source;
+- operation kind (`create` or `replace`) and one policy-allowed source, or
+  `remove` with source `remove` plus the exact active binding, secret, and
+  generation references;
 - the environment name, byte-for-byte, under `portable_secret_env_v1`, including
   global execution-critical and service-specific reserved-name denial; and
 - the policy-owned delivery, reload, health, capacity, and source constraints.
@@ -69,7 +78,7 @@ The v2 browser slice exposes only:
   authorization-code + PKCE flow for that exact target; and
 - `POST /managed-environment/setup/admit` to place exactly one proof-bound
   import or internal generation into Janus-only encrypted custody after the
-  durable reservation.
+  durable reservation, or to prepare a value-free exact removal.
 
 The dynamic flow, retry breadcrumb, and proof use distinct v2 signature
 domains and cookie names. Each carries the complete value-free signed intent
@@ -235,10 +244,10 @@ The transport daemon is a third no-argv process. It never decrypts a packet,
 contacts a host, reloads a service, or inspects health. Its version 4 private
 wire contract exposes only exact host claim, exact activation-or-rollback
 receipt, and exact value-free status operations to the Go envelope. New
-receipts use version 3 and bind the operation kind plus either active or
+receipts use version 3 and bind the operation kind plus active, removed, or
 recovered-rollback outcome; existing version 2 create receipts remain readable.
 Every status lookup revalidates the private outbox record and all outbox-bound
-references before returning only `pending`, `expired`, `active`, or
+references before returning only `pending`, `expired`, `active`, `removed`, or
 `rolled_back`:
 
 | Environment variable | Contract |
@@ -247,6 +256,7 @@ references before returning only `pending`, `expired`, `active`, or
 | `JANUS_MANAGED_DYNAMIC_TRANSPORT_ALLOWED_UID` | Exact kernel-reported UID permitted to connect. |
 | `JANUS_MANAGED_DYNAMIC_TRANSPORT_PROFILE_FILE` | Existing strict delivery catalog used to locate and revalidate the exact host outbox. |
 | `JANUS_MANAGED_DYNAMIC_TRANSPORT_RECEIPT_DIR` | Separate private root for integrity-bound, create-new, value-free active or recovered-rollback receipts. |
+| `JANUS_MANAGED_DYNAMIC_TRANSPORT_CUSTODY_DIR` | Absolute private dynamic Age-custody root. Transport may only rename or due-purge the exact ciphertext after a matching healthy removal receipt; it never decrypts it. |
 
 When the dynamic capability is enabled, the Go envelope also requires
 `JANUS_MANAGED_DYNAMIC_HOST_TOKEN_GENERATION_DIR`, the existing private
@@ -264,6 +274,9 @@ after fresh health; reload or health failure restores the complete previous
 aggregate, reloads the same fixed target, requires fresh recovered health, and
 reports `rolled_back`. An unconfirmed staged replacement is rolled back during
 host restore, while an expired ambiguous rollback window blocks restore.
+Removal uses the same health gate: failure restores the exact removed binding
+and reports `rolled_back`; success commits `removed`, destroys only that host
+cache packet, and starts the fixed 24-hour central ciphertext quarantine.
 
 ## Route and trust boundary
 

@@ -88,9 +88,15 @@ func (fake *fakeManagedDynamicIntentAuthority) CompleteValueAdmission(ctx contex
 		return managedDynamicSetupReservation{}, managedIntentError("managed_intent_value_admission_unavailable")
 	}
 	fake.reservation.ValueAdmissionComplete = true
-	fake.reservation.BindingRef = custody.BindingRef
-	fake.reservation.SecretRef = custody.SecretRef
-	fake.reservation.GenerationRef = custody.GenerationRef
+	if expected.OperationKind == "remove" {
+		fake.reservation.BindingRef = expected.BindingRef
+		fake.reservation.SecretRef = expected.SecretRef
+		fake.reservation.GenerationRef = expected.GenerationRef
+	} else {
+		fake.reservation.BindingRef = custody.BindingRef
+		fake.reservation.SecretRef = custody.SecretRef
+		fake.reservation.GenerationRef = custody.GenerationRef
+	}
 	fake.reservation.PackageRef = delivery.PackageRef
 	fake.reservation.EnvelopeRef = delivery.EnvelopeRef
 	return *fake.reservation, nil

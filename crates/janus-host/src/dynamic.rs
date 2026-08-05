@@ -1,8 +1,8 @@
 //! Dynamic service-environment acceptance and aggregate materialization.
 //!
-//! This module accepts create and staged replacement packets. It retains the
-//! previous signed replacement packet until the caller either commits after a
-//! fresh healthy reload or rolls back to the proven previous aggregate.
+//! This module accepts create, staged replacement, and staged removal packets.
+//! It retains the previous signed packet until the caller either commits after
+//! a fresh healthy reload or rolls back to the proven previous aggregate.
 
 use super::*;
 
@@ -105,6 +105,12 @@ struct HostDynamicServiceStateV1 {
     pending_replacement: Option<PendingDynamicReplacementV1>,
     #[serde(default)]
     staged_replacement: Option<StagedDynamicReplacementV1>,
+    #[serde(default)]
+    pending_removal: Option<PendingDynamicRemovalV1>,
+    #[serde(default)]
+    staged_removal: Option<StagedDynamicRemovalV1>,
+    #[serde(default)]
+    completed_removal: Option<CompletedDynamicRemovalV1>,
     integrity_hash: String,
 }
 
@@ -125,11 +131,49 @@ struct StagedDynamicReplacementV1 {
     rollback_expires_at_unix_secs: u64,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct PendingDynamicRemovalV1 {
+    previous: CachedDynamicBindingV1,
+    operation_ref: String,
+    envelope_ref: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct StagedDynamicRemovalV1 {
+    previous: CachedDynamicBindingV1,
+    operation_ref: String,
+    envelope_ref: String,
+    phase: String,
+    staged_at_unix_secs: u64,
+    rollback_expires_at_unix_secs: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct CompletedDynamicRemovalV1 {
+    previous: CachedDynamicBindingV1,
+    operation_ref: String,
+    envelope_ref: String,
+    phase: String,
+}
+
 /// Exact value-free authority for committing or rolling back one staged
 /// replacement. The packet itself remains the authority for every binding.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct DynamicHostReplacementControlV1 {
+    pub operation_ref: String,
+    pub binding_ref: String,
+    pub generation_ref: String,
+}
+
+/// Exact value-free authority for committing or rolling back one staged
+/// removal. The targeted cached packet remains the binding authority.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DynamicHostRemovalControlV1 {
     pub operation_ref: String,
     pub binding_ref: String,
     pub generation_ref: String,
@@ -241,7 +285,13 @@ impl HostExecutor {
         }
         let opened = self.open_dynamic_packet_with_expiry(packet, now, false)?;
         let policy = self.resolve_dynamic_policy(&opened.binding)?;
-        validate_dynamic_value(opened.value.expose_bytes())?;
+        if opened.binding.operation_kind == "remove" {
+            if !opened.value.expose_bytes().is_empty() {
+                return Err(HostEnvelopeError::new("dynamic_host_value_invalid"));
+            }
+        } else {
+            validate_dynamic_value(opened.value.expose_bytes())?;
+        }
 
         self.ensure_dynamic_service_dirs(policy)?;
         let service_dir = self.dynamic_service_cache_dir(policy);
@@ -256,6 +306,9 @@ impl HostExecutor {
         state = self.reconcile_dynamic_pending(policy, state, now, false)?;
         validate_dynamic_inventory(&service_dir, &state, self.paths.executor_uid)?;
 
+        if opened.binding.operation_kind == "remove" {
+            return self.stage_dynamic_removal(policy, state, opened, now);
+        }
         let cached = cached_dynamic_binding(&opened.binding, &opened.packet_sha256);
         if let Some(existing) = state
             .bindings
@@ -277,7 +330,7 @@ impl HostExecutor {
                 "dynamic_host_materialization_idempotent",
             ));
         }
-        if state.staged_replacement.is_some() {
+        if state.staged_replacement.is_some() || state.staged_removal.is_some() {
             return Err(HostEnvelopeError::new(
                 "dynamic_host_replacement_in_progress",
             ));
@@ -348,6 +401,82 @@ impl HostExecutor {
             completed.bindings.len(),
             "materialized",
             "dynamic_host_environment_materialized",
+        ))
+    }
+
+    fn stage_dynamic_removal(
+        &self,
+        policy: &HostDynamicEnvironmentPolicyV1,
+        mut state: HostDynamicServiceStateV1,
+        opened: DecryptedDynamicHostEnvelope,
+        now: SystemTime,
+    ) -> HostResult<DynamicHostExecutorOutcome> {
+        if state.staged_replacement.is_some() || state.staged_removal.is_some() {
+            return Err(HostEnvelopeError::new("dynamic_host_mutation_in_progress"));
+        }
+        let previous_index = state
+            .bindings
+            .iter()
+            .position(|entry| {
+                entry.environment_name == opened.binding.environment_name
+                    && entry.binding_ref == opened.binding.binding_ref
+                    && entry.secret_ref == opened.binding.secret_ref
+                    && entry.generation_ref == opened.binding.generation_ref
+            })
+            .ok_or_else(|| HostEnvelopeError::new("dynamic_host_binding_missing"))?;
+        let previous = state.bindings[previous_index].clone();
+        if previous.operation_ref == opened.binding.operation_ref
+            || state
+                .bindings
+                .iter()
+                .any(|entry| entry.envelope_ref == opened.binding.envelope_ref)
+        {
+            return Err(HostEnvelopeError::new("dynamic_host_binding_collision"));
+        }
+        let mut previous_aggregate = self.build_dynamic_aggregate(policy, &state.bindings, now)?;
+        previous_aggregate.zeroize();
+
+        let service_dir = self.dynamic_service_cache_dir(policy);
+        state.pending_removal = Some(PendingDynamicRemovalV1 {
+            previous: previous.clone(),
+            operation_ref: opened.binding.operation_ref.clone(),
+            envelope_ref: opened.binding.envelope_ref.clone(),
+        });
+        write_dynamic_state(
+            &service_dir.join("state.json"),
+            state.clone(),
+            self.paths.executor_uid,
+        )?;
+        let staged_at = unix_seconds(now)?;
+        let rollback_expires_at = staged_at
+            .checked_add(DYNAMIC_REPLACEMENT_ROLLBACK_WINDOW_SECS)
+            .ok_or_else(|| HostEnvelopeError::new("dynamic_host_clock_invalid"))?;
+        state.bindings.remove(previous_index);
+        state.pending_removal = None;
+        state.staged_removal = Some(StagedDynamicRemovalV1 {
+            previous: previous.clone(),
+            operation_ref: opened.binding.operation_ref.clone(),
+            envelope_ref: opened.binding.envelope_ref.clone(),
+            phase: "staged".to_string(),
+            staged_at_unix_secs: staged_at,
+            rollback_expires_at_unix_secs: rollback_expires_at,
+        });
+        self.materialize_dynamic_state(policy, &state.bindings, now)?;
+        write_dynamic_state(
+            &service_dir.join("state.json"),
+            state.clone(),
+            self.paths.executor_uid,
+        )?;
+        sync_dir(&service_dir, "dynamic_host_cache_sync_failed")?;
+        Ok(dynamic_removal_outcome(
+            "install-dynamic",
+            &self.config.host_ref,
+            policy,
+            &previous,
+            &opened.binding.operation_ref,
+            state.bindings.len(),
+            "materialized",
+            "dynamic_host_removal_materialized",
         ))
     }
 
@@ -644,6 +773,131 @@ impl HostExecutor {
         ))
     }
 
+    /// Commit an exact staged removal after the reduced aggregate has passed
+    /// the fixed reload and fresh health observation.
+    pub fn commit_dynamic_removal(
+        &self,
+        control: &DynamicHostRemovalControlV1,
+        now: SystemTime,
+    ) -> HostResult<DynamicHostExecutorOutcome> {
+        validate_dynamic_removal_control(control)?;
+        let policy = self.policy_for_dynamic_removal_control(control)?;
+        self.ensure_dynamic_service_dirs(policy)?;
+        let service_dir = self.dynamic_service_cache_dir(policy);
+        let _lock = lock_slot(&service_dir, self.paths.executor_uid)?;
+        let mut state = load_dynamic_state(
+            &service_dir.join("state.json"),
+            &self.config.host_ref,
+            policy,
+            self.paths.executor_uid,
+        )?;
+        validate_dynamic_inventory(&service_dir, &state, self.paths.executor_uid)?;
+        state = self.reconcile_dynamic_pending(policy, state, now, false)?;
+        if let Some(completed) = state.completed_removal.as_ref() {
+            if completed.phase == "committed" && completed_removal_matches(completed, control) {
+                return Ok(dynamic_removal_outcome(
+                    "commit-dynamic-removal",
+                    &self.config.host_ref,
+                    policy,
+                    &completed.previous,
+                    &completed.operation_ref,
+                    state.bindings.len(),
+                    "removed",
+                    "dynamic_host_removal_commit_idempotent",
+                ));
+            }
+        }
+        let staged = state
+            .staged_removal
+            .clone()
+            .ok_or_else(|| HostEnvelopeError::new("dynamic_host_removal_missing"))?;
+        validate_staged_removal_control(&staged, control)?;
+        if unix_seconds(now)? > staged.rollback_expires_at_unix_secs {
+            return Err(HostEnvelopeError::new("dynamic_host_rollback_expired"));
+        }
+        state.staged_removal.as_mut().expect("staged removal").phase = "commit_pending".to_string();
+        write_dynamic_state(
+            &service_dir.join("state.json"),
+            state.clone(),
+            self.paths.executor_uid,
+        )?;
+        state = self.reconcile_dynamic_pending(policy, state, now, false)?;
+        sync_dir(&service_dir, "dynamic_host_cache_sync_failed")?;
+        Ok(dynamic_removal_outcome(
+            "commit-dynamic-removal",
+            &self.config.host_ref,
+            policy,
+            &staged.previous,
+            &staged.operation_ref,
+            state.bindings.len(),
+            "removed",
+            "dynamic_host_removal_committed",
+        ))
+    }
+
+    /// Restore an exact staged removal before the caller reloads the fixed
+    /// service and verifies fresh recovered health.
+    pub fn rollback_dynamic_removal(
+        &self,
+        control: &DynamicHostRemovalControlV1,
+        now: SystemTime,
+    ) -> HostResult<DynamicHostExecutorOutcome> {
+        validate_dynamic_removal_control(control)?;
+        let policy = self.policy_for_dynamic_removal_control(control)?;
+        self.ensure_dynamic_service_dirs(policy)?;
+        let service_dir = self.dynamic_service_cache_dir(policy);
+        let _lock = lock_slot(&service_dir, self.paths.executor_uid)?;
+        let mut state = load_dynamic_state(
+            &service_dir.join("state.json"),
+            &self.config.host_ref,
+            policy,
+            self.paths.executor_uid,
+        )?;
+        validate_dynamic_inventory(&service_dir, &state, self.paths.executor_uid)?;
+        state = self.reconcile_dynamic_pending(policy, state, now, false)?;
+        if let Some(completed) = state.completed_removal.as_ref() {
+            if completed.phase == "rolled_back" && completed_removal_matches(completed, control) {
+                return Ok(dynamic_removal_outcome(
+                    "rollback-dynamic-removal",
+                    &self.config.host_ref,
+                    policy,
+                    &completed.previous,
+                    &completed.operation_ref,
+                    state.bindings.len(),
+                    "rolled_back",
+                    "dynamic_host_removal_rollback_idempotent",
+                ));
+            }
+        }
+        let staged = state
+            .staged_removal
+            .clone()
+            .ok_or_else(|| HostEnvelopeError::new("dynamic_host_removal_missing"))?;
+        validate_staged_removal_control(&staged, control)?;
+        if unix_seconds(now)? > staged.rollback_expires_at_unix_secs {
+            return Err(HostEnvelopeError::new("dynamic_host_rollback_expired"));
+        }
+        state.staged_removal.as_mut().expect("staged removal").phase =
+            "rollback_pending".to_string();
+        write_dynamic_state(
+            &service_dir.join("state.json"),
+            state.clone(),
+            self.paths.executor_uid,
+        )?;
+        state = self.reconcile_dynamic_pending(policy, state, now, false)?;
+        sync_dir(&service_dir, "dynamic_host_cache_sync_failed")?;
+        Ok(dynamic_removal_outcome(
+            "rollback-dynamic-removal",
+            &self.config.host_ref,
+            policy,
+            &staged.previous,
+            &staged.operation_ref,
+            state.bindings.len(),
+            "rolled_back",
+            "dynamic_host_removal_rolled_back",
+        ))
+    }
+
     fn policy_for_dynamic_control(
         &self,
         control: &DynamicHostReplacementControlV1,
@@ -670,6 +924,38 @@ impl HostExecutor {
             .ok_or_else(|| HostEnvelopeError::new("dynamic_host_replacement_missing"))?;
         if matching.next().is_some() {
             return Err(HostEnvelopeError::new("dynamic_host_replacement_ambiguous"));
+        }
+        Ok(policy)
+    }
+
+    fn policy_for_dynamic_removal_control(
+        &self,
+        control: &DynamicHostRemovalControlV1,
+    ) -> HostResult<&HostDynamicEnvironmentPolicyV1> {
+        let mut matching = self.dynamic_policies.iter().filter(|policy| {
+            let service_dir = self.dynamic_service_cache_dir(policy);
+            load_dynamic_state(
+                &service_dir.join("state.json"),
+                &self.config.host_ref,
+                policy,
+                self.paths.executor_uid,
+            )
+            .is_ok_and(|state| {
+                state.staged_removal.as_ref().is_some_and(|staged| {
+                    staged.operation_ref == control.operation_ref
+                        && staged.previous.binding_ref == control.binding_ref
+                        && staged.previous.generation_ref == control.generation_ref
+                }) || state
+                    .completed_removal
+                    .as_ref()
+                    .is_some_and(|completed| completed_removal_matches(completed, control))
+            })
+        });
+        let policy = matching
+            .next()
+            .ok_or_else(|| HostEnvelopeError::new("dynamic_host_removal_missing"))?;
+        if matching.next().is_some() {
+            return Err(HostEnvelopeError::new("dynamic_host_removal_ambiguous"));
         }
         Ok(policy)
     }
@@ -759,6 +1045,16 @@ impl HostExecutor {
             )?;
         }
 
+        if state.pending_removal.is_some() {
+            state.pending_removal = None;
+            self.materialize_dynamic_state(policy, &state.bindings, now)?;
+            write_dynamic_state(
+                &service_dir.join("state.json"),
+                state.clone(),
+                self.paths.executor_uid,
+            )?;
+        }
+
         if recover_staged_replacement
             && state
                 .staged_replacement
@@ -825,6 +1121,86 @@ impl HostExecutor {
                         .bindings
                         .sort_by(|left, right| left.environment_name.cmp(&right.environment_name));
                     state.staged_replacement = None;
+                    self.materialize_dynamic_state(policy, &state.bindings, now)?;
+                    write_dynamic_state(
+                        &service_dir.join("state.json"),
+                        state.clone(),
+                        self.paths.executor_uid,
+                    )?;
+                }
+                _ => return Err(HostEnvelopeError::new("dynamic_host_cache_state_invalid")),
+            }
+        }
+
+        if recover_staged_replacement
+            && state
+                .staged_removal
+                .as_ref()
+                .is_some_and(|staged| staged.phase == "staged")
+        {
+            let staged = state.staged_removal.as_mut().expect("staged removal");
+            if unix_seconds(now)? > staged.rollback_expires_at_unix_secs {
+                return Err(HostEnvelopeError::new("dynamic_host_rollback_expired"));
+            }
+            staged.phase = "rollback_pending".to_string();
+            write_dynamic_state(
+                &service_dir.join("state.json"),
+                state.clone(),
+                self.paths.executor_uid,
+            )?;
+        }
+
+        if let Some(staged) = state.staged_removal.clone() {
+            match staged.phase.as_str() {
+                "staged" => {}
+                "commit_pending" => {
+                    let previous_path =
+                        dynamic_packet_path(&service_dir, &staged.previous.binding_ref);
+                    if entry_exists(&previous_path, "dynamic_host_cache_commit_failed")? {
+                        let mut previous = self.build_dynamic_aggregate(
+                            policy,
+                            std::slice::from_ref(&staged.previous),
+                            now,
+                        )?;
+                        previous.zeroize();
+                        remove_private_file_if_present(
+                            &previous_path,
+                            self.paths.executor_uid,
+                            "dynamic_host_cache_commit_failed",
+                        )?;
+                    }
+                    state.staged_removal = None;
+                    state.completed_removal = Some(CompletedDynamicRemovalV1 {
+                        previous: staged.previous,
+                        operation_ref: staged.operation_ref,
+                        envelope_ref: staged.envelope_ref,
+                        phase: "committed".to_string(),
+                    });
+                    self.materialize_dynamic_state(policy, &state.bindings, now)?;
+                    write_dynamic_state(
+                        &service_dir.join("state.json"),
+                        state.clone(),
+                        self.paths.executor_uid,
+                    )?;
+                }
+                "rollback_pending" => {
+                    if state.bindings.iter().any(|binding| {
+                        binding.environment_name == staged.previous.environment_name
+                            || binding.binding_ref == staged.previous.binding_ref
+                    }) {
+                        return Err(HostEnvelopeError::new("dynamic_host_cache_state_invalid"));
+                    }
+                    state.bindings.push(staged.previous.clone());
+                    state
+                        .bindings
+                        .sort_by(|left, right| left.environment_name.cmp(&right.environment_name));
+                    state.staged_removal = None;
+                    state.completed_removal = Some(CompletedDynamicRemovalV1 {
+                        previous: staged.previous,
+                        operation_ref: staged.operation_ref,
+                        envelope_ref: staged.envelope_ref,
+                        phase: "rolled_back".to_string(),
+                    });
                     self.materialize_dynamic_state(policy, &state.bindings, now)?;
                     write_dynamic_state(
                         &service_dir.join("state.json"),
@@ -993,7 +1369,10 @@ impl HostExecutor {
         &self,
         binding: &DynamicHostEnvelopeBindingV1,
     ) -> HostResult<&HostDynamicEnvironmentPolicyV1> {
-        if !matches!(binding.operation_kind.as_str(), "create" | "replace") {
+        if !matches!(
+            binding.operation_kind.as_str(),
+            "create" | "replace" | "remove"
+        ) {
             return Err(HostEnvelopeError::new("dynamic_host_operation_denied"));
         }
         let policy = self
@@ -1007,7 +1386,9 @@ impl HostExecutor {
             || policy.delivery_profile_ref != binding.delivery_profile_ref
             || policy.reload_profile_ref != binding.reload_profile_ref
             || policy.health_profile_ref != binding.health_profile_ref
-            || !policy.allowed_sources.contains(&binding.source)
+            || (binding.operation_kind == "remove" && binding.source != "remove")
+            || (binding.operation_kind != "remove"
+                && !policy.allowed_sources.contains(&binding.source))
             || policy
                 .additional_reserved_names
                 .binary_search(&binding.environment_name)
@@ -1122,7 +1503,7 @@ impl HostExecutor {
 }
 
 fn parse_dynamic_plaintext(raw: &[u8]) -> HostResult<(DynamicHostEnvelopeBindingV1, SecretValue)> {
-    if raw.len() < 5 {
+    if raw.len() < 4 {
         return Err(HostEnvelopeError::new(
             "dynamic_host_envelope_plaintext_invalid",
         ));
@@ -1134,18 +1515,24 @@ fn parse_dynamic_plaintext(raw: &[u8]) -> HostResult<(DynamicHostEnvelopeBinding
     ) as usize;
     if metadata_len == 0
         || metadata_len > MAX_PAYLOAD_METADATA_BYTES
-        || 4 + metadata_len >= raw.len()
+        || 4 + metadata_len > raw.len()
     {
         return Err(HostEnvelopeError::new(
             "dynamic_host_envelope_plaintext_invalid",
         ));
     }
-    let binding = decode_strict_json(
+    let binding: DynamicHostEnvelopeBindingV1 = decode_strict_json(
         &raw[4..4 + metadata_len],
         "dynamic_host_envelope_metadata_invalid",
     )?;
     let value = &raw[4 + metadata_len..];
-    validate_dynamic_value(value)?;
+    if binding.operation_kind == "remove" {
+        if !value.is_empty() {
+            return Err(HostEnvelopeError::new("dynamic_host_value_invalid"));
+        }
+    } else {
+        validate_dynamic_value(value)?;
+    }
     Ok((binding, SecretValue::new(value.to_vec())))
 }
 
@@ -1256,6 +1643,9 @@ fn load_dynamic_state(
             pending: None,
             pending_replacement: None,
             staged_replacement: None,
+            pending_removal: None,
+            staged_removal: None,
+            completed_removal: None,
             integrity_hash: String::new(),
         }
     };
@@ -1283,6 +1673,8 @@ fn validate_dynamic_state(
     if usize::from(state.pending.is_some())
         + usize::from(state.pending_replacement.is_some())
         + usize::from(state.staged_replacement.is_some())
+        + usize::from(state.pending_removal.is_some())
+        + usize::from(state.staged_removal.is_some())
         > 1
     {
         return Err(HostEnvelopeError::new("dynamic_host_cache_state_invalid"));
@@ -1336,6 +1728,62 @@ fn validate_dynamic_state(
                 .iter()
                 .any(|entry| entry == &staged.replacement)
             || state.bindings.iter().any(|entry| entry == &staged.previous)
+        {
+            return Err(HostEnvelopeError::new("dynamic_host_cache_state_invalid"));
+        }
+    }
+    if let Some(pending) = &state.pending_removal {
+        if !valid_cached_dynamic_binding(&pending.previous)
+            || !valid_ref("op_", &pending.operation_ref)
+            || !valid_ref("env_", &pending.envelope_ref)
+            || pending.operation_ref == pending.previous.operation_ref
+            || pending.envelope_ref == pending.previous.envelope_ref
+            || !state
+                .bindings
+                .iter()
+                .any(|entry| entry == &pending.previous)
+        {
+            return Err(HostEnvelopeError::new("dynamic_host_cache_state_invalid"));
+        }
+    }
+    if let Some(staged) = &state.staged_removal {
+        if !valid_cached_dynamic_binding(&staged.previous)
+            || !valid_ref("op_", &staged.operation_ref)
+            || !valid_ref("env_", &staged.envelope_ref)
+            || staged.operation_ref == staged.previous.operation_ref
+            || staged.envelope_ref == staged.previous.envelope_ref
+            || !matches!(
+                staged.phase.as_str(),
+                "staged" | "commit_pending" | "rollback_pending"
+            )
+            || staged.staged_at_unix_secs == 0
+            || staged.rollback_expires_at_unix_secs
+                != staged
+                    .staged_at_unix_secs
+                    .checked_add(DYNAMIC_REPLACEMENT_ROLLBACK_WINDOW_SECS)
+                    .unwrap_or(0)
+            || state.bindings.iter().any(|entry| entry == &staged.previous)
+        {
+            return Err(HostEnvelopeError::new("dynamic_host_cache_state_invalid"));
+        }
+    }
+    if let Some(completed) = &state.completed_removal {
+        if !valid_cached_dynamic_binding(&completed.previous)
+            || !valid_ref("op_", &completed.operation_ref)
+            || !valid_ref("env_", &completed.envelope_ref)
+            || completed.operation_ref == completed.previous.operation_ref
+            || completed.envelope_ref == completed.previous.envelope_ref
+            || !matches!(completed.phase.as_str(), "committed" | "rolled_back")
+            || (completed.phase == "committed"
+                && state
+                    .bindings
+                    .iter()
+                    .any(|entry| entry == &completed.previous))
+            || (completed.phase == "rolled_back"
+                && !state
+                    .bindings
+                    .iter()
+                    .any(|entry| entry == &completed.previous))
         {
             return Err(HostEnvelopeError::new("dynamic_host_cache_state_invalid"));
         }
@@ -1423,6 +1871,22 @@ fn validate_dynamic_inventory(
             )?
         {
             expected.insert(previous_name);
+        }
+    }
+    if let Some(staged) = &state.staged_removal {
+        let previous_name = format!("{}.envelope", staged.previous.binding_ref);
+        if staged.phase != "commit_pending"
+            || entry_exists(
+                &service_dir.join(&previous_name),
+                "dynamic_host_cache_unavailable",
+            )?
+        {
+            expected.insert(previous_name);
+        }
+    }
+    if let Some(completed) = &state.completed_removal {
+        if completed.phase == "rolled_back" {
+            expected.insert(format!("{}.envelope", completed.previous.binding_ref));
         }
     }
     let mut found = BTreeSet::new();
@@ -1574,6 +2038,34 @@ fn dynamic_replacement_outcome(
     outcome
 }
 
+#[allow(clippy::too_many_arguments)]
+fn dynamic_removal_outcome(
+    action: &str,
+    host_ref: &str,
+    policy: &HostDynamicEnvironmentPolicyV1,
+    previous: &CachedDynamicBindingV1,
+    operation_ref: &str,
+    binding_count: usize,
+    phase: &str,
+    reason_code: &str,
+) -> DynamicHostExecutorOutcome {
+    DynamicHostExecutorOutcome {
+        action: action.to_string(),
+        host_ref: host_ref.to_string(),
+        service_ref: policy.service_ref.clone(),
+        environment_policy_ref: policy.environment_policy_ref.clone(),
+        binding_ref: Some(previous.binding_ref.clone()),
+        operation_ref: Some(operation_ref.to_string()),
+        generation_ref: Some(previous.generation_ref.clone()),
+        previous_binding_ref: None,
+        previous_generation_ref: None,
+        binding_count: u16::try_from(binding_count).unwrap_or(u16::MAX),
+        phase: phase.to_string(),
+        reason_code: reason_code.to_string(),
+        value_returned: false,
+    }
+}
+
 fn validate_dynamic_replacement_control(
     control: &DynamicHostReplacementControlV1,
 ) -> HostResult<()> {
@@ -1586,6 +2078,43 @@ fn validate_dynamic_replacement_control(
         ));
     }
     Ok(())
+}
+
+fn validate_dynamic_removal_control(control: &DynamicHostRemovalControlV1) -> HostResult<()> {
+    if !valid_ref("op_", &control.operation_ref)
+        || !valid_ref("bind_", &control.binding_ref)
+        || !valid_ref("gen_", &control.generation_ref)
+    {
+        return Err(HostEnvelopeError::new(
+            "dynamic_host_removal_control_invalid",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_staged_removal_control(
+    staged: &StagedDynamicRemovalV1,
+    control: &DynamicHostRemovalControlV1,
+) -> HostResult<()> {
+    if staged.phase != "staged"
+        || staged.operation_ref != control.operation_ref
+        || staged.previous.binding_ref != control.binding_ref
+        || staged.previous.generation_ref != control.generation_ref
+    {
+        return Err(HostEnvelopeError::new(
+            "dynamic_host_removal_control_mismatch",
+        ));
+    }
+    Ok(())
+}
+
+fn completed_removal_matches(
+    completed: &CompletedDynamicRemovalV1,
+    control: &DynamicHostRemovalControlV1,
+) -> bool {
+    completed.operation_ref == control.operation_ref
+        && completed.previous.binding_ref == control.binding_ref
+        && completed.previous.generation_ref == control.generation_ref
 }
 
 fn exact_dynamic_control_binding<'a>(

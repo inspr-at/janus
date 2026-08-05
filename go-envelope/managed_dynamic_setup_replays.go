@@ -209,7 +209,9 @@ func (store *managedDynamicReplayStore) updateValueAdmission(intent managedDynam
 		return managedDynamicReplayRecord{}, managedIntentError("managed_intent_value_admission_unavailable")
 	}
 	if complete {
-		if validateManagedDynamicCustodyResult(custody, operationRef) != nil || validateManagedDynamicDeliveryResult(delivery, operationRef) != nil {
+		if validateManagedDynamicDeliveryResult(delivery, operationRef) != nil ||
+			(intent.OperationKind != "remove" && validateManagedDynamicCustodyResult(custody, operationRef) != nil) ||
+			(intent.OperationKind == "remove" && (custody != managedDynamicCustodyResult{})) {
 			return managedDynamicReplayRecord{}, managedIntentError("managed_intent_value_admission_unavailable")
 		}
 		if record.ValueAdmissionStartedUnixSecond == 0 ||
@@ -218,9 +220,15 @@ func (store *managedDynamicReplayStore) updateValueAdmission(intent managedDynam
 			return managedDynamicReplayRecord{}, managedIntentError("managed_intent_value_admission_unavailable")
 		}
 		record.ValueAdmissionDoneUnixSecond = now
-		record.BindingRef = custody.BindingRef
-		record.SecretRef = custody.SecretRef
-		record.GenerationRef = custody.GenerationRef
+		if intent.OperationKind == "remove" {
+			record.BindingRef = intent.BindingRef
+			record.SecretRef = intent.SecretRef
+			record.GenerationRef = intent.GenerationRef
+		} else {
+			record.BindingRef = custody.BindingRef
+			record.SecretRef = custody.SecretRef
+			record.GenerationRef = custody.GenerationRef
+		}
 		record.PackageRef = delivery.PackageRef
 		record.EnvelopeRef = delivery.EnvelopeRef
 	} else {

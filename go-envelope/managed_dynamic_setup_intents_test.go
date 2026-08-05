@@ -268,6 +268,15 @@ func TestManagedDynamicIntentPayloadPolicyIsClosed(t *testing.T) {
 	if err := validateManagedDynamicSetupIntent(validReplace); err != nil {
 		t.Fatalf("reviewed replace action was rejected: %v", err)
 	}
+	validRemove := managedDynamicTestIntent()
+	validRemove.OperationKind = "remove"
+	validRemove.Source = "remove"
+	validRemove.BindingRef = "bind_fixture0001"
+	validRemove.SecretRef = "sec_fixture0001"
+	validRemove.GenerationRef = "gen_fixture0001"
+	if err := validateManagedDynamicSetupIntent(validRemove); err != nil {
+		t.Fatalf("exact value-free removal was rejected: %v", err)
+	}
 
 	tests := []struct {
 		name   string

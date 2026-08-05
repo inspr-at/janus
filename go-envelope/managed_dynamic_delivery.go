@@ -70,6 +70,10 @@ func newManagedDynamicDeliveryClient(socketPath string) *managedDynamicDeliveryC
 }
 
 func (client *managedDynamicDeliveryClient) Prepare(ctx context.Context, target managedDynamicStepUpTarget, operationRef string, custody managedDynamicCustodyResult) (managedDynamicDeliveryResult, error) {
+	bindingRef, secretRef, generationRef := custody.BindingRef, custody.SecretRef, custody.GenerationRef
+	if target.OperationKind == "remove" {
+		bindingRef, secretRef, generationRef = target.BindingRef, target.SecretRef, target.GenerationRef
+	}
 	request := managedDynamicDeliveryRequest{
 		Schema: managedDynamicDeliveryRequestSchema, SchemaVersion: managedDynamicDeliverySchemaVersion,
 		OperationRef: operationRef, OperationKind: target.OperationKind, Source: target.Source,
@@ -77,10 +81,11 @@ func (client *managedDynamicDeliveryClient) Prepare(ctx context.Context, target 
 		EnvironmentPolicyRef:         target.EnvironmentPolicyRef,
 		EnvironmentPolicyFingerprint: target.EnvironmentPolicyFingerprint,
 		DeclarationFingerprint:       target.DeclarationFingerprint, EnvironmentName: target.EnvironmentName,
-		BindingRef: custody.BindingRef, SecretRef: custody.SecretRef, GenerationRef: custody.GenerationRef,
+		BindingRef: bindingRef, SecretRef: secretRef, GenerationRef: generationRef,
 	}
 	if client == nil || !managedDynamicCleanAbsolutePath(client.socketPath) ||
-		validateManagedDynamicCustodyResult(custody, operationRef) != nil || validateManagedDynamicDeliveryRequest(request) != nil {
+		(target.OperationKind != "remove" && validateManagedDynamicCustodyResult(custody, operationRef) != nil) ||
+		validateManagedDynamicDeliveryRequest(request) != nil {
 		return managedDynamicDeliveryResult{}, managedDynamicDeliveryError("dynamic_delivery_request_invalid")
 	}
 	connection, err := client.dial(ctx, "unix", client.socketPath)
@@ -127,8 +132,8 @@ func (client *managedDynamicDeliveryClient) Prepare(ctx context.Context, target 
 
 func validateManagedDynamicDeliveryRequest(request managedDynamicDeliveryRequest) error {
 	if request.Schema != managedDynamicDeliveryRequestSchema || request.SchemaVersion != managedDynamicDeliverySchemaVersion ||
-		!validManagedRef("op_", request.OperationRef) || (request.OperationKind != "create" && request.OperationKind != "replace") ||
-		!validManagedSource(request.Source) || request.Source == "remove" || !validManagedRef("host_", request.HostRef) ||
+		!validManagedRef("op_", request.OperationRef) || !matchesManagedDynamicOperationSource(request.OperationKind, request.Source) ||
+		!validManagedRef("host_", request.HostRef) ||
 		!validManagedRef("svc_", request.ServiceRef) || !validManagedRef("envpol_", request.EnvironmentPolicyRef) ||
 		!validManagedRef("envpf_", request.EnvironmentPolicyFingerprint) || !validManagedRef("decl_", request.DeclarationFingerprint) ||
 		!validManagedEnvironmentName(request.EnvironmentName) || !validManagedRef("bind_", request.BindingRef) ||

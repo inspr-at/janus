@@ -249,7 +249,9 @@ func (authority *managedDynamicHTTPAuthority) CompleteValueAdmission(
 	custody managedDynamicCustodyResult,
 	delivery managedDynamicDeliveryResult,
 ) (managedDynamicSetupReservation, error) {
-	if validateManagedDynamicCustodyResult(custody, operationRef) != nil || validateManagedDynamicDeliveryResult(delivery, operationRef) != nil {
+	if validateManagedDynamicDeliveryResult(delivery, operationRef) != nil ||
+		(expected.OperationKind != "remove" && validateManagedDynamicCustodyResult(custody, operationRef) != nil) ||
+		(expected.OperationKind == "remove" && (custody != managedDynamicCustodyResult{})) {
 		return managedDynamicSetupReservation{}, managedIntentError("managed_intent_value_admission_unavailable")
 	}
 	if authority == nil || authority.replays == nil || !validManagedDynamicStepUpTarget(expected) || !validManagedRef("op_", operationRef) {

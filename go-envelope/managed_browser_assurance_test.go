@@ -76,6 +76,15 @@ func (authority *managedBrowserDynamicAuthority) reset(source, operationKind str
 	defer authority.mu.Unlock()
 	authority.inspection.Intent.Source = source
 	authority.inspection.Intent.OperationKind = operationKind
+	if operationKind == "remove" {
+		authority.inspection.Intent.BindingRef = "bind_fixture0001"
+		authority.inspection.Intent.SecretRef = "sec_fixture0001"
+		authority.inspection.Intent.GenerationRef = "gen_fixture0001"
+	} else {
+		authority.inspection.Intent.BindingRef = ""
+		authority.inspection.Intent.SecretRef = ""
+		authority.inspection.Intent.GenerationRef = ""
+	}
 	authority.reserved = nil
 }
 
@@ -126,9 +135,15 @@ func (authority *managedBrowserDynamicAuthority) CompleteValueAdmission(ctx cont
 		return managedDynamicSetupReservation{}, managedIntentError("managed_intent_value_admission_unavailable")
 	}
 	authority.reserved.ValueAdmissionComplete = true
-	authority.reserved.BindingRef = custody.BindingRef
-	authority.reserved.SecretRef = custody.SecretRef
-	authority.reserved.GenerationRef = custody.GenerationRef
+	if expected.OperationKind == "remove" {
+		authority.reserved.BindingRef = expected.BindingRef
+		authority.reserved.SecretRef = expected.SecretRef
+		authority.reserved.GenerationRef = expected.GenerationRef
+	} else {
+		authority.reserved.BindingRef = custody.BindingRef
+		authority.reserved.SecretRef = custody.SecretRef
+		authority.reserved.GenerationRef = custody.GenerationRef
+	}
 	authority.reserved.PackageRef = delivery.PackageRef
 	authority.reserved.EnvelopeRef = delivery.EnvelopeRef
 	return *authority.reserved, nil
@@ -453,7 +468,7 @@ func (harness *managedBrowserHarness) ServeHTTP(response http.ResponseWriter, re
 
 func (harness *managedBrowserHarness) session(response http.ResponseWriter, request *http.Request) {
 	kind := request.URL.Query().Get("kind")
-	if kind == "dynamic" || kind == "dynamic-generated" || kind == "dynamic-replace-rollback" {
+	if kind == "dynamic" || kind == "dynamic-generated" || kind == "dynamic-replace-rollback" || kind == "dynamic-remove" {
 		source := "import"
 		operationKind := "create"
 		if kind == "dynamic-generated" {
@@ -462,6 +477,10 @@ func (harness *managedBrowserHarness) session(response http.ResponseWriter, requ
 		if kind == "dynamic-replace-rollback" {
 			operationKind = "replace"
 			harness.app.managedDynamicTransport = &fakeManagedDynamicTransport{status: managedDynamicActivationRolledBack}
+		} else if kind == "dynamic-remove" {
+			source = "remove"
+			operationKind = "remove"
+			harness.app.managedDynamicTransport = &fakeManagedDynamicTransport{status: managedDynamicActivationRemoved}
 		} else {
 			harness.app.managedDynamicTransport = &fakeManagedDynamicTransport{status: managedDynamicActivationActive}
 		}

@@ -166,6 +166,7 @@ type managedDynamicActivationStatus string
 const (
 	managedDynamicActivationPending    managedDynamicActivationStatus = "pending"
 	managedDynamicActivationActive     managedDynamicActivationStatus = "active"
+	managedDynamicActivationRemoved    managedDynamicActivationStatus = "removed"
 	managedDynamicActivationExpired    managedDynamicActivationStatus = "expired"
 	managedDynamicActivationRolledBack managedDynamicActivationStatus = "rolled_back"
 )
@@ -205,7 +206,7 @@ func (client *managedDynamicTransportClient) Claim(ctx context.Context, hostRef 
 		return nil, nil
 	}
 	if response.Phase != "claimed" || response.ReasonCode != "dynamic_transport_package_claimed" || !response.PacketReturned || response.PacketBase64 == nil || response.HostRef == nil || *response.HostRef != hostRef || response.ServiceRef == nil || response.EnvironmentPolicyRef == nil || response.OperationRef == nil || response.OperationKind == nil || response.PackageRef == nil || response.EnvelopeRef == nil || response.BindingRef == nil || response.GenerationRef == nil || response.ReloadProfileRef == nil || response.HealthProfileRef == nil ||
-		(*response.OperationKind != "create" && *response.OperationKind != "replace") ||
+		(*response.OperationKind != "create" && *response.OperationKind != "replace" && *response.OperationKind != "remove") ||
 		!validManagedRef("svc_", *response.ServiceRef) || !validManagedRef("envpol_", *response.EnvironmentPolicyRef) || !validManagedRef("op_", *response.OperationRef) || !validManagedRef("pkg_", *response.PackageRef) || !validManagedRef("env_", *response.EnvelopeRef) || !validManagedRef("bind_", *response.BindingRef) || !validManagedRef("gen_", *response.GenerationRef) || !validManagedRef("reload_", *response.ReloadProfileRef) || !validManagedRef("health_", *response.HealthProfileRef) {
 		return nil, errors.New("dynamic_transport_protocol_invalid")
 	}
@@ -282,9 +283,13 @@ func (client *managedDynamicTransportClient) Status(ctx context.Context, query m
 		return managedDynamicActivationPending, nil
 	case response.Phase == "active" && response.ReasonCode == "dynamic_transport_environment_active":
 		return managedDynamicActivationActive, nil
+	case query.OperationKind == "remove" && response.Phase == "removed" && response.ReasonCode == "dynamic_transport_environment_removed":
+		return managedDynamicActivationRemoved, nil
 	case response.Phase == "expired" && response.ReasonCode == "dynamic_transport_package_expired":
 		return managedDynamicActivationExpired, nil
 	case query.OperationKind == "replace" && response.Phase == "rolled_back" && response.ReasonCode == "dynamic_transport_replacement_rolled_back":
+		return managedDynamicActivationRolledBack, nil
+	case query.OperationKind == "remove" && response.Phase == "rolled_back" && response.ReasonCode == "dynamic_transport_removal_rolled_back":
 		return managedDynamicActivationRolledBack, nil
 	default:
 		return "", errors.New("dynamic_transport_protocol_invalid")
@@ -321,17 +326,19 @@ func (client *managedDynamicTransportClient) request(ctx context.Context, reques
 
 func validateManagedDynamicActivationReceipt(receipt managedDynamicActivationReceipt) error {
 	materializationValid := (receipt.OperationKind == "create" && (receipt.MaterializationReasonCode == "dynamic_host_environment_materialized" || receipt.MaterializationReasonCode == "dynamic_host_materialization_idempotent")) ||
-		(receipt.OperationKind == "replace" && (receipt.MaterializationReasonCode == "dynamic_host_replacement_materialized" || receipt.MaterializationReasonCode == "dynamic_host_materialization_idempotent"))
-	outcomeValid := (receipt.Phase == "active" && receipt.ReasonCode == "dynamic_host_environment_active" && receipt.FailureReasonCode == "" && receipt.RestoredBindingRef == "" && receipt.RestoredGenerationRef == "") ||
-		(receipt.Phase == "rolled_back" && receipt.OperationKind == "replace" && receipt.ReasonCode == "dynamic_host_replacement_rolled_back" && (receipt.FailureReasonCode == "dynamic_host_reload_failed" || receipt.FailureReasonCode == "dynamic_host_health_failed") && validManagedRef("bind_", receipt.RestoredBindingRef) && receipt.RestoredBindingRef != receipt.BindingRef && validManagedRef("gen_", receipt.RestoredGenerationRef) && receipt.RestoredGenerationRef != receipt.GenerationRef)
-	if !validManagedRef("host_", receipt.HostRef) || !validManagedRef("svc_", receipt.ServiceRef) || !validManagedRef("envpol_", receipt.EnvironmentPolicyRef) || !validManagedRef("op_", receipt.OperationRef) || (receipt.OperationKind != "create" && receipt.OperationKind != "replace") || !validManagedRef("pkg_", receipt.PackageRef) || !validManagedRef("env_", receipt.EnvelopeRef) || !validManagedRef("bind_", receipt.BindingRef) || !validManagedRef("gen_", receipt.GenerationRef) || !validManagedRef("reload_", receipt.ReloadProfileRef) || !validManagedRef("health_", receipt.HealthProfileRef) || !materializationValid || !outcomeValid || receipt.MaterializedAtUnixSecs <= 0 || receipt.ReloadedAtUnixSecs < receipt.MaterializedAtUnixSecs || receipt.HeartbeatObservedAtUnixSecs < receipt.ReloadedAtUnixSecs || receipt.ProcessObservedAtUnixSecs < receipt.ReloadedAtUnixSecs || receipt.ProbeObservedAtUnixSecs < receipt.ReloadedAtUnixSecs {
+		(receipt.OperationKind == "replace" && (receipt.MaterializationReasonCode == "dynamic_host_replacement_materialized" || receipt.MaterializationReasonCode == "dynamic_host_materialization_idempotent")) ||
+		(receipt.OperationKind == "remove" && receipt.MaterializationReasonCode == "dynamic_host_removal_materialized")
+	outcomeValid := (receipt.Phase == "active" && receipt.OperationKind != "remove" && receipt.ReasonCode == "dynamic_host_environment_active" && receipt.FailureReasonCode == "" && receipt.RestoredBindingRef == "" && receipt.RestoredGenerationRef == "") ||
+		(receipt.Phase == "removed" && receipt.OperationKind == "remove" && receipt.ReasonCode == "dynamic_host_environment_removed" && receipt.FailureReasonCode == "" && receipt.RestoredBindingRef == "" && receipt.RestoredGenerationRef == "") ||
+		(receipt.Phase == "rolled_back" && (receipt.OperationKind == "replace" || receipt.OperationKind == "remove") && ((receipt.OperationKind == "replace" && receipt.ReasonCode == "dynamic_host_replacement_rolled_back") || (receipt.OperationKind == "remove" && receipt.ReasonCode == "dynamic_host_removal_rolled_back")) && (receipt.FailureReasonCode == "dynamic_host_reload_failed" || receipt.FailureReasonCode == "dynamic_host_health_failed") && validManagedRef("bind_", receipt.RestoredBindingRef) && validManagedRef("gen_", receipt.RestoredGenerationRef) && ((receipt.OperationKind == "replace" && receipt.RestoredBindingRef != receipt.BindingRef && receipt.RestoredGenerationRef != receipt.GenerationRef) || (receipt.OperationKind == "remove" && receipt.RestoredBindingRef == receipt.BindingRef && receipt.RestoredGenerationRef == receipt.GenerationRef)))
+	if !validManagedRef("host_", receipt.HostRef) || !validManagedRef("svc_", receipt.ServiceRef) || !validManagedRef("envpol_", receipt.EnvironmentPolicyRef) || !validManagedRef("op_", receipt.OperationRef) || (receipt.OperationKind != "create" && receipt.OperationKind != "replace" && receipt.OperationKind != "remove") || !validManagedRef("pkg_", receipt.PackageRef) || !validManagedRef("env_", receipt.EnvelopeRef) || !validManagedRef("bind_", receipt.BindingRef) || !validManagedRef("gen_", receipt.GenerationRef) || !validManagedRef("reload_", receipt.ReloadProfileRef) || !validManagedRef("health_", receipt.HealthProfileRef) || !materializationValid || !outcomeValid || receipt.MaterializedAtUnixSecs <= 0 || receipt.ReloadedAtUnixSecs < receipt.MaterializedAtUnixSecs || receipt.HeartbeatObservedAtUnixSecs < receipt.ReloadedAtUnixSecs || receipt.ProcessObservedAtUnixSecs < receipt.ReloadedAtUnixSecs || receipt.ProbeObservedAtUnixSecs < receipt.ReloadedAtUnixSecs {
 		return errors.New("dynamic_transport_receipt_invalid")
 	}
 	return nil
 }
 
 func validateManagedDynamicActivationQuery(query managedDynamicActivationQuery) error {
-	if !validManagedRef("host_", query.HostRef) || !validManagedRef("svc_", query.ServiceRef) || !validManagedRef("envpol_", query.EnvironmentPolicyRef) || !validManagedRef("op_", query.OperationRef) || (query.OperationKind != "create" && query.OperationKind != "replace") || !validManagedRef("pkg_", query.PackageRef) || !validManagedRef("env_", query.EnvelopeRef) || !validManagedRef("bind_", query.BindingRef) || !validManagedRef("gen_", query.GenerationRef) || !validManagedRef("reload_", query.ReloadProfileRef) || !validManagedRef("health_", query.HealthProfileRef) {
+	if !validManagedRef("host_", query.HostRef) || !validManagedRef("svc_", query.ServiceRef) || !validManagedRef("envpol_", query.EnvironmentPolicyRef) || !validManagedRef("op_", query.OperationRef) || (query.OperationKind != "create" && query.OperationKind != "replace" && query.OperationKind != "remove") || !validManagedRef("pkg_", query.PackageRef) || !validManagedRef("env_", query.EnvelopeRef) || !validManagedRef("bind_", query.BindingRef) || !validManagedRef("gen_", query.GenerationRef) || !validManagedRef("reload_", query.ReloadProfileRef) || !validManagedRef("health_", query.HealthProfileRef) {
 		return errors.New("dynamic_transport_status_invalid")
 	}
 	return nil

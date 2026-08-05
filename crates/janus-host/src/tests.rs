@@ -155,6 +155,43 @@ impl Fixture {
         .expect("seal dynamic packet")
     }
 
+    fn dynamic_removal_packet(
+        &self,
+        target_suffix: &str,
+        removal_suffix: &str,
+        environment_name: &str,
+    ) -> Vec<u8> {
+        seal_dynamic_host_removal(DynamicHostRemovalSealRequest {
+            binding: DynamicHostEnvelopeBindingV1 {
+                schema: DYNAMIC_PAYLOAD_SCHEMA.to_string(),
+                schema_version: SCHEMA_VERSION,
+                envelope_ref: format!("env_{removal_suffix}"),
+                operation_ref: format!("op_{removal_suffix}"),
+                operation_kind: "remove".to_string(),
+                source: "remove".to_string(),
+                host_ref: HOST_REF.to_string(),
+                service_ref: SERVICE_REF.to_string(),
+                binding_ref: format!("bind_{target_suffix}"),
+                secret_ref: format!("sec_{target_suffix}"),
+                generation_ref: format!("gen_{target_suffix}"),
+                environment_policy_ref: ENVIRONMENT_POLICY_REF.to_string(),
+                environment_policy_fingerprint: ENVIRONMENT_POLICY_FINGERPRINT.to_string(),
+                declaration_fingerprint: DECLARATION_REF.to_string(),
+                environment_name: environment_name.to_string(),
+                delivery_profile_ref: DELIVERY_PROFILE_REF.to_string(),
+                reload_profile_ref: RELOAD_PROFILE_REF.to_string(),
+                health_profile_ref: HEALTH_PROFILE_REF.to_string(),
+                revocation_epoch: 1,
+                issued_at_unix_secs: NOW - 10,
+                expires_at_unix_secs: NOW + 3600,
+            },
+            host_recipient: &self.recipient,
+            signing_key_id: KEY_REF,
+            signing_key: &self.signing_key,
+        })
+        .expect("seal dynamic removal packet")
+    }
+
     fn dynamic_runtime_target(&self) -> PathBuf {
         self.runtime_root.join(SERVICE_REF).join("dynamic.env")
     }
@@ -1403,6 +1440,146 @@ fn dynamic_restore_finishes_interrupted_replacement_commit_and_rollback() {
             "phase={phase}"
         );
     }
+}
+
+#[test]
+fn dynamic_removal_stages_exact_binding_and_rolls_back_idempotently() {
+    let fixture = Fixture::new();
+    let executor = fixture.dynamic_executor(2);
+    executor
+        .install_dynamic(
+            &fixture.dynamic_packet(
+                "removevalue001",
+                "removevalue001",
+                "removevalue001",
+                "SERVICE_TOKEN",
+                b"keep-until-healthy",
+                "create",
+                SERVICE_REF,
+            ),
+            now(),
+        )
+        .expect("create removal target");
+    let staged = executor
+        .install_dynamic(
+            &fixture.dynamic_removal_packet("removevalue001", "removecontrol01", "SERVICE_TOKEN"),
+            now(),
+        )
+        .expect("stage removal");
+    assert_eq!(staged.reason_code, "dynamic_host_removal_materialized");
+    assert_eq!(staged.binding_count, 0);
+    assert!(!fixture.dynamic_runtime_target().exists());
+    assert!(fixture
+        .dynamic_cache()
+        .join("bind_removevalue001.envelope")
+        .exists());
+    let control = DynamicHostRemovalControlV1 {
+        operation_ref: "op_removecontrol01".to_string(),
+        binding_ref: "bind_removevalue001".to_string(),
+        generation_ref: "gen_removevalue001".to_string(),
+    };
+    let restored = executor
+        .rollback_dynamic_removal(&control, now())
+        .expect("rollback removal");
+    assert_eq!(restored.phase, "rolled_back");
+    assert_eq!(
+        fs::read(fixture.dynamic_runtime_target()).expect("restored aggregate"),
+        b"SERVICE_TOKEN=keep-until-healthy\n"
+    );
+    assert_eq!(
+        executor
+            .rollback_dynamic_removal(&control, now())
+            .expect("lost rollback response is idempotent")
+            .reason_code,
+        "dynamic_host_removal_rollback_idempotent"
+    );
+}
+
+#[test]
+fn dynamic_removal_commit_destroys_only_target_packet_and_is_idempotent() {
+    let fixture = Fixture::new();
+    let executor = fixture.dynamic_executor(2);
+    for (suffix, name, value) in [
+        ("removecommit01", "SERVICE_TOKEN", b"retire".as_slice()),
+        ("remaincommit01", "ANOTHER_TOKEN", b"remain".as_slice()),
+    ] {
+        executor
+            .install_dynamic(
+                &fixture.dynamic_packet(suffix, suffix, suffix, name, value, "create", SERVICE_REF),
+                now(),
+            )
+            .expect("create binding");
+    }
+    executor
+        .install_dynamic(
+            &fixture.dynamic_removal_packet("removecommit01", "removecommitop", "SERVICE_TOKEN"),
+            now(),
+        )
+        .expect("stage removal");
+    let control = DynamicHostRemovalControlV1 {
+        operation_ref: "op_removecommitop".to_string(),
+        binding_ref: "bind_removecommit01".to_string(),
+        generation_ref: "gen_removecommit01".to_string(),
+    };
+    assert_eq!(
+        executor
+            .commit_dynamic_removal(&control, now())
+            .expect("commit healthy removal")
+            .phase,
+        "removed"
+    );
+    assert_eq!(
+        fs::read(fixture.dynamic_runtime_target()).expect("reduced aggregate"),
+        b"ANOTHER_TOKEN=remain\n"
+    );
+    assert!(!fixture
+        .dynamic_cache()
+        .join("bind_removecommit01.envelope")
+        .exists());
+    assert!(fixture
+        .dynamic_cache()
+        .join("bind_remaincommit01.envelope")
+        .exists());
+    assert_eq!(
+        executor
+            .commit_dynamic_removal(&control, now())
+            .expect("lost commit response is idempotent")
+            .reason_code,
+        "dynamic_host_removal_commit_idempotent"
+    );
+}
+
+#[test]
+fn dynamic_restore_rolls_back_unconfirmed_removal() {
+    let fixture = Fixture::new();
+    let executor = fixture.dynamic_executor(2);
+    executor
+        .install_dynamic(
+            &fixture.dynamic_packet(
+                "rebootremove01",
+                "rebootremove01",
+                "rebootremove01",
+                "SERVICE_TOKEN",
+                b"reboot-safe",
+                "create",
+                SERVICE_REF,
+            ),
+            now(),
+        )
+        .expect("create target");
+    executor
+        .install_dynamic(
+            &fixture.dynamic_removal_packet("rebootremove01", "rebootremoveop", "SERVICE_TOKEN"),
+            now(),
+        )
+        .expect("stage removal");
+    executor
+        .restore_dynamic_all(now())
+        .expect("restore rolls back unconfirmed removal");
+    assert_eq!(
+        fs::read(fixture.dynamic_runtime_target()).expect("recovered aggregate"),
+        b"SERVICE_TOKEN=reboot-safe\n"
+    );
 }
 
 #[test]

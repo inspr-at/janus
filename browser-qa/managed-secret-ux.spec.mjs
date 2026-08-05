@@ -378,6 +378,38 @@ test("dynamic replacement reports recovered rollback without returning a value",
   ).toEqual([]);
 });
 
+test("dynamic removal is confirmation-only and health verified", async ({ page }) => {
+  await page.goto("/__managed-browser/session?kind=dynamic-remove");
+  await expect(
+    page.getByRole("heading", { name: "Remove environment variable" }),
+  ).toBeVisible();
+  await expect(page.getByText("Existing encrypted binding")).toBeVisible();
+  await expect(page.locator('input[name="secret_value"]')).toHaveCount(0);
+  await page.getByRole("button", { name: "Confirm with passkey" }).click();
+  await expect(
+    page.getByRole("heading", { name: "Remove this binding" }),
+  ).toBeVisible();
+  await expect(page.locator('input[name="secret_value"]')).toHaveAttribute(
+    "type",
+    "hidden",
+  );
+  await expect(page.locator('input[type="password"]')).toHaveCount(0);
+  const accessibility = await new AxeBuilder({ page }).analyze();
+  expect(
+    accessibility.violations.filter(({ impact }) =>
+      ["serious", "critical"].includes(impact),
+    ),
+  ).toEqual([]);
+  await page.getByRole("button", { name: "Remove safely" }).click();
+  await expect(
+    page.getByRole("heading", { name: "Environment variable removed" }),
+  ).toBeVisible();
+  await expect(page.getByText("Service healthy")).toBeVisible();
+  await expect(page.getByRole("status")).toContainText(
+    "No value or packet returned",
+  );
+});
+
 test("compact generated flow works from the keyboard", async ({ page }) => {
   await page.goto("/__managed-browser/session?kind=create");
   await expect(
