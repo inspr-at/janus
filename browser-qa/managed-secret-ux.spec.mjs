@@ -41,24 +41,14 @@ async function submitImportedValue(page, canary) {
     }, canary);
 }
 
-test("login hero keeps the split trust story clear and value-free", async ({
-  page,
-}) => {
-  await page.goto("/");
-  await expect(page.getByRole("heading", { name: "Open Janus" })).toBeVisible();
-  await expect(page.getByText("Looks back", { exact: true })).toBeVisible();
-  await expect(page.getByText("Looks forward", { exact: true })).toBeVisible();
-  await expect(
-    page.getByText(/Vault & evidence: what exists, who touched it/),
-  ).toBeVisible();
-  await expect(
-    page.getByText(/Forge issues new credentials only after policy/),
-  ).toBeVisible();
-  await expect(page.getByText("value_returned=false")).toBeVisible();
-
-  const layout = await page.evaluate(() => {
+async function loginLayout(page) {
+  return page.evaluate(() => {
     const rectangle = (selector) => {
-      const bounds = document.querySelector(selector).getBoundingClientRect();
+      const element = document.querySelector(selector);
+      if (!(element instanceof HTMLElement)) {
+        throw new Error(`missing login layout element: ${selector}`);
+      }
+      const bounds = element.getBoundingClientRect();
       return {
         left: bounds.left,
         top: bounds.top,
@@ -72,30 +62,76 @@ test("login hero keeps the split trust story clear and value-free", async ({
       left.top < right.bottom &&
       left.bottom > right.top;
     const card = rectangle(".login-card");
+    const boundaries = rectangle(".login-boundaries");
     const heroStage = rectangle(".auth-hero-stage");
-    const back = rectangle(".auth-rail.back");
-    const forward = rectangle(".auth-rail.forward");
+    const action = rectangle('.login-card a[href^="/login"]');
     const hero = getComputedStyle(document.querySelector("main"), "::before");
+    const statementStyles = [...document.querySelectorAll(".login-boundary")].map(
+      (statement) => {
+        const style = getComputedStyle(statement);
+        return [style.fontSize, style.fontWeight, style.lineHeight];
+      },
+    );
     return {
-      heroInset: hero.inset,
-      heroMask: hero.maskImage,
+      heroPosition: hero.backgroundPosition,
       heroSize: hero.backgroundSize,
-      cardClearsHero: card.top >= heroStage.bottom,
-      railsOverlap: overlaps(back, forward),
-      backOverlapsCard: overlaps(back, card),
-      forwardOverlapsCard: overlaps(forward, card),
+      cardOverlapsHero: overlaps(card, heroStage),
+      boundariesOverlapHero: overlaps(boundaries, heroStage),
+      actionAboveFold: action.bottom <= window.innerHeight,
+      actionVisible: action.top >= 0,
       horizontalOverflow:
         document.documentElement.scrollWidth - window.innerWidth,
+      verticalOverflow:
+        document.documentElement.scrollHeight - window.innerHeight,
+      signInActions: document.querySelectorAll('.login-card a[href^="/login"]')
+        .length,
+      statementStyles,
     };
   });
-  expect(layout.heroInset).toBe("0px");
-  expect(layout.heroMask).toBe("none");
-  expect(layout.heroSize).not.toBe("cover");
-  expect(layout.cardClearsHero).toBe(true);
-  expect(layout.railsOverlap).toBe(false);
-  expect(layout.backOverlapsCard).toBe(false);
-  expect(layout.forwardOverlapsCard).toBe(false);
+}
+
+function expectLoginLayout(layout) {
+  expect(layout.heroPosition).toBe("50% 50%");
+  expect(layout.heroSize).toBe("cover");
+  expect(layout.cardOverlapsHero).toBe(false);
+  expect(layout.boundariesOverlapHero).toBe(false);
+  expect(layout.actionAboveFold).toBe(true);
+  expect(layout.actionVisible).toBe(true);
   expect(layout.horizontalOverflow).toBe(0);
+  expect(layout.verticalOverflow).toBeLessThanOrEqual(0);
+  expect(layout.signInActions).toBe(1);
+  expect(
+    new Set(layout.statementStyles.map((style) => JSON.stringify(style))).size,
+  ).toBe(1);
+}
+
+test("login explains hosted access without slogans or internal labels", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await expect(page.getByRole("heading", { name: "Open Janus" })).toBeVisible();
+  await expect(
+    page.locator(".login-summary"),
+  ).toBeVisible();
+  await expect(page.locator(".login-summary")).toContainText(
+    "Use your organization account",
+  );
+  await expect(
+    page.getByText(/checks your account against this instance's access policy/),
+  ).toBeVisible();
+  await expect(
+    page.getByText(/Available actions depend on the Janus roles/),
+  ).toBeVisible();
+  await expect(
+    page.getByText(/does not offer reveal or copy-back for stored secret values/),
+  ).toBeVisible();
+  await expect(
+    page.getByText(/Security-relevant actions are audited without recording secret values/),
+  ).toBeVisible();
+  await expect(page.getByText("self_hosted", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("secure sign-in", { exact: true })).toHaveCount(0);
+  await expect(page.getByText(/Verified boundary/)).toHaveCount(0);
+  expectLoginLayout(await loginLayout(page));
 
   const accessibility = await new AxeBuilder({ page }).analyze();
   expect(
@@ -103,6 +139,24 @@ test("login hero keeps the split trust story clear and value-free", async ({
       ["serious", "critical"].includes(impact),
     ),
   ).toEqual([]);
+});
+
+test("login keeps the centred hero and action clear at every breakpoint", async ({
+  page,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "chromium-desktop");
+  for (const viewport of [
+    { width: 1440, height: 900 },
+    { width: 1365, height: 768 },
+    { width: 1024, height: 768 },
+    { width: 768, height: 1024 },
+    { width: 390, height: 844 },
+    { width: 320, height: 568 },
+  ]) {
+    await page.setViewportSize(viewport);
+    await page.goto("/");
+    expectLoginLayout(await loginLayout(page));
+  }
 });
 
 test("passwordless import shows Check, forgets the value, and recovers navigation", async ({

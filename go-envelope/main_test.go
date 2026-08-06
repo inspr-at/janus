@@ -1107,7 +1107,7 @@ func TestUnauthenticatedRootRendersBrandedLoginLanding(t *testing.T) {
 		t.Fatalf("unauthenticated root should render the landing page, got %d location=%q body=%s", out.Code, out.Header().Get("Location"), out.Body.String())
 	}
 	body := out.Body.String()
-	for _, want := range []string{`class="auth-body login-body"`, `class="auth-landing auth-login"`, `class="auth-hero-stage"`, `class="auth-card login-card"`, "/static/janus-logo.svg", `/static/janus-login-hero.png`, "Open Janus", "Continue with Zitadel", `href="/login"`, "Looks back", "Looks forward", "Vault &amp; evidence", "Forge issues new credentials", "Verified boundary:", "value_returned=false"} {
+	for _, want := range []string{`class="auth-body login-body"`, `class="auth-landing auth-login"`, `class="auth-hero-stage"`, `class="login-dock"`, `class="auth-card login-card"`, `class="login-boundaries"`, "/static/janus-logo.svg", `/static/janus-login-hero.png`, "Open Janus", "Continue with Zitadel", `href="/login"`, "Use your organization account", "checks your account against this instance's access policy", "Available actions depend on the Janus roles assigned to your account", "Janus does not offer reveal or copy-back for stored secret values", "Security-relevant actions are audited without recording secret values"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("login landing should render %q: %s", want, body)
 		}
@@ -1115,7 +1115,7 @@ func TestUnauthenticatedRootRendersBrandedLoginLanding(t *testing.T) {
 	if strings.Count(body, `href="/login"`) != 1 {
 		t.Fatalf("login landing should have one clear sign-in action: %s", body)
 	}
-	for _, forbidden := range []string{"query-secret-sentinel", "session-cookie-sentinel", "state-cookie-sentinel", "nonce-cookie-sentinel", "pkce-cookie-sentinel", "zitadel-janus-oidc", "csb1-age-identity", "every secret, accounted for", "/static/janus-logo-full.png"} {
+	for _, forbidden := range []string{"query-secret-sentinel", "session-cookie-sentinel", "state-cookie-sentinel", "nonce-cookie-sentinel", "pkce-cookie-sentinel", "zitadel-janus-oidc", "csb1-age-identity", "every secret, accounted for", "/static/janus-logo-full.png", "self_hosted", "secure sign-in", "Verified boundary:", "Looks back", "Looks forward"} {
 		if strings.Contains(body, forbidden) {
 			t.Fatalf("unauthenticated landing leaked %q: %s", forbidden, body)
 		}
