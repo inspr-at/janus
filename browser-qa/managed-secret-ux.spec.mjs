@@ -71,26 +71,31 @@ test("login hero keeps the split trust story clear and value-free", async ({
       left.right > right.left &&
       left.top < right.bottom &&
       left.bottom > right.top;
-    const card = rectangle(".auth-card");
+    const card = rectangle(".login-card");
+    const heroStage = rectangle(".auth-hero-stage");
     const back = rectangle(".auth-rail.back");
     const forward = rectangle(".auth-rail.forward");
     const hero = getComputedStyle(document.querySelector("main"), "::before");
     return {
       heroInset: hero.inset,
       heroMask: hero.maskImage,
+      heroSize: hero.backgroundSize,
+      cardClearsHero: card.top >= heroStage.bottom,
+      railsOverlap: overlaps(back, forward),
       backOverlapsCard: overlaps(back, card),
       forwardOverlapsCard: overlaps(forward, card),
       horizontalOverflow:
         document.documentElement.scrollWidth - window.innerWidth,
     };
   });
-  expect(layout).toEqual({
-    heroInset: "0px",
-    heroMask: "none",
-    backOverlapsCard: false,
-    forwardOverlapsCard: false,
-    horizontalOverflow: 0,
-  });
+  expect(layout.heroInset).toBe("0px");
+  expect(layout.heroMask).toBe("none");
+  expect(layout.heroSize).not.toBe("cover");
+  expect(layout.cardClearsHero).toBe(true);
+  expect(layout.railsOverlap).toBe(false);
+  expect(layout.backOverlapsCard).toBe(false);
+  expect(layout.forwardOverlapsCard).toBe(false);
+  expect(layout.horizontalOverflow).toBe(0);
 
   const accessibility = await new AxeBuilder({ page }).analyze();
   expect(

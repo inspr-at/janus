@@ -534,6 +534,7 @@ type AuthErrorView struct {
 	RequestID     string
 	ValueReturned bool
 	AuthScreen    bool
+	LoginScreen   bool
 }
 
 type AuthResetView struct {
@@ -546,6 +547,7 @@ type AuthResetView struct {
 	Posture       AuthFailurePosture
 	ValueReturned bool
 	AuthScreen    bool
+	LoginScreen   bool
 }
 
 type AuthContinuationView struct {
@@ -561,6 +563,7 @@ type AuthContinuationView struct {
 	RequestID     string
 	ValueReturned bool
 	AuthScreen    bool
+	LoginScreen   bool
 }
 
 type NoAccessView struct {
@@ -572,6 +575,7 @@ type NoAccessView struct {
 	RequestID     string
 	ValueReturned bool
 	AuthScreen    bool
+	LoginScreen   bool
 }
 
 type SafeFailureView struct {
@@ -591,6 +595,7 @@ type SafeFailureView struct {
 	AllowedMethods []string
 	ValueReturned  bool
 	AuthScreen     bool
+	LoginScreen    bool
 }
 
 type DescriptorFocus struct {
@@ -2056,6 +2061,7 @@ func (app *App) renderLoginLanding(w http.ResponseWriter, r *http.Request) {
 		"Mode":          app.cfg.ProductMode,
 		"Session":       Session{},
 		"AuthScreen":    true,
+		"LoginScreen":   true,
 		"StartHref":     startHref,
 		"ValueReturned": false,
 	})
@@ -3682,6 +3688,13 @@ func mustTemplates() *template.Template {
 	  background: url("/static/janus-login-hero.png") center 22% / cover no-repeat;
 	  opacity: .94;
 	}
+	body.login-body {
+	  --auth-hero-height: clamp(460px, 55vh, 680px);
+	}
+	body.login-body main::before {
+	  background-position: center top;
+	  background-size: auto var(--auth-hero-height);
+	}
 	body.auth-body main::after {
 	  content: "";
 	  position: absolute;
@@ -3699,6 +3712,19 @@ func mustTemplates() *template.Template {
 	  justify-content: center;
 	  position: relative;
 	  padding: 0 0 clamp(20px, 4vh, 42px);
+	}
+	.auth-login {
+	  display: grid;
+	  grid-template-rows: var(--auth-hero-height) auto;
+	  gap: clamp(14px, 2vh, 22px);
+	  align-items: start;
+	  justify-items: center;
+	}
+	.auth-hero-stage {
+	  grid-row: 1;
+	  width: 100%;
+	  height: var(--auth-hero-height);
+	  pointer-events: none;
 	}
 	.auth-rail {
 	  position: absolute;
@@ -3737,6 +3763,30 @@ func mustTemplates() *template.Template {
 	.auth-trust { display: grid; gap: 8px; border-top: 1px solid var(--line); padding-top: 15px; color: var(--muted); font-size: 12px; }
 	.auth-trust span { display: flex; align-items: center; gap: 8px; }
 	.auth-trust i { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
+	.login-card {
+	  grid-row: 2;
+	  width: min(820px, 100%);
+	  grid-template-columns: minmax(0, 1.08fr) minmax(0, .92fr);
+	  grid-template-areas:
+	    "intro trust"
+	    "action trust";
+	  gap: 16px 32px;
+	  padding: clamp(24px, 3vw, 32px);
+	}
+	.login-card .intro-copy { grid-area: intro; }
+	.login-card .toolbar { grid-area: action; align-self: end; }
+	.login-card .toolbar .button { width: 100%; }
+	.login-card .auth-trust {
+	  grid-area: trust;
+	  align-content: start;
+	  align-self: stretch;
+	  gap: 0;
+	  border-top: 0;
+	  border-left: 1px solid var(--line);
+	  padding: 0 0 0 28px;
+	}
+	.login-card .auth-trust span { padding: 11px 0; }
+	.login-card .auth-trust span + span { border-top: 1px solid var(--line); }
 	body.auth-body .overview { position: relative; z-index: 1; width: min(1120px, calc(100% - 40px)); margin: 0 auto; padding-top: clamp(36px, 8vh, 90px); }
     .nav { display: flex; justify-content: center; gap: 6px; min-width: 0; }
     .nav a {
@@ -4474,7 +4524,7 @@ func mustTemplates() *template.Template {
 	      .audit-event { grid-template-columns: 1fr; }
 	      .audit-proof { grid-template-columns: minmax(0, .3fr) minmax(0, .7fr); }
       .capture-header { grid-template-columns: 1fr; align-items: start; }
-	  body.auth-body main::before { background-position: 52% 22%; }
+	  body.auth-body:not(.login-body) main::before { background-position: 52% 22%; }
 	  .auth-landing { padding-bottom: 28px; }
 	  .auth-rail { width: min(240px, 29vw); }
 	  body.auth-body .overview { padding-top: 28px; }
@@ -4525,19 +4575,53 @@ func mustTemplates() *template.Template {
       .signal { border-right: 0; }
       .toolbar { display: grid; grid-template-columns: 1fr; }
       .toolbar .button { width: 100%; }
-	  body.auth-body main::before {
+	  body.auth-body:not(.login-body) main::before {
 	    background-position: 52% 18%;
 	  }
 	  body.auth-body main::after { background: linear-gradient(180deg, rgba(248,250,249,.12), rgba(248,250,249,.62) 52%, #f8faf9 84%); }
 	  .auth-landing { width: calc(100% - 24px); min-height: calc(100vh - 119px); padding: 220px 0 18px; }
+	  body.login-body {
+	    --auth-hero-height: clamp(260px, 72vw, 360px);
+	    --auth-rail-band-height: 112px;
+	  }
+	  body.login-body main::before {
+	    background-position: center var(--auth-rail-band-height);
+	  }
+	  .auth-login {
+	    grid-template-columns: repeat(2, minmax(0, 1fr));
+	    grid-template-rows: var(--auth-rail-band-height) var(--auth-hero-height) auto;
+	    gap: 0 12px;
+	    padding: 0 0 18px;
+	  }
+	  .auth-login .auth-hero-stage {
+	    grid-row: 2;
+	    grid-column: 1 / -1;
+	  }
 	  .auth-rail {
-	    top: 18px;
-	    width: calc(50% - 10px);
+	    position: static;
+	    grid-row: 1;
+	    align-self: center;
+	    width: auto;
 	    font-size: 11px;
 	    line-height: 1.35;
 	  }
+	  .auth-rail.back { grid-column: 1; }
+	  .auth-rail.forward { grid-column: 2; }
 	  .auth-rail strong { margin-bottom: 3px; font-size: 13px; }
 	  .auth-card { padding: 20px; background: rgba(255,255,255,.88); }
+	  .login-card {
+	    grid-row: 3;
+	    grid-column: 1 / -1;
+	    grid-template-columns: minmax(0, 1fr);
+	    grid-template-areas: "intro" "action" "trust";
+	    gap: 16px;
+	    margin-top: 12px;
+	  }
+	  .login-card .auth-trust {
+	    border-top: 1px solid var(--line);
+	    border-left: 0;
+	    padding: 15px 0 0;
+	  }
 	  .brand-logo { width: 48px; }
       main, .overview, .intro, .status, .panel, .intro-copy, .toolbar, .evidence-workstation, .handoff-path, .handoff-step, .workstation-head {
         min-width: 0;
@@ -4554,7 +4638,7 @@ func mustTemplates() *template.Template {
     }
   </style>
 </head>
-<body{{ if .AuthScreen }} class="auth-body"{{ end }}>
+<body{{ if .AuthScreen }} class="auth-body{{ if .LoginScreen }} login-body{{ end }}"{{ end }}>
 <a class="skip-link" href="#command-center">Skip to command center</a>
 <header>
   <div class="bar">
@@ -5071,7 +5155,7 @@ func mustTemplates() *template.Template {
 
 	{{ define "login_landing" -}}
 {{ template "base_top" . }}
-<section class="auth-landing" id="command-center">
+<section class="auth-landing auth-login" id="command-center">
   <div class="auth-rail back">
     <strong>Looks back</strong>
     Vault &amp; evidence: what exists, who touched it, never the value itself.
@@ -5080,7 +5164,8 @@ func mustTemplates() *template.Template {
     <strong>Looks forward</strong>
     Forge issues new credentials only after policy and approval.
   </div>
-  <div class="auth-card">
+  <div class="auth-hero-stage" aria-hidden="true"></div>
+  <div class="auth-card login-card">
     <div class="intro-copy">
       <div class="eyebrow">{{ .Mode }} · secure sign-in</div>
       <h1>Open Janus</h1>
