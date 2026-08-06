@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/rand"
@@ -62,6 +63,8 @@ const (
 	maxLoginAttempts       = 3
 	maxRequestBody         = int64(4096)
 )
+
+const maxTemplateResponseBytes = 8 << 20
 
 type Config struct {
 	Listen        string
@@ -3546,11 +3549,27 @@ func renderTemplateStatus(w http.ResponseWriter, templates *template.Template, n
 	if w.Header().Get("Cache-Control") == "" {
 		w.Header().Set("Cache-Control", "no-store")
 	}
+	var body boundedTemplateBuffer
+	if err := templates.ExecuteTemplate(&body, name, data); err != nil {
+		http.Error(w, "render failed", http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(status)
-	if err := templates.ExecuteTemplate(w, name, data); err != nil {
-		http.Error(w, "render failed", http.StatusInternalServerError)
+	_, _ = w.Write(body.Bytes())
+}
+
+// boundedTemplateBuffer keeps template failures from committing a partial HTML
+// response and caps the memory reserved for a single rendered page.
+type boundedTemplateBuffer struct {
+	bytes.Buffer
+}
+
+func (b *boundedTemplateBuffer) Write(p []byte) (int, error) {
+	if len(p) > maxTemplateResponseBytes-b.Len() {
+		return 0, errors.New("template response exceeds size limit")
 	}
+	return b.Buffer.Write(p)
 }
 
 func mustTemplates() *template.Template {
