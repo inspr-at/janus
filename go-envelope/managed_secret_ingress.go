@@ -119,6 +119,8 @@ type managedCompletionPageData struct {
 	ReturnURL        string
 	OperationRef     string
 	RequestID        string
+	// Keep the completion handoff value-free: it carries no admission references.
+	ValueAdmissionComplete bool
 }
 
 func (app *App) handleManagedSetup(w http.ResponseWriter, r *http.Request) {

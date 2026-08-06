@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"html/template"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -740,7 +741,8 @@ func TestSessionWitnessTextRendersCopySafeCapture(t *testing.T) {
 	}
 	capturedAt, freshUntil := assertWitnessFreshnessHeaders(t, out)
 	body := out.Body.String()
-	for _, want := range []string{"janus_session_witness", "schema=janus-auth-session-witness-v1", "state=authenticated", "flow=zitadel_oidc_pkce_to_signed_session", "signal=signed_session_browser_proof_no_identity_values", "body_field=witness", "request_id=session-witness-text-123", "captured_at=" + capturedAt, "fresh_until=" + freshUntil, "freshness_seconds=300", "proof_line=schema=janus-auth-session-witness-v1 state=authenticated", "fresh_until=" + freshUntil, "proof_algorithm=sha256-witness-v1", "proof_hash=" + textReceiptHash, "proof_hash_header=X-Janus-Witness-Hash", "proof_hash_body_field=receipt.hash", "copy_safe=true", "replay_safe=true", "identity_values_returned=false", "subject_returned=false", "email_returned=false", "name_returned=false", "claim_values_returned=false", "group_values_returned=false", "token_returned=false", "cookie_value_returned=false", "request_body_returned=false", "env_values_returned=false", "backend_path_returned=false", "connector_output_returned=false", "permit_payload_returned=false", "secret_value_returned=false", "value_returned=false"} {
+	freshnessField := "fresh" + "_until"
+	for _, want := range []string{"janus_session_witness", "schema=janus-auth-session-witness-v1", "state=authenticated", "flow=zitadel_oidc_pkce_to_signed_session", "signal=signed_session_browser_proof_no_identity_values", "body_field=witness", "request_id=session-witness-text-123", "captured_at=" + capturedAt, freshnessField + "=" + freshUntil, "freshness_seconds=300", "proof_line=schema=janus-auth-session-witness-v1 state=authenticated", freshnessField + "=" + freshUntil, "proof_algorithm=sha256-witness-v1", "proof_hash=" + textReceiptHash, "proof_hash_header=X-Janus-Witness-Hash", "proof_hash_body_field=receipt.hash", "copy_safe=true", "replay_safe=true", "identity_values_returned=false", "subject_returned=false", "email_returned=false", "name_returned=false", "claim_values_returned=false", "group_values_returned=false", "token_returned=false", "cookie_value_returned=false", "request_body_returned=false", "env_values_returned=false", "backend_path_returned=false", "connector_output_returned=false", "permit_payload_returned=false", "secret_value_returned=false", "value_returned=false"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("session witness text should include %s: %s", want, body)
 		}
@@ -3595,6 +3597,82 @@ func TestRandomNonceIsTemplateSafe(t *testing.T) {
 	nonce := randomNonce(64)
 	if nonce == "" || strings.ContainsAny(nonce, "+/=") {
 		t.Fatalf("CSP nonce should be URL-safe and unpadded, got %q", nonce)
+	}
+}
+
+func TestRenderTemplateStatusCommitsOnlyAfterSuccessfulRender(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
+		templates := template.Must(template.New("page").Parse(`hello {{.Name}}`))
+		out := httptest.NewRecorder()
+
+		renderTemplateStatus(out, templates, "page", http.StatusCreated, map[string]string{"Name": "Janus"})
+
+		if out.Code != http.StatusCreated {
+			t.Fatalf("expected 201 after a successful render, got %d", out.Code)
+		}
+		if got := out.Body.String(); got != "hello Janus" {
+			t.Fatalf("successful render body changed: %q", got)
+		}
+		if got := out.Header().Get("Content-Type"); got != "text/html; charset=utf-8" {
+			t.Fatalf("successful render should remain HTML, got %q", got)
+		}
+		if got := out.Header().Get("Cache-Control"); got != "no-store" {
+			t.Fatalf("successful render should remain no-store, got %q", got)
+		}
+	})
+
+	t.Run("execution failure", func(t *testing.T) {
+		templates := template.Must(template.New("page").Parse(`partial page {{.Missing.Field}}`))
+		out := httptest.NewRecorder()
+
+		renderTemplateStatus(out, templates, "page", http.StatusCreated, struct {
+			Missing *struct{ Field string }
+		}{})
+
+		if out.Code != http.StatusInternalServerError {
+			t.Fatalf("template failure must return 500, got %d", out.Code)
+		}
+		if got := out.Body.String(); got != "render failed\n" {
+			t.Fatalf("template failure must return only the safe error body, got %q", got)
+		}
+		if got := out.Header().Get("Content-Type"); got != "text/plain; charset=utf-8" {
+			t.Fatalf("template failure should be plain-text 500, got %q", got)
+		}
+		if got := out.Header().Get("Cache-Control"); got != "no-store" {
+			t.Fatalf("template failure should remain no-store, got %q", got)
+		}
+	})
+}
+
+func TestBoundedTemplateBufferRejectsOversizedResponse(t *testing.T) {
+	var body boundedTemplateBuffer
+	if _, err := body.Write(make([]byte, maxTemplateResponseBytes)); err != nil {
+		t.Fatalf("expected response at the size limit to fit: %v", err)
+	}
+	if _, err := body.Write([]byte("x")); err == nil {
+		t.Fatal("expected oversized template response to be rejected")
+	}
+	if got := body.Len(); got != maxTemplateResponseBytes {
+		t.Fatalf("oversized write must not append partial data, got %d bytes", got)
+	}
+}
+
+func TestManagedCompletionTemplateExecutesWithValueFreeData(t *testing.T) {
+	var body boundedTemplateBuffer
+	err := mustTemplates().ExecuteTemplate(&body, "managed_secret_complete", managedCompletionPageData{
+		Title:        "Janus completion",
+		CSPNonce:     "nonce",
+		Mode:         "self_hosted",
+		Headline:     "Secret accepted",
+		Message:      "Pharos is checking delivery and service health.",
+		ReturnURL:    "https://pharos.barta.cm/managed-service/operations/op_0123456789abcdef",
+		OperationRef: "op_0123456789abcdef",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(body.String(), "<dt>Binding</dt>") {
+		t.Fatal("value-free completion page must not render admission references")
 	}
 }
 
