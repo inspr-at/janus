@@ -1107,7 +1107,7 @@ func TestUnauthenticatedRootRendersBrandedLoginLanding(t *testing.T) {
 		t.Fatalf("unauthenticated root should render the landing page, got %d location=%q body=%s", out.Code, out.Header().Get("Location"), out.Body.String())
 	}
 	body := out.Body.String()
-	for _, want := range []string{`class="auth-body"`, "/static/janus-logo.svg", `/static/janus-login-hero.png`, "Open Janus", "Continue with Zitadel", `href="/login"`, "Looks back", "Looks forward", "Vault &amp; evidence", "Forge issues new credentials", "Verified boundary:", "value_returned=false"} {
+	for _, want := range []string{`class="auth-body login-body"`, `class="auth-landing auth-login"`, `class="auth-hero-stage"`, `class="auth-card login-card"`, "/static/janus-logo.svg", `/static/janus-login-hero.png`, "Open Janus", "Continue with Zitadel", `href="/login"`, "Looks back", "Looks forward", "Vault &amp; evidence", "Forge issues new credentials", "Verified boundary:", "value_returned=false"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("login landing should render %q: %s", want, body)
 		}
