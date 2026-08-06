@@ -3688,12 +3688,23 @@ func mustTemplates() *template.Template {
 	  background: url("/static/janus-login-hero.png") center 22% / cover no-repeat;
 	  opacity: .94;
 	}
-	body.login-body {
-	  --auth-hero-height: clamp(460px, 55vh, 680px);
+	body.login-body { min-height: 100svh; overflow-x: hidden; }
+	body.login-body header {
+	  position: fixed;
+	  inset: 0 0 auto;
+	  border-bottom-color: rgba(207, 218, 224, .72);
+	  background: linear-gradient(180deg, rgba(255,255,255,.86), rgba(255,255,255,.62));
 	}
+	body.login-body .bar {
+	  width: calc(100% - clamp(32px, 6vw, 88px));
+	  min-height: 72px;
+	}
+	body.login-body .brand-logo { width: 46px; }
+	body.login-body main { min-height: 100svh; }
 	body.login-body main::before {
-	  background-position: center top;
-	  background-size: auto var(--auth-hero-height);
+	  background-position: center;
+	  background-size: cover;
+	  opacity: 1;
 	}
 	body.auth-body main::after {
 	  content: "";
@@ -3702,6 +3713,11 @@ func mustTemplates() *template.Template {
 	  inset: 0;
 	  background: linear-gradient(180deg, rgba(248,250,249,.2) 0%, rgba(248,250,249,.08) 52%, rgba(248,250,249,.78) 100%);
 	  pointer-events: none;
+	}
+	body.login-body main::after {
+	  background:
+	    linear-gradient(90deg, rgba(235,248,248,.24) 0%, transparent 34%, transparent 66%, rgba(255,246,235,.22) 100%),
+	    linear-gradient(180deg, rgba(255,255,255,.08) 48%, rgba(241,247,246,.28) 100%);
 	}
 	.auth-landing {
 	  width: min(1180px, calc(100% - 40px));
@@ -3714,37 +3730,22 @@ func mustTemplates() *template.Template {
 	  padding: 0 0 clamp(20px, 4vh, 42px);
 	}
 	.auth-login {
+	  width: 100%;
+	  min-height: 100svh;
+	  padding: clamp(88px, 10vh, 112px) clamp(26px, 4vw, 64px) clamp(24px, 4vh, 44px);
 	  display: grid;
-	  grid-template-rows: var(--auth-hero-height) auto;
-	  gap: clamp(14px, 2vh, 22px);
-	  align-items: start;
-	  justify-items: center;
+	  grid-template-rows: minmax(0, 1fr) auto;
+	  align-items: end;
 	}
 	.auth-hero-stage {
-	  grid-row: 1;
-	  width: 100%;
-	  height: var(--auth-hero-height);
+	  position: absolute;
+	  top: clamp(76px, 9vh, 108px);
+	  left: 50%;
+	  width: clamp(390px, 38vw, 620px);
+	  height: clamp(250px, 44vh, 460px);
+	  transform: translateX(-50%);
 	  pointer-events: none;
 	}
-	.auth-rail {
-	  position: absolute;
-	  top: clamp(28px, 6vh, 72px);
-	  width: min(280px, 26vw);
-	  color: var(--muted);
-	  font-size: clamp(12px, 1.1vw, 14px);
-	  line-height: 1.5;
-	  text-shadow: 0 1px 12px rgba(255,255,255,.9);
-	}
-	.auth-rail strong {
-	  display: block;
-	  margin-bottom: 5px;
-	  color: var(--accent);
-	  font-size: clamp(15px, 1.35vw, 18px);
-	  letter-spacing: .02em;
-	}
-	.auth-rail.back { left: 0; text-align: left; }
-	.auth-rail.forward { right: 0; text-align: right; }
-	.auth-rail.forward strong { color: var(--amber); }
 	.auth-card {
 	  width: min(410px, 100%);
 	  display: grid;
@@ -3763,30 +3764,66 @@ func mustTemplates() *template.Template {
 	.auth-trust { display: grid; gap: 8px; border-top: 1px solid var(--line); padding-top: 15px; color: var(--muted); font-size: 12px; }
 	.auth-trust span { display: flex; align-items: center; gap: 8px; }
 	.auth-trust i { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
-	.login-card {
+	.login-dock {
 	  grid-row: 2;
-	  width: min(820px, 100%);
-	  grid-template-columns: minmax(0, 1.08fr) minmax(0, .92fr);
-	  grid-template-areas:
-	    "intro trust"
-	    "action trust";
-	  gap: 16px 32px;
-	  padding: clamp(24px, 3vw, 32px);
+	  position: relative;
+	  z-index: 1;
+	  display: grid;
+	  grid-template-columns: minmax(300px, 380px) minmax(260px, 1fr) minmax(300px, 380px);
+	  gap: clamp(24px, 4vw, 64px);
+	  align-items: end;
 	}
-	.login-card .intro-copy { grid-area: intro; }
-	.login-card .toolbar { grid-area: action; align-self: end; }
+	.login-card {
+	  grid-column: 1;
+	  width: 100%;
+	  gap: 14px;
+	  border-color: rgba(255,255,255,.86);
+	  border-radius: 18px;
+	  background: rgba(250,253,253,.72);
+	  box-shadow: 0 24px 70px rgba(28,57,65,.13);
+	  padding: clamp(22px, 2.4vw, 30px);
+	  backdrop-filter: blur(22px) saturate(118%);
+	}
+	.login-card h1 { font-size: clamp(34px, 3vw, 46px); }
+	.login-card .intro-copy { display: grid; gap: 10px; }
+	.login-card .login-summary { color: #536370; font-size: 14px; line-height: 1.5; }
+	.login-card .toolbar { margin-top: 2px; }
 	.login-card .toolbar .button { width: 100%; }
-	.login-card .auth-trust {
-	  grid-area: trust;
-	  align-content: start;
-	  align-self: stretch;
-	  gap: 0;
-	  border-top: 0;
-	  border-left: 1px solid var(--line);
-	  padding: 0 0 0 28px;
+	.login-role-note {
+	  color: #687681;
+	  font-size: 12px;
+	  line-height: 1.45;
 	}
-	.login-card .auth-trust span { padding: 11px 0; }
-	.login-card .auth-trust span + span { border-top: 1px solid var(--line); }
+	.login-boundaries {
+	  grid-column: 3;
+	  display: grid;
+	  gap: 0;
+	  border: 1px solid rgba(255,255,255,.78);
+	  border-radius: 18px;
+	  background: rgba(250,253,253,.58);
+	  box-shadow: 0 20px 58px rgba(53,58,49,.08);
+	  padding: 10px 20px;
+	  color: #45535f;
+	  backdrop-filter: blur(18px) saturate(112%);
+	}
+	.login-boundary {
+	  display: grid;
+	  grid-template-columns: 8px minmax(0, 1fr);
+	  gap: 11px;
+	  align-items: start;
+	  padding: 13px 0;
+	  font-size: 12px;
+	  line-height: 1.45;
+	}
+	.login-boundary + .login-boundary { border-top: 1px solid rgba(207,218,224,.78); }
+	.login-boundary i {
+	  width: 8px;
+	  height: 8px;
+	  margin-top: .4em;
+	  border-radius: 50%;
+	  background: var(--accent);
+	  box-shadow: 0 0 0 4px rgba(18,106,90,.08);
+	}
 	body.auth-body .overview { position: relative; z-index: 1; width: min(1120px, calc(100% - 40px)); margin: 0 auto; padding-top: clamp(36px, 8vh, 90px); }
     .nav { display: flex; justify-content: center; gap: 6px; min-width: 0; }
     .nav a {
@@ -4526,7 +4563,6 @@ func mustTemplates() *template.Template {
       .capture-header { grid-template-columns: 1fr; align-items: start; }
 	  body.auth-body:not(.login-body) main::before { background-position: 52% 22%; }
 	  .auth-landing { padding-bottom: 28px; }
-	  .auth-rail { width: min(240px, 29vw); }
 	  body.auth-body .overview { padding-top: 28px; }
 	      .assurance-flow { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .trust-rail { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -4580,49 +4616,6 @@ func mustTemplates() *template.Template {
 	  }
 	  body.auth-body main::after { background: linear-gradient(180deg, rgba(248,250,249,.12), rgba(248,250,249,.62) 52%, #f8faf9 84%); }
 	  .auth-landing { width: calc(100% - 24px); min-height: calc(100vh - 119px); padding: 220px 0 18px; }
-	  body.login-body {
-	    --auth-hero-height: clamp(260px, 72vw, 360px);
-	    --auth-rail-band-height: 112px;
-	  }
-	  body.login-body main::before {
-	    background-position: center var(--auth-rail-band-height);
-	  }
-	  .auth-login {
-	    grid-template-columns: repeat(2, minmax(0, 1fr));
-	    grid-template-rows: var(--auth-rail-band-height) var(--auth-hero-height) auto;
-	    gap: 0 12px;
-	    padding: 0 0 18px;
-	  }
-	  .auth-login .auth-hero-stage {
-	    grid-row: 2;
-	    grid-column: 1 / -1;
-	  }
-	  .auth-rail {
-	    position: static;
-	    grid-row: 1;
-	    align-self: center;
-	    width: auto;
-	    font-size: 11px;
-	    line-height: 1.35;
-	  }
-	  .auth-rail.back { grid-column: 1; }
-	  .auth-rail.forward { grid-column: 2; }
-	  .auth-rail strong { margin-bottom: 3px; font-size: 13px; }
-	  .auth-card { padding: 20px; background: rgba(255,255,255,.88); }
-	  .login-card {
-	    grid-row: 3;
-	    grid-column: 1 / -1;
-	    grid-template-columns: minmax(0, 1fr);
-	    grid-template-areas: "intro" "action" "trust";
-	    gap: 16px;
-	    margin-top: 12px;
-	  }
-	  .login-card .auth-trust {
-	    border-top: 1px solid var(--line);
-	    border-left: 0;
-	    padding: 15px 0 0;
-	  }
-	  .brand-logo { width: 48px; }
       main, .overview, .intro, .status, .panel, .intro-copy, .toolbar, .evidence-workstation, .handoff-path, .handoff-step, .workstation-head {
         min-width: 0;
         max-width: 100%;
@@ -4636,6 +4629,113 @@ func mustTemplates() *template.Template {
       .safety-ribbon { grid-template-columns: 1fr; }
       h1 { font-size: 28px; }
     }
+	@media (max-width: 1100px) {
+	  .auth-login {
+	    width: 100%;
+	    padding: 82px 24px 22px;
+	  }
+	  .auth-hero-stage {
+	    top: 76px;
+	    width: min(62vw, 560px);
+	    height: min(45vh, 400px);
+	  }
+	  .login-dock {
+	    grid-template-columns: minmax(260px, .82fr) minmax(380px, 1.18fr);
+	    gap: 24px;
+	    border: 1px solid rgba(255,255,255,.82);
+	    border-radius: 20px;
+	    background: rgba(250,253,253,.7);
+	    box-shadow: 0 24px 70px rgba(28,57,65,.12);
+	    padding: 14px;
+	    backdrop-filter: blur(22px) saturate(118%);
+	  }
+	  .login-card,
+	  .login-boundaries {
+	    border: 0;
+	    border-radius: 12px;
+	    background: transparent;
+	    box-shadow: none;
+	    backdrop-filter: none;
+	  }
+	  .login-card { grid-column: 1; padding: 16px; }
+	  .login-boundaries {
+	    grid-column: 2;
+	    border-left: 1px solid rgba(207,218,224,.78);
+	    border-radius: 0;
+	    padding: 2px 12px 2px 24px;
+	  }
+	}
+	@media (max-width: 700px) {
+	  body.login-body header { background: linear-gradient(180deg, rgba(255,255,255,.9), rgba(255,255,255,.54)); }
+	  body.login-body .bar {
+	    width: calc(100% - 28px);
+	    min-height: 58px;
+	    padding: 0;
+	  }
+	  body.login-body .brand-logo { width: 38px; }
+	  body.login-body .brand small { font-size: 10px; }
+	  body.login-body main {
+	    width: 100%;
+	    min-height: 100svh;
+	    padding: 0;
+	  }
+	  body.login-body main::after {
+	    background: linear-gradient(180deg, rgba(255,255,255,.02) 42%, rgba(235,244,243,.34) 100%);
+	  }
+	  .auth-login {
+	    width: 100%;
+	    min-height: 100svh;
+	    padding: 64px 10px 10px;
+	  }
+	  .auth-hero-stage {
+	    top: 56px;
+	    width: min(82vw, 420px);
+	    height: 33svh;
+	  }
+	  .login-dock {
+	    width: min(100%, 520px);
+	    justify-self: center;
+	    grid-template-columns: minmax(0, 1fr);
+	    gap: 0;
+	    border-radius: 18px;
+	    padding: 0;
+	    background: rgba(250,253,253,.8);
+	  }
+	  .login-card {
+	    grid-column: 1;
+	    gap: 9px;
+	    padding: 16px 16px 12px;
+	  }
+	  .login-card h1 { font-size: clamp(28px, 9vw, 36px); }
+	  .login-card .intro-copy { gap: 6px; }
+	  .login-card .login-summary { font-size: 12px; line-height: 1.38; }
+	  .login-card .button { min-height: 42px; }
+	  .login-role-note { font-size: 10px; line-height: 1.35; }
+	  .login-boundaries {
+	    grid-column: 1;
+	    border-top: 1px solid rgba(207,218,224,.78);
+	    border-left: 0;
+	    padding: 5px 16px 10px;
+	  }
+	  .login-boundary {
+	    grid-template-columns: 7px minmax(0, 1fr);
+	    gap: 9px;
+	    padding: 7px 0;
+	    font-size: 10px;
+	    line-height: 1.3;
+	  }
+	  .login-boundary i { width: 7px; height: 7px; }
+	}
+	@media (max-width: 700px) and (max-height: 650px) {
+	  .auth-login { padding-top: 60px; padding-bottom: 6px; }
+	  .auth-hero-stage { top: 52px; height: 31svh; }
+	  .login-card { padding: 12px 14px 9px; }
+	  .login-card h1 { font-size: 27px; }
+	  .login-card .login-summary { line-height: 1.3; }
+	  .login-card .button { min-height: 38px; padding-block: 7px; }
+	  .login-boundaries { padding: 3px 14px 7px; }
+	  .login-boundary { padding: 5px 0; line-height: 1.22; }
+	}
   </style>
 </head>
 <body{{ if .AuthScreen }} class="auth-body{{ if .LoginScreen }} login-body{{ end }}"{{ end }}>
@@ -4677,8 +4777,8 @@ func mustTemplates() *template.Template {
 	      <span>{{ range .Session.Roles }}{{ . }} {{ end }} identity values withheld</span>
 	    </div>
     <form method="post" action="/logout"><input type="hidden" name="csrf_token" value="{{ .CSRF }}"><button type="submit">Sign out</button></form>
-    {{ else if .AuthScreen }}
-    <span class="header-boundary">identity and secret values withheld</span>
+	    {{ else if .AuthScreen }}
+	    {{ if not .LoginScreen }}<span class="header-boundary">identity and secret values withheld</span>{{ end }}
     {{ else }}
     <a class="button primary" href="/login">Sign in</a>
     {{ end }}
@@ -5156,28 +5256,22 @@ func mustTemplates() *template.Template {
 	{{ define "login_landing" -}}
 {{ template "base_top" . }}
 <section class="auth-landing auth-login" id="command-center">
-  <div class="auth-rail back">
-    <strong>Looks back</strong>
-    Vault &amp; evidence: what exists, who touched it, never the value itself.
-  </div>
-  <div class="auth-rail forward">
-    <strong>Looks forward</strong>
-    Forge issues new credentials only after policy and approval.
-  </div>
   <div class="auth-hero-stage" aria-hidden="true"></div>
-  <div class="auth-card login-card">
-    <div class="intro-copy">
-      <div class="eyebrow">{{ .Mode }} · secure sign-in</div>
-      <h1>Open Janus</h1>
-      <p>Sign in with Zitadel to see the secret catalog, role-gated actions, and value-free evidence for this browser.</p>
+  <div class="login-dock">
+    <div class="auth-card login-card">
+      <div class="intro-copy">
+        <h1>Open Janus</h1>
+	        <p class="login-summary">Use your organization account to view credential metadata and the actions allowed by your Janus role.</p>
+      </div>
+      <div class="toolbar">
+        <a class="button primary" href="{{ .StartHref }}">Continue with Zitadel</a>
+      </div>
+      <p class="login-role-note">Janus checks your account against this instance's access policy after sign-in.</p>
     </div>
-    <div class="toolbar">
-      <a class="button primary" href="{{ .StartHref }}">Continue with Zitadel</a>
-    </div>
-    <div class="auth-trust" aria-label="Login safety boundary">
-      <span><i aria-hidden="true"></i>Janus never asks for or shows a secret value, in either direction.</span>
-      <span><i aria-hidden="true"></i>Identity stays out of access and evidence pages.</span>
-      <span><i aria-hidden="true"></i><small>Verified boundary: <code>value_returned=false</code></small></span>
+    <div class="login-boundaries" aria-label="What applies after sign-in">
+      <div class="login-boundary"><i aria-hidden="true"></i><span>Available actions depend on the Janus roles assigned to your account.</span></div>
+	      <div class="login-boundary"><i aria-hidden="true"></i><span>Janus does not offer reveal or copy-back for stored secret values.</span></div>
+	      <div class="login-boundary"><i aria-hidden="true"></i><span>Security-relevant actions are audited without recording secret values.</span></div>
     </div>
   </div>
 </section>
