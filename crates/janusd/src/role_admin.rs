@@ -1,7 +1,10 @@
 //! Closed local administration surface for durable role bindings.
 
 use std::env;
-use std::path::PathBuf;
+use std::fs;
+use std::io;
+use std::os::unix::fs::OpenOptionsExt;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
@@ -15,6 +18,13 @@ use janus_local::{
 };
 use serde_json::json;
 
+/// Exact out-of-band acknowledgement required to mint the first binding.
+const BOOTSTRAP_ACK_ENV: &str = "JANUS_ROLE_BOOTSTRAP_ACK";
+const BOOTSTRAP_ACK_VALUE: &str = "bootstrap-role-authorization";
+/// A bootstrap binding exists only long enough to issue reviewed bindings.
+/// Capping it here is what stops it becoming a durable hidden backdoor.
+const MAX_BOOTSTRAP_TTL: Duration = Duration::from_secs(3600);
+
 pub fn is_role_admin_command(args: &[String]) -> bool {
     matches!(
         args.first().map(String::as_str),
@@ -22,11 +32,29 @@ pub fn is_role_admin_command(args: &[String]) -> bool {
     )
 }
 
+/// `role-binding issue --bootstrap` — the one administration command that must
+/// work before any binding exists, because enforced authorization is otherwise
+/// gated on the registry it exists to populate (JANUS-416).
+pub fn is_role_bootstrap_request(args: &[String]) -> bool {
+    matches!(args.first().map(String::as_str), Some("role-binding"))
+        && matches!(args.get(1).map(String::as_str), Some("issue"))
+        && args
+            .iter()
+            .take_while(|arg| arg.as_str() != "--")
+            .any(|arg| arg == "--bootstrap")
+}
+
 pub fn run(
     args: &[String],
     principal: &PrincipalChain,
     authorization: Option<&LoadedRoleAuthorization>,
 ) -> Result<()> {
+    // Checked before the authorization unwrap on purpose: bootstrap is the
+    // only path that runs with no loaded authorization, and it fails closed
+    // on an acknowledgement, an empty registry, one role and a short TTL.
+    if is_role_bootstrap_request(args) {
+        return bootstrap_binding(&args[2..], principal);
+    }
     let authorization = authorization.context(
         "role administration is unavailable while role authorization is explicitly disabled",
     )?;
@@ -70,24 +98,168 @@ pub fn run(
 }
 
 struct IssueConfig {
-    principal_binding: String,
+    principal_binding: Option<String>,
     role: Role,
     target_binding: Option<String>,
     ttl: Duration,
     source_reference: String,
     reason: SafeLabel,
+    bootstrap: bool,
+}
+
+/// Exclusive one-shot guard so two concurrent bootstraps cannot both observe
+/// an empty registry and both mint authority.
+struct BootstrapLock {
+    path: PathBuf,
+}
+
+impl BootstrapLock {
+    fn acquire(dir: &Path) -> Result<Self> {
+        // Deliberately a sibling of the registry, never inside it: the registry
+        // is strict about its contents and rejects any entry that is not a
+        // binding record.
+        let parent = dir
+            .parent()
+            .context("role binding registry directory has no parent for the bootstrap lock")?;
+        let path = parent.join(".janus-role-bootstrap.lock");
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+        {
+            Ok(_) => Ok(Self { path }),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => anyhow::bail!(
+                "role binding bootstrap denied reason_code=bootstrap_lock_held value_returned=false"
+            ),
+            Err(error) => Err(error).context("role binding bootstrap lock unavailable"),
+        }
+    }
+}
+
+impl Drop for BootstrapLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+/// Mint the first `security_admin` binding so enforced authorization becomes
+/// reachable from a clean install. Every guard here is deliberate: the
+/// acknowledgement stops accidental invocation, the empty-registry check stops
+/// it being a standing backdoor, the role restriction keeps the minted
+/// authority to exactly what can issue reviewed bindings, and the TTL cap
+/// makes the result expire rather than persist.
+///
+/// The self-grant separation check that `issue_binding` applies is
+/// deliberately NOT applied: bootstrap binds the operator running it, which is
+/// the entire point, and there is by definition no other principal to ask.
+fn bootstrap_binding(args: &[String], actor: &PrincipalChain) -> Result<()> {
+    let config = parse_issue(args)?;
+    if env::var(BOOTSTRAP_ACK_ENV).unwrap_or_default() != BOOTSTRAP_ACK_VALUE {
+        anyhow::bail!(
+            "role binding bootstrap denied reason_code=bootstrap_acknowledgement_missing value_returned=false"
+        );
+    }
+    // Bootstrap binds the operator running it and nobody else. Naming another
+    // principal would be a footgun with no recovery: the binding key contains
+    // an opaque scope reference the operator cannot compute by hand, so a
+    // wrong value would consume the one-shot empty-registry window and lock
+    // the deployment out permanently.
+    if config.principal_binding.is_some() {
+        anyhow::bail!(
+            "role binding bootstrap denied reason_code=bootstrap_principal_not_selectable value_returned=false"
+        );
+    }
+    if config.role != Role::SecurityAdmin {
+        anyhow::bail!(
+            "role binding bootstrap denied reason_code=bootstrap_role_forbidden value_returned=false"
+        );
+    }
+    if config.ttl > MAX_BOOTSTRAP_TTL {
+        anyhow::bail!(
+            "role binding bootstrap denied reason_code=bootstrap_validity_invalid value_returned=false"
+        );
+    }
+    let registry = registry()?;
+    let _lock = BootstrapLock::acquire(registry.dir())?;
+    if !registry.bindings()?.is_empty() {
+        anyhow::bail!(
+            "role binding bootstrap denied reason_code=bootstrap_registry_not_empty value_returned=false"
+        );
+    }
+    let now = SystemTime::now();
+    let binding = RoleBinding::issue(
+        actor.binding_key(),
+        actor.scope.clone(),
+        config.role,
+        config.target_binding,
+        now,
+        now.checked_add(config.ttl)
+            .context("role binding expiry overflow")?,
+        RoleBindingSource::new(
+            RoleBindingSourceKind::UnsafeBootstrap,
+            &config.source_reference,
+        )?,
+    )?;
+    let mut audit = role_audit()?;
+    audit.record(
+        AuditEvent::new(
+            AuditAction::RoleAssign,
+            AuditOutcome::Allowed,
+            "role_binding_bootstrapped",
+            Severity::High,
+            None,
+            actor,
+        )
+        .with_evidence(SafeLabel::new(format!(
+            "{} {} unsafe_bootstrap {}",
+            binding.id().as_str(),
+            binding.role().as_str(),
+            config.reason.as_str()
+        ))?),
+    )?;
+    registry.store(&binding)?;
+    // A bootstrap that raced another writer must be loud, not silent.
+    if registry.bindings()?.len() != 1 {
+        anyhow::bail!(
+            "role binding bootstrap denied reason_code=bootstrap_registry_raced value_returned=false"
+        );
+    }
+    println!(
+        "{}",
+        json!({
+            "binding_id": binding.id().as_str(),
+            "role": binding.role().as_str(),
+            "scope_ref": binding.scope().as_str(),
+            "source_kind": RoleBindingSourceKind::UnsafeBootstrap.as_str(),
+            "expires_at_unix_secs": unix_secs(binding.expires_at()),
+            "status": "active",
+            "value_returned": false
+        })
+    );
+    Ok(())
 }
 
 fn issue_binding(args: &[String], actor: &PrincipalChain) -> Result<()> {
     let config = parse_issue(args)?;
-    if config.principal_binding == actor.binding_key() {
+    // Defence in depth: a bootstrap must never reach the reviewed issue path,
+    // which would skip every bootstrap guard while claiming LocalReviewed.
+    if config.bootstrap {
+        anyhow::bail!(
+            "role binding issue denied reason_code=bootstrap_route_invalid value_returned=false"
+        );
+    }
+    let principal_binding = config
+        .principal_binding
+        .context("--principal-binding is required")?;
+    if principal_binding == actor.binding_key() {
         anyhow::bail!(
             "role binding denied reason_code=separation_self_role_grant value_returned=false"
         );
     }
     let now = SystemTime::now();
     let binding = RoleBinding::issue(
-        config.principal_binding,
+        principal_binding,
         actor.scope.clone(),
         config.role,
         config.target_binding,
@@ -215,6 +387,7 @@ fn parse_issue(args: &[String]) -> Result<IssueConfig> {
     let mut expires_in_seconds = None;
     let mut source_reference = None;
     let mut reason = None;
+    let mut bootstrap = false;
     let mut args = args.iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -250,6 +423,12 @@ fn parse_issue(args: &[String]) -> Result<IssueConfig> {
                 SafeLabel::new(required(arg, args.next())?)?,
                 arg,
             )?,
+            "--bootstrap" => {
+                if bootstrap {
+                    anyhow::bail!("--bootstrap may only be provided once");
+                }
+                bootstrap = true;
+            }
             _ => anyhow::bail!(
                 "role binding issue arguments invalid reason_code=role_admin_args_invalid value_returned=false"
             ),
@@ -262,12 +441,13 @@ fn parse_issue(args: &[String]) -> Result<IssueConfig> {
         );
     }
     Ok(IssueConfig {
-        principal_binding: principal_binding.context("--principal-binding is required")?,
+        principal_binding,
         role: role.context("--role is required")?,
         target_binding,
         ttl,
         source_reference: source_reference.context("--source-reference is required")?,
         reason: reason.context("--reason is required")?,
+        bootstrap,
     })
 }
 
@@ -368,8 +548,71 @@ mod tests {
             "on call".to_string(),
         ];
         assert_eq!(parse_issue(&args).unwrap().role, Role::Viewer);
+        assert!(!parse_issue(&args).unwrap().bootstrap);
         let mut attacked = args;
         attacked.extend(["--claim-role".to_string(), "owner".to_string()]);
         assert!(parse_issue(&attacked).is_err());
+    }
+
+    fn bootstrap_args() -> Vec<String> {
+        [
+            "role-binding",
+            "issue",
+            "--bootstrap",
+            "--role",
+            "security_admin",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect()
+    }
+
+    #[test]
+    fn bootstrap_is_detected_only_on_role_binding_issue() {
+        assert!(is_role_bootstrap_request(&bootstrap_args()));
+        for denied in [
+            vec!["role-binding", "list"],
+            vec!["role-binding", "revoke", "--bootstrap"],
+            vec!["authorization-policy", "status", "--bootstrap"],
+            vec!["role-binding", "issue"],
+        ] {
+            let args = denied.into_iter().map(str::to_string).collect::<Vec<_>>();
+            assert!(!is_role_bootstrap_request(&args), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn bootstrap_flag_after_terminator_is_not_a_bootstrap_request() {
+        let args = ["role-binding", "issue", "--", "--bootstrap"]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        assert!(!is_role_bootstrap_request(&args));
+    }
+
+    #[test]
+    fn bootstrap_flag_parses_once_and_is_not_repeatable() {
+        let args = [
+            "--bootstrap",
+            "--role",
+            "security_admin",
+            "--expires-in-seconds",
+            "60",
+            "--source-reference",
+            "review-1",
+            "--reason",
+            "bootstrap",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+        let config = parse_issue(&args).unwrap();
+        assert!(config.bootstrap);
+        // Bootstrap binds the invoking principal, so none may be named.
+        assert!(config.principal_binding.is_none());
+
+        let mut repeated = args;
+        repeated.push("--bootstrap".to_string());
+        assert!(parse_issue(&repeated).is_err());
     }
 }

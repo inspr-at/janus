@@ -110,7 +110,11 @@ pub async fn run_for_plane(selected_plane: Option<RuntimePlane>) -> Result<()> {
     enforce_process_plane(selected_plane, action, &principal)?;
     enforce_cli_argument_budget(action, &args)?;
     let emergency_activation = requested_break_glass_activation(&args, action)?;
-    let role_authorization = if emergency_activation.is_some() {
+    // Role authorization is gated on the binding registry, so the command that
+    // populates an empty registry cannot itself require a binding (JANUS-416).
+    // Its own guards live in role_admin::bootstrap_binding and fail closed.
+    let role_bootstrap = role_admin::is_role_bootstrap_request(&args);
+    let role_authorization = if emergency_activation.is_some() || role_bootstrap {
         None
     } else {
         enforce_runtime_role_from_env(action, &principal, None, &[], SystemTime::now())
