@@ -57,7 +57,7 @@ if [ -z "$PROJECT_ID" ] || [ "$PROJECT_ID" = "null" ]; then
   PROJECT_ID="$(curl -fsS "${AUTH[@]}" -X POST "${ZITADEL_BASE}/management/v1/projects" \
     -d "$(jq -n --arg n "$PROJECT_NAME" '{
       name: $n,
-      projectRoleAssertion: false,
+      projectRoleAssertion: true,
       projectRoleCheck: false,
       hasProjectCheck: false,
       privateLabelingSetting: "PRIVATE_LABELING_SETTING_UNSPECIFIED"
@@ -81,7 +81,7 @@ APP_PAYLOAD="$(jq -n \
     devMode: false,
     accessTokenType: "OIDC_TOKEN_TYPE_BEARER",
     accessTokenRoleAssertion: false,
-    idTokenRoleAssertion: false,
+    idTokenRoleAssertion: true,
     idTokenUserinfoAssertion: true,
     clockSkew: "0s",
     additionalOrigins: []
