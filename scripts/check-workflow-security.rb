@@ -173,6 +173,10 @@ def validate(workflows)
     "verify published engine digest and mode receipts",
     "upload mode-specific admission receipts"
   )
+  rust_timing = job!(workflows.fetch(:rust), "release-timing")
+  timing = active_step!(rust_timing, "measure and enforce release latency")
+  command!(timing, "for attempt in {1..6}")
+  command!(timing, 'test "${image_conclusion}" = success')
 
   gitleaks = job!(workflows.fetch(:security), "gitleaks")
   gitleaks_verify = active_step!(gitleaks, "verify installed scanner version")
