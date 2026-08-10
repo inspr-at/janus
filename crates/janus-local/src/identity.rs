@@ -1066,7 +1066,11 @@ mod tests {
             )
             .unwrap();
         assert_eq!(registry.resolve_local_uid(501).unwrap().subject_ref, first);
-        assert!(!format!("{:?}", registry.list().unwrap()).contains("501"));
+        let public_debug = format!("{:?}", registry.list().unwrap());
+        assert!(!public_debug.contains("local_uid"));
+        let private: SubjectEnrollmentV1 =
+            read_private_json(&registry.enrollment_path(&first), "subject enrollment").unwrap();
+        assert!(format!("{private:?}").contains("local_uid: \"<redacted>\""));
         assert!(registry
             .enroll_local(
                 501,
