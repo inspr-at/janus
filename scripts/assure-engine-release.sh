@@ -44,6 +44,9 @@ export JANUS_PRODUCT_MODE="self_hosted"
 echo "==> janus engine release assurance: runtime process-plane boundary smoke"
 scripts/smoke-janusd-planes.sh
 
+echo "==> janus engine release assurance: authenticated actor identity-shadow smoke"
+JANUSD_IDENTITY_BIN="${repo}/target/debug/janusd-identityd" scripts/smoke-janusd-identity.sh
+
 echo "==> janus engine release assurance: local Warden MCP smoke"
 python3 scripts/smoke-warden-mcp.py --bin target/debug/janus-warden
 

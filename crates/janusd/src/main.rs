@@ -231,6 +231,51 @@ pub async fn run_dynamic_transport_service() -> Result<()> {
     lifecycle_entry::dynamic_transport::run_from_env().await
 }
 
+/// Run the private identity-shadow boundary. It authenticates only the kernel
+/// peer on its connected Unix socket and cannot authorize runtime actions.
+pub async fn run_identity_shadow_service() -> Result<()> {
+    let socket = env::var("JANUS_IDENTITY_SOCKET").context("JANUS_IDENTITY_SOCKET is required")?;
+    let registry_root = env::var("JANUS_IDENTITY_REGISTRY_ROOT")
+        .context("JANUS_IDENTITY_REGISTRY_ROOT is required")?;
+    let signing_key_file = env::var("JANUS_IDENTITY_SIGNING_KEY_FILE")
+        .context("JANUS_IDENTITY_SIGNING_KEY_FILE is required")?;
+    let manifest_file = env::var("JANUS_IDENTITY_TRANSPORT_MANIFEST")
+        .context("JANUS_IDENTITY_TRANSPORT_MANIFEST is required")?;
+    let trust_domain = env::var("JANUS_IDENTITY_TRUST_DOMAIN")
+        .context("JANUS_IDENTITY_TRUST_DOMAIN is required")?;
+    let audience =
+        env::var("JANUS_IDENTITY_AUDIENCE").context("JANUS_IDENTITY_AUDIENCE is required")?;
+    let release_digest =
+        env::var("JANUS_RELEASE_DIGEST").context("JANUS_RELEASE_DIGEST is required")?;
+    let ttl = env::var("JANUS_IDENTITY_ASSERTION_TTL_SECONDS")
+        .unwrap_or_else(|_| "60".to_string())
+        .parse::<u64>()
+        .context("JANUS_IDENTITY_ASSERTION_TTL_SECONDS is invalid")?;
+    let manifest_text =
+        fs::read_to_string(&manifest_file).context("identity transport manifest unavailable")?;
+    let manifest = janus_core::IdentityTransportManifestV1::parse_json(&manifest_text)
+        .context("identity transport manifest denied")?;
+    let signing_key =
+        janus_local::load_or_create_identity_signing_key(Path::new(&signing_key_file))
+            .context("identity signing key unavailable")?;
+    let registry = janus_local::FileSubjectRegistry::new(registry_root, trust_domain);
+    let broker = janus_local::IdentityShadowBroker::new(
+        registry,
+        manifest,
+        signing_key,
+        &audience,
+        release_digest,
+        Duration::from_secs(ttl),
+    )
+    .context("identity broker configuration denied")?;
+    let listener = janus_local::bind_private_identity_socket(Path::new(&socket))
+        .context("identity broker socket unavailable")?;
+    broker
+        .serve(listener)
+        .await
+        .context("identity broker failed")
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Command {
     Help,

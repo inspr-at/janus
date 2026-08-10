@@ -47,6 +47,11 @@ name = "janusd-dynamic-transportd"
 path = "src/bin/janusd-dynamic-transportd.rs"
 test = false
 
+[[bin]]
+name = "janusd-identityd"
+path = "src/bin/janusd-identityd.rs"
+test = false
+
 [dependencies]
 anyhow = "=1.0.103"
 async-trait = "0.1"

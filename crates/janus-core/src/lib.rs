@@ -13,6 +13,7 @@ pub mod broker;
 pub mod consumer;
 pub mod delegation;
 pub mod error;
+pub mod identity;
 pub mod managed_service;
 pub mod manifest;
 pub mod metadata;
@@ -58,6 +59,13 @@ pub use delegation::{
     DelegationRevocation, DelegationRevocationSnapshotV1, DelegationScope, DelegationStatus,
 };
 pub use error::{JanusError, JanusResult};
+pub use identity::{
+    runtime_endpoint_catalog_fingerprint, ActorObservationV1, ActorSubjectClass, ActorSubjectRef,
+    IdentityBindingMigrationManifestV1, IdentityBindingMigrationMapping, IdentitySurfacePolicy,
+    IdentitySurfaceTransport, IdentityTransportManifestV1, TrustAdapterKind,
+    ACTOR_OBSERVATION_SCHEMA, IDENTITY_BINDING_MIGRATION_SCHEMA,
+    IDENTITY_TRANSPORT_MANIFEST_SCHEMA, MAX_ACTOR_ASSERTION_TTL,
+};
 pub use managed_service::{
     managed_contract_version_compatible, parse_managed_dynamic_environment_contract_fixture,
     parse_managed_service_contract_fixture, ManagedConsumerKind, ManagedDeclarationFingerprint,

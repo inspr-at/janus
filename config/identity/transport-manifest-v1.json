@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "posture": "identity_shadow_only",
+  "runtime_endpoint_catalog_fingerprint": "sha256:ad5c76a2aa9a570001cd4b5218b6e038b0b84c8fb46b6889a23cd3a1db32df36",
+  "remote_authorizing_transports": [],
+  "surfaces": [
+    { "surface": "janus-claude-hook", "transport": "process_argv", "trust_adapter": "local_peer" },
+    { "surface": "janus-warden", "transport": "mcp_stdio", "trust_adapter": "local_peer" },
+    { "surface": "janusd-admin", "transport": "process_argv", "trust_adapter": "local_peer" },
+    { "surface": "janusd-dynamic-custodyd", "transport": "unix_socket", "trust_adapter": "local_peer" },
+    { "surface": "janusd-dynamic-deliveryd", "transport": "unix_socket", "trust_adapter": "local_peer" },
+    { "surface": "janusd-dynamic-transportd", "transport": "unix_socket", "trust_adapter": "local_peer" },
+    { "surface": "janusd-identityd", "transport": "unix_socket", "trust_adapter": "local_peer" },
+    { "surface": "janusd-use", "transport": "process_argv", "trust_adapter": "local_peer" },
+    { "surface": "janusd-web-transactiond", "transport": "unix_socket", "trust_adapter": "local_peer" }
+  ]
+}

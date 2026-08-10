@@ -1,8 +1,10 @@
 # Authenticated principals and durable duty history
 
-Status: accepted design contract for JANUS-425. This document defines the
-prerequisites for activating Janus's compiled separation-of-duties matrix. It
-does not claim that the design is implemented.
+Status: accepted design contract for JANUS-425. JANUS-427 implements the local
+authenticated-actor identity-shadow foundation described in the
+[identity-shadow runbook](identity-shadow-runbook.md); the durable duty journal,
+authoritative operation lineage, runtime cutover, and enforced separation claim
+remain unimplemented.
 
 ## Decision
 

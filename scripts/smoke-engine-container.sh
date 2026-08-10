@@ -42,14 +42,14 @@ try:
 finally:
     subprocess.run(["docker", "rm", "-f", container], check=False, capture_output=True)
 
-for binary in ("janusd", "janusd-use", "janusd-admin", "janusd-web-transactiond", "janusd-dynamic-custodyd", "janusd-dynamic-deliveryd", "janusd-dynamic-transportd", "janus-host-executor", "janus-warden"):
+for binary in ("janusd", "janusd-use", "janusd-admin", "janusd-web-transactiond", "janusd-dynamic-custodyd", "janusd-dynamic-deliveryd", "janusd-dynamic-transportd", "janusd-identityd", "janus-host-executor", "janus-warden"):
     path = f"/usr/local/bin/{binary}"
     member = members.get(path)
     if member is None or not member.isfile() or member.mode & 0o111 == 0:
         raise SystemExit(f"missing static executable: {path}")
     if (member.uid, member.gid) != (65532, 65532):
         raise SystemExit(f"wrong binary ownership: {path}")
-for path in ("/run/janus/age", "/run/janus/permits", "/tmp", "/var/lib/janus/secrets"):
+for path in ("/run/janus/age", "/run/janus/identity", "/run/janus/permits", "/tmp", "/var/lib/janus/identity/subjects", "/var/lib/janus/secrets"):
     member = members.get(path)
     if member is None or not member.isdir() or (member.uid, member.gid) != (65532, 65532):
         raise SystemExit(f"missing private state mount point: {path}")
@@ -59,8 +59,11 @@ for path in ("/bin/sh", "/bin/bash", "/usr/bin/sh", "/usr/bin/env"):
 policy = members.get("/etc/janus/release-channels-v1.json")
 if policy is None or not policy.isfile() or policy.mode & 0o022:
     raise SystemExit("release policy is absent or group/world writable")
+identity_manifest = members.get("/etc/janus/identity-transport-manifest-v1.json")
+if identity_manifest is None or not identity_manifest.isfile() or identity_manifest.mode & 0o022:
+    raise SystemExit("identity transport manifest is absent or group/world writable")
 
-print("engine image filesystem ok user=65532:65532 binaries=9 runtime_packages=0 shell=none")
+print("engine image filesystem ok user=65532:65532 binaries=10 runtime_packages=0 shell=none")
 PY
 
 runtime=(
@@ -72,8 +75,10 @@ runtime=(
   --user 65532:65532
   --tmpfs "/tmp:rw,noexec,nosuid,nodev,uid=65532,gid=65532,mode=0700"
   --tmpfs "/run/janus/age:rw,noexec,nosuid,nodev,uid=65532,gid=65532,mode=0700"
+  --tmpfs "/run/janus/identity:rw,noexec,nosuid,nodev,uid=65532,gid=65532,mode=0700"
   --tmpfs "/run/janus/permits:rw,noexec,nosuid,nodev,uid=65532,gid=65532,mode=0700"
   --tmpfs "/var/lib/janus/secrets:rw,noexec,nosuid,nodev,uid=65532,gid=65532,mode=0700"
+  --tmpfs "/var/lib/janus/identity:rw,noexec,nosuid,nodev,uid=65532,gid=65532,mode=0700"
 )
 for binary in janusd janusd-use janusd-admin; do
   "${runtime[@]}" --entrypoint "/usr/local/bin/${binary}" "${image}" --help >/dev/null
@@ -96,6 +101,11 @@ fi
 if "${runtime[@]}" --entrypoint /usr/local/bin/janusd-dynamic-transportd \
   "${image}" --help >/dev/null 2>&1; then
   echo "janusd-dynamic-transportd unexpectedly accepted argv" >&2
+  exit 1
+fi
+if "${runtime[@]}" --entrypoint /usr/local/bin/janusd-identityd \
+  "${image}" --help >/dev/null 2>&1; then
+  echo "janusd-identityd unexpectedly accepted argv" >&2
   exit 1
 fi
 if "${runtime[@]}" --entrypoint /usr/local/bin/janus-host-executor \
