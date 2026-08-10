@@ -126,7 +126,9 @@ operator holding several pre-bound identities can satisfy all four checks.
 Treat separation of duties as an accountability aid, not as a control that
 survives a determined single operator. Closing that gap requires authenticated
 principals and duty history derived from recorded evidence rather than caller
-assertion.
+assertion. The accepted trust, persistence, migration, and verification
+contract for that future enforcement is
+[Authenticated principals and durable duty history](authenticated-principal-duty-history.md).
 
 Decisions and their JSON/debug representations contain only closed vocabulary,
 opaque references/fingerprints, and stable reason codes. Every checked action
