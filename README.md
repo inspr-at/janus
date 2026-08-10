@@ -105,6 +105,13 @@ Janus reads only the project-ID-specific Zitadel role claim when the deployment
 sets `OIDC_PROJECT_ID`. The legacy unscoped claim is a migration fallback only
 for environments that have not yet configured an exact project ID.
 
+Zitadel must enable `projectRoleAssertion` on the Janus project and
+`idTokenRoleAssertion` on its OIDC application. Janus authorizes from the ID
+token, so disabling either setting produces a valid sign-in without the Janus
+role claim and sends even assigned users to `No Janus access yet`.
+`projectRoleCheck` and `hasProjectCheck` remain disabled so unbound invited
+users can authenticate and receive that friendly, local denial.
+
 The deployment maps these Zitadel project-role keys:
 
 | Zitadel role key | Janus role |
