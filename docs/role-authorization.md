@@ -1,5 +1,11 @@
 # Role authorization contract
 
+The current role engine still consumes technical `PrincipalChain` bindings and
+must not be described as authenticated-person separation. The local
+[authenticated actor identity-shadow foundation](identity-shadow-runbook.md)
+now derives accountable subjects from kernel-connected peers, but it is not
+wired into authorizing role or duty decisions in this slice.
+
 Janus authorization is default-deny. Roles come only from a checked binding
 source; a role or claim supplied by the caller is never authority. The shared,
 versioned matrix is `config/authorization/role-matrix-v1.json`, and

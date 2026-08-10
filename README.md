@@ -12,10 +12,10 @@ agents - without making raw credentials part of prompts, command arguments,
 logs, or application code.
 
 [![License: AGPL-3.0-only](https://img.shields.io/badge/license-AGPL--3.0--only-1f7a72.svg)](LICENSE)
-[![Rust engine](https://img.shields.io/badge/Rust_engine-v0.1.21-cb7c28.svg)](https://github.com/inspr-at/janus/releases/tag/rust-engine-v0.1.21)
+[![Rust engine](https://img.shields.io/badge/Rust_engine-v0.1.22-cb7c28.svg)](https://github.com/inspr-at/janus/releases/tag/rust-engine-v0.1.22)
 
 [Product site](https://janus.inspr.at) ·
-[Rust engine v0.1.21](https://github.com/inspr-at/janus/releases/tag/rust-engine-v0.1.21) ·
+[Rust engine v0.1.22](https://github.com/inspr-at/janus/releases/tag/rust-engine-v0.1.22) ·
 [INSPR](https://www.inspr.at)
 
 ## What Janus does
@@ -45,6 +45,9 @@ logs, or application code.
 - **Split process planes** - `janusd-use` can consume permits but cannot
   administer Janus; `janusd-admin` can administer Janus but cannot consume a
   permit or render a secret-bearing output.
+- **Authenticated actor shadow** - `janusd-identityd` derives an opaque subject
+  only from the kernel-connected Unix peer and emits signed, nonce-bound,
+  explicitly non-authorizing observations for migration evidence.
 
 ## The boundary that matters
 
@@ -75,7 +78,7 @@ Janus has two layers with different histories:
 
 | Layer | Role | Language | Status |
 |---|---|---|---|
-| **Rust engine** | Secret store contracts, Warden, permits, approved-use execution, rotation, lifecycle, and operator CLI | Rust | Active and released. Current tag: `rust-engine-v0.1.21`. |
+| **Rust engine** | Secret store contracts, Warden, permits, approved-use execution, rotation, lifecycle, and operator CLI | Rust | Active and released. Current tag: `rust-engine-v0.1.22`. |
 | **Go envelope** | Existing governance, audit, evidence, and oversight surface | Go | Shipped, operational, and transitional. New core capability work lands in Rust. |
 
 The Rust engine is no longer a skeleton. Core execution paths ship with unit,
@@ -214,8 +217,8 @@ nix build .#janus-engine
 
 The package installs `janusd-use`, `janusd-admin`,
 `janusd-web-transactiond`, `janusd-dynamic-custodyd`,
-`janusd-dynamic-deliveryd`, `janusd-dynamic-transportd`, `janus-host-executor`,
-`janus-managed-host-agent`, `janus-warden`, and the
+`janusd-dynamic-deliveryd`, `janusd-dynamic-transportd`, `janusd-identityd`,
+`janus-host-executor`, `janus-managed-host-agent`, `janus-warden`, and the
 non-operational `janusd` migration helper for supported Linux systems. The
 private daemons have no CLI operations and accept only their reviewed local
 socket protocols; the legacy helper cannot run either plane's commands.
@@ -236,6 +239,8 @@ It exercises:
 - the bounded security-property gate and its value-free property replay receipt;
 - a real reference-only Warden MCP session;
 - the hard use/admin process boundary and retired mixed entry point;
+- the private kernel-peer identity-shadow broker, caller-identity rejection,
+  fresh request nonces, and authority-free output;
 - the approval-to-env-file operator flow;
 - create-only dynamic host acceptance, deterministic private aggregate
   materialization, exact pre-approved service reload, fresh health-gated active
@@ -260,7 +265,7 @@ devenv shell -- env JANUS_SECURITY_IMAGE=janus-engine:smoke ./scripts/run-securi
 
 The container smoke builds the engine image and requires a working Docker CLI
 and daemon. It verifies the scratch filesystem (no runtime package database or
-shell), exact numeric non-root identity, four installed static binaries,
+shell), exact numeric non-root identity, ten installed static binaries,
 read-only/capability-free/no-new-privileges/network-isolated execution, and
 value-free Warden MCP behavior. The security gate adds pinned Cargo Audit,
 Gitleaks, staticcheck, govulncheck, immutable-base verification, and Trivy. The

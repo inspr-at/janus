@@ -45,6 +45,7 @@
               install -Dm755 "$release_dir/janusd-dynamic-custodyd" "$out/bin/janusd-dynamic-custodyd"
               install -Dm755 "$release_dir/janusd-dynamic-deliveryd" "$out/bin/janusd-dynamic-deliveryd"
               install -Dm755 "$release_dir/janusd-dynamic-transportd" "$out/bin/janusd-dynamic-transportd"
+              install -Dm755 "$release_dir/janusd-identityd" "$out/bin/janusd-identityd"
               install -Dm755 "$release_dir/janus-host-executor" "$out/bin/janus-host-executor"
               install -Dm755 "$release_dir/janus-managed-host-agent" "$out/bin/janus-managed-host-agent"
               install -Dm755 "$release_dir/janus-warden" "$out/bin/janus-warden"
