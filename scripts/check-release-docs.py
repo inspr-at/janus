@@ -61,6 +61,8 @@ def main() -> int:
             "rust-trivy-summary.json",
             "rust-engine-admission.json",
             "rust-engine-admission-enterprise.json",
+            "rust-release-platforms.json",
+            "rust-release-timing.json",
             "janus-property-replay.json",
         ):
             if asset not in rust_workflow:
@@ -80,6 +82,18 @@ def main() -> int:
         ):
             if binding not in admission:
                 fail(f"release admission docs omit required evidence: {binding}")
+        latency = (ROOT / "docs/release-latency.md").read_text()
+        for required in (
+            "ubuntu-24.04-arm",
+            "rust-engine-linux-amd64",
+            "rust-engine-linux-arm64",
+            "900-second",
+            "rust-release-platforms.json",
+            "rust-release-timing.json",
+            "replace it with QEMU",
+        ):
+            if required not in latency:
+                fail(f"native release documentation is missing: {required}")
         if "Deploy exactly the receipt matching `JANUS_PRODUCT_MODE`" not in admission:
             fail("release admission docs omit the runtime-mode receipt boundary")
         for replay_contract in (

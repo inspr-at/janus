@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "budget_seconds": 900,
+  "baseline": {
+    "tag": "rust-engine-v0.1.24",
+    "run_id": "31397352199",
+    "total_seconds": 5410,
+    "check_seconds": 1031,
+    "qemu_multiarch_build_seconds": 4299
+  },
+  "apple_silicon_preflight": {
+    "runner": "Colima aarch64, 2 CPU, 2 GiB",
+    "cold_seconds": 233.13,
+    "warm_seconds": 0.23
+  }
+}

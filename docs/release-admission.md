@@ -17,7 +17,7 @@ repository changes and increment `policy_version` when their meaning changes.
 Admission runs outside the image being admitted:
 
 ```bash
-JANUS_ENGINE_RELEASE_TAG="rust-engine-v0.1.24" # replace with the reviewed release
+JANUS_ENGINE_RELEASE_TAG="rust-engine-v0.1.25" # replace with the reviewed release
 scripts/admit-engine-release.sh \
   --policy config/release-channels/v1.json \
   --channel stable \
@@ -119,11 +119,13 @@ the resulting receipt beside the corresponding Go or Rust release assets.
 
 Before changing release actions or publishing a planned release, run the
 manual **release-tools-rehearsal** workflow. It exercises the exact shared
-QEMU, Buildx, registry-login, metadata, Trivy, and Cosign pins without pushing
-an image, creating a release, requesting an OIDC identity, or retaining an
-artifact. A green rehearsal proves tool/runtime compatibility; it does not
-replace the protected-main ancestry, digest scanning, signing, attestation, or
-admission checks performed by a real release.
+Buildx, registry-login, metadata, Trivy, and Cosign pins on native amd64 and
+ARM64 GitHub-hosted runners without pushing an image, creating a release,
+requesting an OIDC identity, or retaining an artifact. A green rehearsal proves
+tool/runtime compatibility; it does not replace the protected-main ancestry,
+digest scanning, signing, attestation, or admission checks performed by a real
+release. The Rust release architecture, cache boundaries, latency budget, and
+fallback procedure are documented in [Native Rust releases](release-latency.md).
 
 To revoke an artifact, add its exact digest to `revoked_digests`, increment the
 policy version, review and deploy the policy, and regenerate admission receipts

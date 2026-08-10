@@ -76,8 +76,15 @@ def validate_workflows() -> None:
     for workflow in (rust, go):
         require("scripts/test-gitleaks.sh" in workflow, "release workflow lacks Gitleaks")
         require("0.72.0" in workflow, "release workflow lacks pinned Trivy")
-        require('steps.build.outputs.digest' in workflow, "release workflow does not scan exact digest")
         require("scripts/check-security-gates.py" in workflow, "scanner-policy gate is not wired")
+    require(
+        'steps.manifest.outputs.digest' in rust,
+        "Rust release workflow does not scan the assembled exact digest",
+    )
+    require(
+        'steps.build.outputs.digest' in go,
+        "Go release workflow does not scan exact digest",
+    )
     require("scripts/check-rust-audit.py" in rust and "0.22.2" in rust, "Rust audit gate is not wired")
     require(
         "python3 scripts/check-release-mode-receipts.py --self-test" in rust,
