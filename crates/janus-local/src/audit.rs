@@ -156,6 +156,14 @@ impl JsonlAuditSink {
     }
 }
 
+impl Drop for JsonlAuditSink {
+    fn drop(&mut self) {
+        if let Some(lock_file) = self._lock_file.as_ref() {
+            let _ = fs2::FileExt::unlock(lock_file);
+        }
+    }
+}
+
 impl AuditSink for JsonlAuditSink {
     fn record(&mut self, mut event: AuditEvent) -> JanusResult<()> {
         if self.poisoned {
@@ -522,8 +530,10 @@ mod tests {
 
         #[test]
         fn security_property_audit_jsonl_recovers_only_unterminated_tail(
-            tail in proptest::collection::vec(1_u8..=255, 1..=256)
-                .prop_filter("tail must not contain a record delimiter", |tail| !tail.contains(&b'\n')),
+            tail in proptest::collection::vec(
+                prop_oneof![1_u8..=9, 11_u8..=255],
+                1..=256,
+            ),
         ) {
             let dir = tempdir().unwrap();
             let path = dir.path().join("audit/events.jsonl");
