@@ -158,7 +158,9 @@ policy = {
     "maximum_records": 1024,
     "maximum_bytes": 1048576,
     "preflight_max_age_seconds": 60,
-    "quarantine_grace_seconds": 1,
+    # Retention timestamps use whole seconds. A one-second grace can therefore
+    # expire while the immediate denial probe crosses a wall-clock boundary.
+    "quarantine_grace_seconds": 3,
     "evidence_max_age_seconds": 86400,
 }
 pathlib.Path(policy_path).write_text(json.dumps(policy) + "\n", encoding="utf-8")
@@ -205,7 +207,7 @@ run_retention quarantine quarantined
 if "${janusd_admin_bin}" retention purge --policy "${policy}" >>"${log}" 2>&1; then
   fail "purge ignored its reversible grace"
 fi
-sleep 2
+sleep 4
 run_retention purge completed
 run_retention status completed
 [ -e "${evidence}" ] || fail "retention completion evidence is missing"
