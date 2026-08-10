@@ -428,7 +428,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" > rust-run.json
-          gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/jobs?per_page=100" > rust-jobs.json
+          image_conclusion=""
+          for attempt in {1..6}; do
+            gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/jobs?per_page=100" > rust-jobs.json
+            image_conclusion="$(jq -r '.jobs[] | select(.name == "image") | .conclusion' rust-jobs.json)"
+            [[ "${image_conclusion}" = success ]] && break
+            sleep 5
+          done
+          test "${image_conclusion}" = success
           timing_status=0
           python3 scripts/report-rust-release-timing.py --run rust-run.json --jobs rust-jobs.json --output rust-release-timing.json --summary rust-release-timing.md --budget-seconds 900 || timing_status=$?
           cat rust-release-timing.md >> "${GITHUB_STEP_SUMMARY}"
