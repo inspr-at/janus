@@ -4,7 +4,9 @@ set -euo pipefail
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 image="${JANUS_ENGINE_SMOKE_IMAGE:-janus-engine:smoke}"
 
-docker build -f "${repo}/Dockerfile.engine" -t "${image}" "${repo}"
+if [[ "${JANUS_ENGINE_SMOKE_SKIP_BUILD:-false}" != true ]]; then
+  docker build -f "${repo}/Dockerfile.engine" -t "${image}" "${repo}"
+fi
 
 python3 - "${image}" <<'PY'
 import json

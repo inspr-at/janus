@@ -104,23 +104,46 @@ def validate(workflows)
   before!(go_image, "verify protected-main release ancestry", "scan exact published candidate digest")
   before!(go_image, "verify installed release scanner version", "scan exact published candidate digest")
 
-  rust_check = job!(workflows.fetch(:rust), "check")
-  rust_dependency_verify = active_step!(rust_check, "verify installed dependency scanner versions")
+  rust_fast = job!(workflows.fetch(:rust), "check-fast")
+  rust_dependency_verify = active_step!(rust_fast, "verify installed dependency scanner versions")
   command!(rust_dependency_verify, "--tool cargo-audit --tool gitleaks")
-  active_step!(rust_check, "release security policy and negative fixtures")
-  active_step!(rust_check, "engine release assurance gate")
-  rust_image_verify = active_step!(rust_check, "verify installed image scanner version")
-  command!(rust_image_verify, "--tool trivy")
-  active_step!(rust_check, "scan candidate image and emit value-free summary")
-  before!(rust_check, "verify installed dependency scanner versions", "release security policy and negative fixtures")
-  before!(rust_check, "verify installed dependency scanner versions", "engine release assurance gate")
-  before!(rust_check, "verify installed image scanner version", "scan candidate image and emit value-free summary")
+  policy = active_step!(rust_fast, "release security policy and negative fixtures")
+  command!(policy, "scripts/check-native-release-set.py --self-test")
+  command!(policy, "scripts/report-rust-release-timing.py --self-test")
+  before!(rust_fast, "verify installed dependency scanner versions", "release security policy and negative fixtures")
+  rust_assurance = job!(workflows.fetch(:rust), "check-assurance")
+  active_step!(rust_assurance, "engine release assurance gate")
+  rust_nix = job!(workflows.fetch(:rust), "check-nix")
+  active_step!(rust_nix, "nix package")
+  rust_aggregate = job!(workflows.fetch(:rust), "check")
+  active_step!(rust_aggregate, "require every Rust assurance boundary")
+
+  rust_amd64 = job!(workflows.fetch(:rust), "image-amd64")
+  rust_arm64 = job!(workflows.fetch(:rust), "image-arm64")
+  require_gate(rust_amd64["runs-on"] == "ubuntu-24.04", "rust_amd64_runner_not_native")
+  require_gate(rust_arm64["runs-on"] == "ubuntu-24.04-arm", "rust_arm64_runner_not_native")
+  active_step!(rust_arm64, "verify native arm64 runner")
+  step!(rust_amd64, "build native amd64 image")
+  step!(rust_arm64, "build native arm64 image")
+  amd64_smoke = step!(rust_amd64, "smoke native amd64 candidate")
+  arm64_smoke = step!(rust_arm64, "smoke native arm64 candidate")
+  [amd64_smoke, arm64_smoke].each do |smoke|
+    require_gate(smoke["if"] == "github.event_name != 'release'", "rust_native_smoke_condition_invalid")
+    require_gate(smoke["continue-on-error"] != true, "rust_native_smoke_nonblocking")
+    require_gate(smoke["run"] == "scripts/smoke-engine-container.sh", "rust_native_smoke_invalid")
+    require_gate(smoke.dig("env", "JANUS_ENGINE_SMOKE_SKIP_BUILD") == "true",
+                 "rust_native_smoke_rebuilds")
+  end
+  require_gate(
+    !workflows.fetch(:rust).inspect.include?("docker/setup-qemu-action"),
+    "rust_release_qemu_returned"
+  )
 
   rust_image = job!(workflows.fetch(:rust), "image")
   active_step!(rust_image, "verify protected-main release ancestry")
   active_step!(rust_image, "verify installed release scanner version")
   rust_published_scan = active_step!(rust_image, "scan exact published candidate digest")
-  command!(rust_published_scan, '--subject "${IMAGE}@${{ steps.build.outputs.digest }}"')
+  command!(rust_published_scan, '--subject "${IMAGE}@${{ steps.manifest.outputs.digest }}"')
   rust_mode_receipts =
     active_step!(rust_image, "verify published engine digest and mode receipts")
   environment!(rust_mode_receipts, "JANUS_PRODUCT_MODE", "production")
@@ -170,13 +193,8 @@ def validate(workflows)
   require_gate(!rehearsal.key?("permissions"), "release_rehearsal_job_permissions_override")
   require_gate(rehearsal["timeout-minutes"] == 15, "release_rehearsal_timeout_invalid")
 
-  [
-    "docker/setup-buildx-action",
-    "docker/login-action",
-    "docker/metadata-action",
-    "aquasecurity/setup-trivy",
-    "sigstore/cosign-installer"
-  ].each do |repository|
+  ["docker/setup-buildx-action", "docker/login-action", "docker/metadata-action",
+   "aquasecurity/setup-trivy", "sigstore/cosign-installer"].each do |repository|
     require_gate(
       action!(go_image, repository)["uses"] == action!(rust_image, repository)["uses"],
       "release_action_drift:#{repository}"
@@ -184,8 +202,7 @@ def validate(workflows)
   end
 
   {
-    "actions/checkout" => action!(rust_check, "actions/checkout")["uses"],
-    "docker/setup-qemu-action" => action!(rust_image, "docker/setup-qemu-action")["uses"],
+    "actions/checkout" => action!(rust_fast, "actions/checkout")["uses"],
     "docker/setup-buildx-action" => action!(rust_image, "docker/setup-buildx-action")["uses"],
     "docker/login-action" => action!(rust_image, "docker/login-action")["uses"],
     "docker/metadata-action" => action!(rust_image, "docker/metadata-action")["uses"],
@@ -216,8 +233,18 @@ def validate(workflows)
     "release_rehearsal_metadata_invalid"
   )
 
-  arm = active_step!(rehearsal, "verify ARM emulation")
-  command!(arm, 'docker run --rm --platform linux/arm64 "${runtime_image}"')
+  strategy = rehearsal["strategy"]
+  require_gate(strategy.is_a?(Hash), "release_rehearsal_matrix_missing")
+  include_rows = strategy.dig("matrix", "include")
+  require_gate(
+    include_rows == [
+      { "runner" => "ubuntu-24.04", "architecture" => "x86_64" },
+      { "runner" => "ubuntu-24.04-arm", "architecture" => "aarch64" }
+    ],
+    "release_rehearsal_native_matrix_invalid"
+  )
+  native = active_step!(rehearsal, "verify native architecture")
+  command!(native, 'test "$(uname -m)" = "${EXPECTED_ARCHITECTURE}"')
   active_step!(rehearsal, "verify Buildx")
   active_step!(rehearsal, "verify release metadata")
   scanner = active_step!(rehearsal, "verify installed release scanner version")
@@ -226,7 +253,6 @@ def validate(workflows)
   command!(signature, "cosign sign-blob --yes --key cosign.key")
   command!(signature, "--bundle payload.sigstore.json payload.txt")
   command!(signature, "cosign verify-blob --key cosign.pub")
-  before!(rehearsal, "install QEMU emulation", "verify ARM emulation")
   before!(rehearsal, "install Buildx", "verify Buildx")
   before!(rehearsal, "derive release metadata", "verify release metadata")
   before!(rehearsal, "install Trivy", "verify installed release scanner version")
@@ -284,7 +310,7 @@ def self_test(workflows)
   expect_denied(disabled, "disabled") {}
 
   nonblocking = deep_copy(workflows)
-  step!(job!(nonblocking[:rust], "check"), "verify installed dependency scanner versions")[
+  step!(job!(nonblocking[:rust], "check-fast"), "verify installed dependency scanner versions")[
     "continue-on-error"
   ] = true
   expect_denied(nonblocking, "nonblocking") {}
@@ -334,6 +360,22 @@ def self_test(workflows)
     "verify Buildx"
   )["run"] = "docker push ghcr.io/inspr-at/janus/rehearsal"
   expect_denied(rehearsal_publish, "release_rehearsal_publish_path") {}
+
+  missing_arm = deep_copy(workflows)
+  missing_arm[:rust].fetch("jobs").delete("image-arm64")
+  expect_denied(missing_arm, "rust_native_arm_missing") {}
+
+  qemu_release = deep_copy(workflows)
+  job!(qemu_release[:rust], "image").fetch("steps") << {
+    "uses" => "docker/setup-qemu-action@0000000000000000000000000000000000000000"
+  }
+  expect_denied(qemu_release, "rust_release_qemu_returned") {}
+
+  native_rebuild = deep_copy(workflows)
+  step!(job!(native_rebuild[:rust], "image-arm64"), "smoke native arm64 candidate")[
+    "env"
+  ]["JANUS_ENGINE_SMOKE_SKIP_BUILD"] = "false"
+  expect_denied(native_rebuild, "rust_native_smoke_rebuilds") {}
 end
 
 workflows = {
