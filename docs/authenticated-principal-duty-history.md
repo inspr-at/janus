@@ -2,9 +2,10 @@
 
 Status: accepted design contract for JANUS-425. JANUS-427 implements the local
 authenticated-actor identity-shadow foundation described in the
-[identity-shadow runbook](identity-shadow-runbook.md); the durable duty journal,
-authoritative operation lineage, runtime cutover, and enforced separation claim
-remain unimplemented.
+[identity-shadow runbook](identity-shadow-runbook.md). JANUS-428 implements the
+[durable duty journal foundation](durable-duty-journal.md), authoritative
+operation lineage, and trusted policy-input boundary. Runtime-wide wiring,
+cutover, and the enforced separation claim remain unimplemented for JANUS-429.
 
 ## Decision
 

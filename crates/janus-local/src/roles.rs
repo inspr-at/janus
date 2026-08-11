@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use janus_core::{
-    authorize_role_action, DutyEvidence, JanusError, JanusResult, Permission, PrincipalChain,
+    authorize_role_action, DutyAuthorization, JanusError, JanusResult, Permission, PrincipalChain,
     ProductMode, Role, RoleBinding, RoleBindingId, RoleBindingSnapshotV1, RoleBindingSourceKind,
     RoleDecisionInput, RolePolicyV1, RuntimeAction, SafeLabel, ScopeRef,
 };
@@ -83,7 +83,6 @@ pub fn enforce_runtime_role_from_env(
     action: RuntimeAction,
     principal: &PrincipalChain,
     target_binding: Option<&str>,
-    duties: &[DutyEvidence],
     now: SystemTime,
 ) -> JanusResult<Option<LoadedRoleAuthorization>> {
     let Some(authorization) = load_role_authorization_from_env()? else {
@@ -102,7 +101,7 @@ pub fn enforce_runtime_role_from_env(
         approval_fingerprint: None,
         delegation_fingerprint: None,
         audit_available: true,
-        duties,
+        duty_authorization: DutyAuthorization::AccountabilityLegacy,
         bindings: &authorization.bindings,
         now,
     };
@@ -988,7 +987,6 @@ mod tests {
             RuntimeAction::WardenDescribeSecret,
             &principal,
             None,
-            &[],
             UNIX_EPOCH + Duration::from_secs(20),
         )
         .unwrap();

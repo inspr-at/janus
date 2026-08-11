@@ -14,6 +14,11 @@ echo "==> janus engine release assurance: closed runtime endpoint policy matrix"
 cargo test --locked -p janus-core runtime_endpoint_policy
 cargo test --locked -p janus-warden endpoint_guard
 
+echo "==> janus engine release assurance: durable duty authority boundary"
+python3 scripts/check-duty-journal-boundary.py
+cargo test --locked -p janus-core duty
+cargo test --locked -p janus-local duty
+
 echo "==> janus engine release assurance: bounded security properties"
 python3 scripts/run-security-properties.py --self-test
 python3 scripts/run-security-properties.py --release

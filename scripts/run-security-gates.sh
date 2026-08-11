@@ -11,6 +11,8 @@ python3 scripts/run-attended-browser-qa.py --self-test
 python3 scripts/check-release-main-ancestry.py --self-test
 python3 scripts/check-release-mode-receipts.py --self-test
 python3 scripts/check-github-repository-posture.py --self-test
+python3 scripts/check-duty-journal-boundary.py --self-test
+python3 scripts/check-duty-journal-boundary.py
 ruby scripts/check-workflow-security.rb --self-test
 python3 scripts/check-security-gates.py --self-test
 python3 scripts/check-security-gates.py --check-installed-tools

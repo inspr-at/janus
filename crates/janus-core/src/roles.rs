@@ -206,26 +206,22 @@ closed_text_enum! {
     }
 }
 
-/// Opaque evidence that one actor performed one duty in one exact scope.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DutyEvidence {
-    /// Performed duty.
-    pub duty: Duty,
-    /// Opaque hash of the exact principal binding.
-    pub actor_fingerprint: String,
-    /// Exact authorization scope.
-    pub scope: ScopeRef,
+impl Serialize for Duty {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
 }
 
-impl DutyEvidence {
-    /// Build value-free evidence from an exact principal binding.
-    pub fn new(duty: Duty, principal_binding: &str, scope: ScopeRef) -> JanusResult<Self> {
-        validate_bounded("principal_binding", principal_binding, MAX_BINDING_BYTES)?;
-        Ok(Self {
-            duty,
-            actor_fingerprint: fingerprint("janus-duty-actor-v1", principal_binding),
-            scope,
-        })
+impl<'de> Deserialize<'de> for Duty {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(&value).map_err(serde::de::Error::custom)
     }
 }
 
@@ -307,23 +303,31 @@ impl SeparationPolicy {
     pub fn conflicts(&self) -> &'static [DutyConflict] {
         self.conflicts
     }
+}
 
-    fn conflict_for(&self, evidence: &[DutyEvidence]) -> Option<&'static str> {
-        for (index, left) in evidence.iter().enumerate() {
-            for right in &evidence[index + 1..] {
-                if left.scope != right.scope || left.actor_fingerprint != right.actor_fingerprint {
-                    continue;
-                }
-                for conflict in self.conflicts {
-                    if (conflict.left == left.duty && conflict.right == right.duty)
-                        || (conflict.left == right.duty && conflict.right == left.duty)
-                    {
-                        return Some(conflict.reason_code);
-                    }
-                }
-            }
+/// Explicit authority source for one role decision. Legacy callers cannot
+/// submit duty evidence; recorded callers must supply the opaque view produced
+/// by a complete journal verification and its policy-derived candidate.
+pub enum DutyAuthorization<'a> {
+    /// Truthful pre-cutover posture. No durable-separation claim is made.
+    AccountabilityLegacy,
+    /// Verified durable history for one exact candidate operation.
+    Recorded {
+        view: &'a crate::VerifiedOperationView,
+        candidate: &'a crate::PolicyDutyCandidate,
+    },
+}
+
+impl fmt::Debug for DutyAuthorization<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::AccountabilityLegacy => formatter.write_str("AccountabilityLegacy"),
+            Self::Recorded { view, candidate } => formatter
+                .debug_struct("Recorded")
+                .field("view", view)
+                .field("candidate", candidate)
+                .finish(),
         }
-        None
     }
 }
 
@@ -765,8 +769,15 @@ impl RolePolicyV1 {
                 false,
             );
         }
-        if let Some(reason) = self.separation.conflict_for(input.duties) {
-            return RoleDecision::deny(input.permission, reason, true);
+        if let DutyAuthorization::Recorded { view, candidate } = &input.duty_authorization {
+            if candidate.scope() != input.scope {
+                return RoleDecision::deny(input.permission, "duty_candidate_scope_mismatch", true);
+            }
+            match view.conflict_reason(candidate, self.separation.conflicts()) {
+                Ok(Some(reason)) => return RoleDecision::deny(input.permission, reason, true),
+                Ok(None) => {}
+                Err(reason) => return RoleDecision::deny(input.permission, reason, true),
+            }
         }
         let principal_binding = input.principal.binding_key();
         let mut matched_role = None;
@@ -811,7 +822,7 @@ pub struct RoleDecisionInput<'a> {
     pub approval_fingerprint: Option<&'a str>,
     pub delegation_fingerprint: Option<&'a str>,
     pub audit_available: bool,
-    pub duties: &'a [DutyEvidence],
+    pub duty_authorization: DutyAuthorization<'a>,
     pub bindings: &'a [RoleBinding],
     pub now: SystemTime,
 }
@@ -832,7 +843,7 @@ impl fmt::Debug for RoleDecisionInput<'_> {
             .field("approval_fingerprint", &self.approval_fingerprint)
             .field("delegation_fingerprint", &self.delegation_fingerprint)
             .field("audit_available", &self.audit_available)
-            .field("duties", &self.duties)
+            .field("duty_authorization", &self.duty_authorization)
             .field("binding_count", &self.bindings.len())
             .field("now", &self.now)
             .finish()
@@ -1213,7 +1224,6 @@ mod tests {
         principal: &'a PrincipalChain,
         scope: &'a ScopeRef,
         bindings: &'a [RoleBinding],
-        duties: &'a [DutyEvidence],
         permission: Permission,
     ) -> RoleDecisionInput<'a> {
         RoleDecisionInput {
@@ -1235,7 +1245,7 @@ mod tests {
             approval_fingerprint: None,
             delegation_fingerprint: None,
             audit_available: true,
-            duties,
+            duty_authorization: DutyAuthorization::AccountabilityLegacy,
             bindings,
             now: UNIX_EPOCH + Duration::from_secs(2),
         }
@@ -1287,13 +1297,7 @@ mod tests {
             let bindings = vec![binding(&principal, role, None)];
             assert_eq!(
                 policy
-                    .decide(&input(
-                        &principal,
-                        &scope,
-                        &bindings,
-                        &[],
-                        Permission::SecretUse
-                    ))
+                    .decide(&input(&principal, &scope, &bindings, Permission::SecretUse))
                     .allowed,
                 expected,
                 "{}",
@@ -1310,7 +1314,7 @@ mod tests {
         for permission in Permission::ALL {
             assert!(
                 !policy
-                    .decide(&input(&principal, &scope, &bindings, &[], *permission))
+                    .decide(&input(&principal, &scope, &bindings, *permission))
                     .allowed
             );
         }
@@ -1330,7 +1334,6 @@ mod tests {
             &principal,
             &scope,
             &bindings,
-            &[],
             Permission::LifecycleTransition,
         );
         decision_input.target_binding = Some(&target);
@@ -1353,7 +1356,6 @@ mod tests {
             &principal,
             &scope,
             &bindings,
-            &[],
             Permission::DescriptorRead,
         ));
         assert!(!decision.allowed);
@@ -1365,19 +1367,61 @@ mod tests {
         let policy = RolePolicyV1::embedded().unwrap();
         let (principal, scope) = fixture();
         let bindings = vec![binding(&principal, Role::Approver, None)];
-        let duties = vec![
-            DutyEvidence::new(Duty::RequestUse, &principal.binding_key(), scope.clone()).unwrap(),
-            DutyEvidence::new(Duty::ApproveUse, &principal.binding_key(), scope.clone()).unwrap(),
-        ];
-        let decision = policy.decide(&input(
-            &principal,
-            &scope,
-            &bindings,
-            &duties,
-            Permission::ApprovalIssue,
-        ));
+        let actor = crate::ActorSubjectRef::derive(
+            crate::TrustAdapterKind::LocalPeer,
+            "fixture-host",
+            "fixture-actor",
+        )
+        .unwrap();
+        let operation =
+            crate::OperationRef::derive(crate::ConflictDomain::UseRequest, "fixture-operation")
+                .unwrap();
+        let candidate = crate::PolicyDutyCandidate::fixture(
+            actor,
+            operation,
+            scope.clone(),
+            crate::ConflictDomain::UseRequest,
+            Duty::ApproveUse,
+        );
+        let view = crate::VerifiedOperationView::fixture(&candidate, vec![Duty::RequestUse]);
+        let mut decision_input = input(&principal, &scope, &bindings, Permission::ApprovalIssue);
+        decision_input.duty_authorization = DutyAuthorization::Recorded {
+            view: &view,
+            candidate: &candidate,
+        };
+        let decision = policy.decide(&decision_input);
         assert!(!decision.allowed);
         assert_eq!(decision.reason_code, "separation_requester_approver");
+        assert!(decision.separation_denial);
+    }
+
+    #[test]
+    fn recorded_candidate_cannot_cross_the_role_decision_scope() {
+        let policy = RolePolicyV1::embedded().unwrap();
+        let (principal, scope) = fixture();
+        let bindings = vec![binding(&principal, Role::Approver, None)];
+        let actor = crate::ActorSubjectRef::derive(
+            crate::TrustAdapterKind::LocalPeer,
+            "fixture-host",
+            "fixture-actor",
+        )
+        .unwrap();
+        let candidate = crate::PolicyDutyCandidate::fixture(
+            actor,
+            crate::OperationRef::derive(crate::ConflictDomain::UseRequest, "other-scope").unwrap(),
+            crate::test_scope("other"),
+            crate::ConflictDomain::UseRequest,
+            Duty::ApproveUse,
+        );
+        let view = crate::VerifiedOperationView::fixture(&candidate, Vec::new());
+        let mut decision_input = input(&principal, &scope, &bindings, Permission::ApprovalIssue);
+        decision_input.duty_authorization = DutyAuthorization::Recorded {
+            view: &view,
+            candidate: &candidate,
+        };
+        let decision = policy.decide(&decision_input);
+        assert!(!decision.allowed);
+        assert_eq!(decision.reason_code, "duty_candidate_scope_mismatch");
         assert!(decision.separation_denial);
     }
 
@@ -1405,13 +1449,7 @@ mod tests {
         let policy = RolePolicyV1::embedded().unwrap();
         let (principal, scope) = fixture();
         let bindings = vec![binding(&principal, Role::Viewer, None)];
-        let decision_input = input(
-            &principal,
-            &scope,
-            &bindings,
-            &[],
-            Permission::DescriptorRead,
-        );
+        let decision_input = input(&principal, &scope, &bindings, Permission::DescriptorRead);
         let decision = policy.decide(&decision_input);
         let json = serde_json::to_string(&decision.snapshot(&policy)).unwrap();
         let debug = format!("{decision_input:?}");
@@ -1432,13 +1470,7 @@ mod tests {
         let policy = RolePolicyV1::embedded().unwrap();
         let (principal, scope) = fixture();
         let bindings = vec![binding(&principal, Role::Viewer, None)];
-        let decision_input = input(
-            &principal,
-            &scope,
-            &bindings,
-            &[],
-            Permission::DescriptorRead,
-        );
+        let decision_input = input(&principal, &scope, &bindings, Permission::DescriptorRead);
         let mut audit = crate::AuditWrite::failing();
         assert!(matches!(
             authorize_role_action(&policy, &decision_input, &mut audit),
