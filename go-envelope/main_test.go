@@ -542,6 +542,155 @@ func TestConfigUsesHostPrefixedStateCookieForHTTPS(t *testing.T) {
 	}
 }
 
+func TestSecretConfigValueUsesLegacyEnvironmentValueWhenFileIsUnset(t *testing.T) {
+	const key = "JANUS_TEST_LEGACY_SECRET"
+	t.Setenv(key, "legacy-secret")
+	unsetEnvForTest(t, key+"_FILE")
+
+	got, err := secretConfigValue(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "legacy-secret" {
+		t.Fatalf("expected legacy environment value, got %q", got)
+	}
+}
+
+func TestSecretConfigValueFileWinsAndTrimsExactlyOneTrailingNewline(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{name: "none", raw: "file-secret", want: "file-secret"},
+		{name: "one lf", raw: "file-secret\n", want: "file-secret"},
+		{name: "two lfs", raw: "file-secret\n\n", want: "file-secret\n"},
+		{name: "one crlf", raw: "file-secret\r\n", want: "file-secret"},
+		{name: "two crlfs", raw: "file-secret\r\n\r\n", want: "file-secret\r\n"},
+		{name: "empty", raw: "", want: ""},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			const key = "JANUS_TEST_FILE_SECRET"
+			path := filepath.Join(t.TempDir(), "secret")
+			if err := os.WriteFile(path, []byte(test.raw), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv(key, "legacy-secret-must-not-win")
+			t.Setenv(key+"_FILE", path)
+
+			got, err := secretConfigValue(key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != test.want {
+				t.Fatalf("expected %q, got %q", test.want, got)
+			}
+		})
+	}
+}
+
+func TestSecretConfigValueFailsClosedWhenFileIsUnreadableOrEmpty(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+		want string
+	}{
+		{name: "empty path", path: "", want: "OIDC_CLIENT_SECRET_FILE is set but empty"},
+		{name: "missing file", path: filepath.Join(t.TempDir(), "missing"), want: "OIDC_CLIENT_SECRET_FILE could not be read"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("OIDC_CLIENT_SECRET", "fallback-secret-must-not-win")
+			t.Setenv("OIDC_CLIENT_SECRET_FILE", test.path)
+
+			got, err := secretConfigValue("OIDC_CLIENT_SECRET")
+			if err == nil {
+				t.Fatal("expected configured file failure")
+			}
+			if got != "" {
+				t.Fatalf("failure should not return a value, got %q", got)
+			}
+			if !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("expected specific file error %q, got %q", test.want, err)
+			}
+			if strings.Contains(err.Error(), "fallback-secret-must-not-win") {
+				t.Fatalf("error leaked fallback secret: %q", err)
+			}
+		})
+	}
+}
+
+func TestLoadConfigReadsOIDCAndCookieSecretsFromFiles(t *testing.T) {
+	oidcPath := filepath.Join(t.TempDir(), "oidc-secret")
+	cookiePath := filepath.Join(t.TempDir(), "cookie-key")
+	if err := os.WriteFile(oidcPath, []byte("file-oidc-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cookieValue := base64.StdEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef"))
+	if err := os.WriteFile(cookiePath, []byte(cookieValue+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("OIDC_CLIENT_SECRET", "legacy-oidc-secret")
+	t.Setenv("OIDC_CLIENT_SECRET_FILE", oidcPath)
+	t.Setenv("COOKIE_KEY", base64.StdEncoding.EncodeToString([]byte("legacy-cookie-key-must-not-win!!")))
+	t.Setenv("COOKIE_KEY_FILE", cookiePath)
+	t.Setenv("JANUS_REQUIRE_AUTH", "false")
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.OIDCSecret != "file-oidc-secret" {
+		t.Fatalf("expected file-backed OIDC secret, got %q", cfg.OIDCSecret)
+	}
+	if string(cfg.CookieKey) != "0123456789abcdef0123456789abcdef" {
+		t.Fatalf("expected file-backed cookie key, got %q", cfg.CookieKey)
+	}
+}
+
+func TestLoadConfigFailsClosedForUnreadableSecretFiles(t *testing.T) {
+	for _, key := range []string{"OIDC_CLIENT_SECRET", "COOKIE_KEY"} {
+		t.Run(key, func(t *testing.T) {
+			unsetEnvForTest(t, "OIDC_CLIENT_SECRET_FILE")
+			unsetEnvForTest(t, "COOKIE_KEY_FILE")
+			t.Setenv("OIDC_CLIENT_SECRET", "legacy-oidc-secret")
+			t.Setenv("COOKIE_KEY", "")
+			t.Setenv(key+"_FILE", filepath.Join(t.TempDir(), "missing"))
+			t.Setenv("JANUS_REQUIRE_AUTH", "false")
+
+			_, err := loadConfig()
+			if err == nil {
+				t.Fatalf("expected %s startup failure", key+"_FILE")
+			}
+			if !strings.Contains(err.Error(), key+"_FILE could not be read") {
+				t.Fatalf("expected variable-specific startup error, got %q", err)
+			}
+		})
+	}
+}
+
+func unsetEnvForTest(t *testing.T, key string) {
+	t.Helper()
+	value, configured := os.LookupEnv(key)
+	if err := os.Unsetenv(key); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if configured {
+			if err := os.Setenv(key, value); err != nil {
+				t.Errorf("restore %s: %v", key, err)
+			}
+			return
+		}
+		if err := os.Unsetenv(key); err != nil {
+			t.Errorf("clear %s: %v", key, err)
+		}
+	})
+}
+
 func TestAuthenticatedBrowserWitnessAPIIsAuthenticatedAndValueFree(t *testing.T) {
 	app := newTestApp(t)
 	session := Session{Subject: "subject-123", Email: "person@example.test", Name: "Person Name", Roles: []string{RoleViewer, RoleAuditor}, Expiry: time.Now().UTC().Add(time.Hour)}

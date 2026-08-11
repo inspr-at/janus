@@ -651,10 +651,17 @@ func loadConfig() (Config, error) {
 		OIDCIssuer:  strings.TrimRight(os.Getenv("OIDC_ISSUER"), "/"),
 	}
 	cfg.OIDCClientID = os.Getenv("OIDC_CLIENT_ID")
-	cfg.OIDCSecret = os.Getenv("OIDC_CLIENT_SECRET")
+	oidcSecret, err := secretConfigValue("OIDC_CLIENT_SECRET")
+	if err != nil {
+		return cfg, err
+	}
+	cfg.OIDCSecret = oidcSecret
 	cfg.OIDCProjectID = strings.TrimSpace(os.Getenv("OIDC_PROJECT_ID"))
 
-	cookieKey := os.Getenv("COOKIE_KEY")
+	cookieKey, err := secretConfigValue("COOKIE_KEY")
+	if err != nil {
+		return cfg, err
+	}
 	if cookieKey != "" {
 		key, err := decodeKey(cookieKey)
 		if err != nil {
@@ -682,6 +689,27 @@ func loadConfig() (Config, error) {
 		log.Printf("auth is required but OIDC is not fully configured; serving setup-only surface")
 	}
 	return cfg, nil
+}
+
+func secretConfigValue(key string) (string, error) {
+	fileKey := key + "_FILE"
+	path, configured := os.LookupEnv(fileKey)
+	if !configured {
+		return os.Getenv(key), nil
+	}
+	if path == "" {
+		return "", fmt.Errorf("%s is set but empty", fileKey)
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("%s could not be read from %q: %w", fileKey, path, err)
+	}
+	value := string(raw)
+	if strings.HasSuffix(value, "\r\n") {
+		return strings.TrimSuffix(value, "\r\n"), nil
+	}
+	return strings.TrimSuffix(value, "\n"), nil
 }
 
 func NewApp(ctx context.Context, cfg Config, store *Store) (*App, error) {
