@@ -1,9 +1,9 @@
 # Durable duty journal foundation
 
-Status: implemented foundation for JANUS-428. This is slice two of the accepted
-`authenticated-principal-duty-history-v1` contract. It does **not** wire every
-runtime surface and cannot advertise `enforced_recorded`; that cutover remains
-JANUS-429.
+Status: durable foundation delivered by JANUS-428 and wired into the complete
+registered runtime catalog by JANUS-429. A process may report
+`enforced_recorded` only when the broker accepts exact release/scope cutover
+evidence; configuration or an empty journal alone never establishes it.
 
 ## Authority boundary
 
@@ -21,9 +21,10 @@ External crates can name that type but cannot construct or deserialize it. The
 candidate scope and admitted release must exactly match the broker-authenticated
 actor context.
 
-Current runtime call sites use the conspicuous `AccountabilityLegacy` variant.
-They cannot provide an empty recorded view and the release must not claim durable
-separation until JANUS-429 wires every registered surface.
+Production runtime call sites accept only a fresh opaque `BrokerAdmission`.
+`AccountabilityLegacy` remains a truthful broker posture, not a production
+policy shortcut: even that posture authenticates the connected kernel peer and
+returns a signed action-bound admission without claiming durable separation.
 
 ## Signed operation lineage
 

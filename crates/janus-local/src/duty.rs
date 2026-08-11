@@ -10,9 +10,9 @@ use std::time::SystemTime;
 use ed25519_dalek::SigningKey;
 use fs2::FileExt;
 use janus_core::{
-    DutyAdmissionV1, DutyEpochCertificateV1, DutyJournalVerifier, JanusError, JanusResult,
-    PolicyDutyCandidate, SeparationPolicy, VerifiedAuthoritativeOperation, VerifiedDutyJournal,
-    VerifiedOperationView, MAX_DUTIES_PER_OPERATION, MAX_DUTY_RECORDS,
+    AccountabilityPosture, DutyAdmissionV1, DutyEpochCertificateV1, DutyJournalVerifier,
+    JanusError, JanusResult, PolicyDutyCandidate, SeparationPolicy, VerifiedAuthoritativeOperation,
+    VerifiedDutyJournal, VerifiedOperationView, MAX_DUTIES_PER_OPERATION, MAX_DUTY_RECORDS,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -29,6 +29,7 @@ const MAX_RECORD_BYTES: usize = 16 * 1024;
 pub enum DutyAuthorizationOutcome {
     Allowed,
     Denied,
+    ObservedConflict,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -60,6 +61,16 @@ pub struct DutyAuthorizationReceiptV1 {
     pub sequence: u64,
     pub journal_head_hash: String,
     pub authority: String,
+    pub conflict_observed: bool,
+    pub value_returned: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DutyJournalHealthV1 {
+    pub schema_version: u8,
+    pub sequence: u64,
+    pub journal_head_hash: String,
     pub value_returned: bool,
 }
 
@@ -85,6 +96,7 @@ struct DutyBackupManifestV1 {
 
 /// Private file journal. Admission is crate-private so only the local broker
 /// integration can turn a verified actor/operation into authority.
+#[derive(Clone)]
 pub struct FileDutyJournal {
     root: PathBuf,
     release_digest: String,
@@ -263,8 +275,35 @@ impl FileDutyJournal {
         operation: VerifiedAuthoritativeOperation,
         audit_ref: &str,
         admitted_at: SystemTime,
-        audit: &mut impl DutyAuthorizationAuditSink,
+        audit: &mut (impl DutyAuthorizationAuditSink + ?Sized),
     ) -> JanusResult<DutyAuthorizationReceiptV1> {
+        self.authorize_and_admit_in_posture(
+            actor,
+            operation,
+            audit_ref,
+            admitted_at,
+            AccountabilityPosture::EnforcedRecorded,
+            audit,
+        )
+    }
+
+    /// Admit one broker-authenticated operation under an explicit posture.
+    /// Observation mode retains the conflicting duty and emits observation
+    /// evidence; enforced mode denies before append.
+    pub fn authorize_and_admit_in_posture(
+        &self,
+        actor: &crate::BrokerAuthenticatedActorV1,
+        operation: VerifiedAuthoritativeOperation,
+        audit_ref: &str,
+        admitted_at: SystemTime,
+        posture: AccountabilityPosture,
+        audit: &mut (impl DutyAuthorizationAuditSink + ?Sized),
+    ) -> JanusResult<DutyAuthorizationReceiptV1> {
+        if !posture.requires_verified_journal() {
+            return Err(unavailable(
+                "legacy posture cannot create a durable duty admission",
+            ));
+        }
         let candidate =
             PolicyDutyCandidate::from_verified_operation(actor.subject_ref().clone(), operation);
         if candidate.scope() != actor.scope()
@@ -274,15 +313,46 @@ impl FileDutyJournal {
                 "authenticated actor operation context mismatch",
             ));
         }
-        self.authorize_candidate(&candidate, audit_ref, admitted_at, audit)
+        self.authorize_candidate_in_posture(&candidate, audit_ref, admitted_at, posture, audit)
     }
 
+    /// Verify the complete signed history and derived index without creating
+    /// authority. Every no-conflict action uses this in recorded postures.
+    pub fn verify_health(&self) -> JanusResult<DutyJournalHealthV1> {
+        let _lock = self.lock()?;
+        let (journal, _) = self.load_verified(true)?;
+        Ok(DutyJournalHealthV1 {
+            schema_version: 1,
+            sequence: journal.sequence(),
+            journal_head_hash: journal.head_hash().to_string(),
+            value_returned: false,
+        })
+    }
+
+    #[cfg(test)]
     fn authorize_candidate(
         &self,
         candidate: &PolicyDutyCandidate,
         audit_ref: &str,
         admitted_at: SystemTime,
-        audit: &mut impl DutyAuthorizationAuditSink,
+        audit: &mut (impl DutyAuthorizationAuditSink + ?Sized),
+    ) -> JanusResult<DutyAuthorizationReceiptV1> {
+        self.authorize_candidate_in_posture(
+            candidate,
+            audit_ref,
+            admitted_at,
+            AccountabilityPosture::EnforcedRecorded,
+            audit,
+        )
+    }
+
+    fn authorize_candidate_in_posture(
+        &self,
+        candidate: &PolicyDutyCandidate,
+        audit_ref: &str,
+        admitted_at: SystemTime,
+        posture: AccountabilityPosture,
+        audit: &mut (impl DutyAuthorizationAuditSink + ?Sized),
     ) -> JanusResult<DutyAuthorizationReceiptV1> {
         validate_prefixed_hex(audit_ref, "aud_", 24)?;
         if candidate.release_digest() != self.release_digest {
@@ -291,9 +361,9 @@ impl FileDutyJournal {
         let lock = self.lock()?;
         let (journal, records) = self.load_verified(true)?;
         let view = journal.operation_view(candidate);
-        if let Some(reason) =
-            view.evaluate_candidate(candidate, SeparationPolicy::default().conflicts())?
-        {
+        let conflict =
+            view.evaluate_candidate(candidate, SeparationPolicy::default().conflicts())?;
+        if let Some(reason) = conflict.filter(|_| posture.denies_conflicts()) {
             let event = audit_event(
                 candidate,
                 DutyAuthorizationOutcome::Denied,
@@ -356,10 +426,15 @@ impl FileDutyJournal {
         sync_directory(&self.root)?;
         drop(lock);
 
+        let conflict_observed = conflict.is_some();
         let event = audit_event(
             candidate,
-            DutyAuthorizationOutcome::Allowed,
-            "duty_admitted",
+            if conflict_observed {
+                DutyAuthorizationOutcome::ObservedConflict
+            } else {
+                DutyAuthorizationOutcome::Allowed
+            },
+            conflict.unwrap_or("duty_admitted"),
             Some(record.admission_id.clone()),
             &record.record_hash,
             audit_ref,
@@ -372,7 +447,12 @@ impl FileDutyJournal {
             admission_id: record.admission_id,
             sequence,
             journal_head_hash: record.record_hash,
-            authority: "durable_duty_admission".to_string(),
+            authority: if conflict_observed {
+                "durable_duty_observation".to_string()
+            } else {
+                "durable_duty_admission".to_string()
+            },
+            conflict_observed,
             value_returned: false,
         })
     }

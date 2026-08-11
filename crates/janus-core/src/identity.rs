@@ -207,6 +207,7 @@ impl IdentitySurfacePolicy {
 pub struct IdentityTransportManifestV1 {
     runtime_catalog_fingerprint: String,
     surfaces: Vec<IdentitySurfacePolicy>,
+    fingerprint: String,
 }
 
 impl IdentityTransportManifestV1 {
@@ -261,6 +262,7 @@ impl IdentityTransportManifestV1 {
         Ok(Self {
             runtime_catalog_fingerprint: wire.runtime_endpoint_catalog_fingerprint,
             surfaces,
+            fingerprint: fingerprint("janus-identity-transport-manifest-v1", text.as_bytes()),
         })
     }
 
@@ -285,6 +287,11 @@ impl IdentityTransportManifestV1 {
     /// Every registered surface in stable order.
     pub fn surfaces(&self) -> &[IdentitySurfacePolicy] {
         &self.surfaces
+    }
+
+    /// Value-free fingerprint of the exact reviewed manifest.
+    pub fn fingerprint(&self) -> &str {
+        &self.fingerprint
     }
 }
 

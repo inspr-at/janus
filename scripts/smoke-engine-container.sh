@@ -64,6 +64,9 @@ if policy is None or not policy.isfile() or policy.mode & 0o022:
 identity_manifest = members.get("/etc/janus/identity-transport-manifest-v1.json")
 if identity_manifest is None or not identity_manifest.isfile() or identity_manifest.mode & 0o022:
     raise SystemExit("identity transport manifest is absent or group/world writable")
+duty_manifest = members.get("/etc/janus/duty-surface-manifest-v1.json")
+if duty_manifest is None or not duty_manifest.isfile() or duty_manifest.mode & 0o022:
+    raise SystemExit("duty surface manifest is absent or group/world writable")
 
 print("engine image filesystem ok user=65532:65532 binaries=10 runtime_packages=0 shell=none")
 PY

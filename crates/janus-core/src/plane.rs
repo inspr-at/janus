@@ -123,11 +123,19 @@ pub enum RuntimeAction {
     BreakGlassRevoke,
     /// Independently close mandatory post-use review.
     BreakGlassReview,
+    /// Private managed-service web transaction over a local daemon socket.
+    WebTransaction,
+    /// Private dynamic-value custody transaction over a local daemon socket.
+    DynamicCustody,
+    /// Private dynamic host-package preparation transaction.
+    DynamicDelivery,
+    /// Private dynamic host-package transport transaction.
+    DynamicTransport,
 }
 
 impl RuntimeAction {
     /// Every known action, used by release-blocking completeness tests.
-    pub const ALL: [Self; 42] = [
+    pub const ALL: [Self; 46] = [
         Self::WardenListSecrets,
         Self::WardenDescribeSecret,
         Self::WardenRequestUse,
@@ -170,6 +178,10 @@ impl RuntimeAction {
         Self::BreakGlassStatus,
         Self::BreakGlassRevoke,
         Self::BreakGlassReview,
+        Self::WebTransaction,
+        Self::DynamicCustody,
+        Self::DynamicDelivery,
+        Self::DynamicTransport,
     ];
 
     /// The only process plane allowed to expose this action.
@@ -216,7 +228,11 @@ impl RuntimeAction {
             | Self::BreakGlassList
             | Self::BreakGlassStatus
             | Self::BreakGlassRevoke
-            | Self::BreakGlassReview => RuntimePlane::Admin,
+            | Self::BreakGlassReview
+            | Self::WebTransaction
+            | Self::DynamicCustody
+            | Self::DynamicDelivery
+            | Self::DynamicTransport => RuntimePlane::Admin,
         }
     }
 
@@ -265,7 +281,24 @@ impl RuntimeAction {
             Self::BreakGlassStatus => "admin.break_glass_status",
             Self::BreakGlassRevoke => "admin.break_glass_revoke",
             Self::BreakGlassReview => "admin.break_glass_review",
+            Self::WebTransaction => "admin.web_transaction",
+            Self::DynamicCustody => "admin.dynamic_custody",
+            Self::DynamicDelivery => "admin.dynamic_delivery",
+            Self::DynamicTransport => "admin.dynamic_transport",
         }
+    }
+
+    /// Parse one exact catalog action.
+    pub fn parse(value: &str) -> JanusResult<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|action| action.as_str() == value)
+            .ok_or_else(|| {
+                JanusError::policy_denied(
+                    "runtime_action_unknown",
+                    "runtime action is not release-reviewed",
+                )
+            })
     }
 }
 
@@ -276,6 +309,8 @@ pub enum RuntimeTransport {
     McpStdio,
     /// One local process invocation using argv.
     ProcessArgv,
+    /// One request on a private filesystem Unix-domain socket.
+    UnixSocket,
 }
 
 impl RuntimeTransport {
@@ -284,6 +319,7 @@ impl RuntimeTransport {
         match self {
             Self::McpStdio => "mcp_stdio",
             Self::ProcessArgv => "process_argv",
+            Self::UnixSocket => "unix_socket",
         }
     }
 }
@@ -295,6 +331,8 @@ pub enum RuntimeInputEncoding {
     JsonObject,
     /// Operating-system argv parsed by the dedicated process plane.
     Argv,
+    /// Length-bounded JSON frame on a private Unix-domain socket.
+    JsonFrame,
 }
 
 impl RuntimeInputEncoding {
@@ -303,6 +341,7 @@ impl RuntimeInputEncoding {
         match self {
             Self::JsonObject => "json_object",
             Self::Argv => "argv",
+            Self::JsonFrame => "json_frame",
         }
     }
 }
@@ -467,6 +506,29 @@ const fn cli_endpoint_policy(action: RuntimeAction) -> RuntimeEndpointPolicy {
     }
 }
 
+const fn daemon_endpoint_policy(action: RuntimeAction) -> RuntimeEndpointPolicy {
+    RuntimeEndpointPolicy {
+        action,
+        plane: RuntimePlane::Admin,
+        transport: RuntimeTransport::UnixSocket,
+        input_encoding: RuntimeInputEncoding::JsonFrame,
+        max_serialized_arguments_bytes: CLI_MAX_ARGUMENT_BYTES,
+        concurrency_limit: 1,
+        timeout: RuntimeTimeoutPolicy::PerCallMillis(WARDEN_CALL_TIMEOUT_MS),
+        abuse_budget: RuntimeAbuseBudget::FixedWindow {
+            requests: WARDEN_RATE_REQUESTS,
+            window_ms: WARDEN_RATE_WINDOW_MS,
+        },
+        audit_required: true,
+        value_free_errors: true,
+        origin: RuntimeControlApplicability::NotApplicable,
+        csrf: RuntimeControlApplicability::NotApplicable,
+        cache: RuntimeControlApplicability::NotApplicable,
+        response_security_headers: RuntimeControlApplicability::NotApplicable,
+        remote_identity_accepted: false,
+    }
+}
+
 /// Return the reviewed endpoint policy for one closed runtime action.
 pub const fn runtime_endpoint_policy(action: RuntimeAction) -> RuntimeEndpointPolicy {
     match action {
@@ -512,12 +574,16 @@ pub const fn runtime_endpoint_policy(action: RuntimeAction) -> RuntimeEndpointPo
         | RuntimeAction::BreakGlassStatus
         | RuntimeAction::BreakGlassRevoke
         | RuntimeAction::BreakGlassReview => cli_endpoint_policy(action),
+        RuntimeAction::WebTransaction
+        | RuntimeAction::DynamicCustody
+        | RuntimeAction::DynamicDelivery
+        | RuntimeAction::DynamicTransport => daemon_endpoint_policy(action),
     }
 }
 
 /// Closed endpoint-policy catalog. Adding an action requires extending both
 /// [`RuntimeAction::ALL`] and this release-reviewed matrix.
-pub const RUNTIME_ENDPOINT_POLICIES: [RuntimeEndpointPolicy; 42] = [
+pub const RUNTIME_ENDPOINT_POLICIES: [RuntimeEndpointPolicy; 46] = [
     runtime_endpoint_policy(RuntimeAction::WardenListSecrets),
     runtime_endpoint_policy(RuntimeAction::WardenDescribeSecret),
     runtime_endpoint_policy(RuntimeAction::WardenRequestUse),
@@ -560,6 +626,10 @@ pub const RUNTIME_ENDPOINT_POLICIES: [RuntimeEndpointPolicy; 42] = [
     runtime_endpoint_policy(RuntimeAction::BreakGlassStatus),
     runtime_endpoint_policy(RuntimeAction::BreakGlassRevoke),
     runtime_endpoint_policy(RuntimeAction::BreakGlassReview),
+    runtime_endpoint_policy(RuntimeAction::WebTransaction),
+    runtime_endpoint_policy(RuntimeAction::DynamicCustody),
+    runtime_endpoint_policy(RuntimeAction::DynamicDelivery),
+    runtime_endpoint_policy(RuntimeAction::DynamicTransport),
 ];
 
 /// Deterministic JSON value used by release assurance and the reviewed matrix.
@@ -657,7 +727,7 @@ mod tests {
 
     #[test]
     fn every_action_has_exactly_one_operational_plane() {
-        assert_eq!(RuntimeAction::ALL.len(), 42);
+        assert_eq!(RuntimeAction::ALL.len(), 46);
         assert_eq!(
             RuntimeAction::ALL
                 .iter()
@@ -670,7 +740,7 @@ mod tests {
                 .iter()
                 .filter(|action| action.required_plane() == RuntimePlane::Admin)
                 .count(),
-            34
+            38
         );
         assert!(RuntimeAction::ALL
             .iter()

@@ -265,6 +265,12 @@ async fn handle_connection(
     catalog: &ReviewedCatalog,
     release: ReleaseAdmission,
 ) {
+    if super::super::enforce_daemon_runtime_authority(janus_core::RuntimeAction::WebTransaction)
+        .await
+        .is_err()
+    {
+        return;
+    }
     let request = match timeout(
         REQUEST_WAIT,
         read_json_frame::<TransactionRequest>(&mut stream, MAX_REQUEST_BYTES),

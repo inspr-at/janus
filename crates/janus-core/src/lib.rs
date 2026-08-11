@@ -7,6 +7,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod accountability;
 pub mod audit;
 pub mod break_glass;
 pub mod broker;
@@ -36,6 +37,12 @@ pub mod tombstone;
 pub mod transfer;
 pub mod value;
 
+pub use accountability::{
+    runtime_surface, AccountabilityCutoverV1, AccountabilityPosture, DutySurfaceManifestV1,
+    RuntimeAdmissionV1, RuntimeAdmissionVerifier, RuntimeDutyClassification, RuntimeDutyPolicy,
+    VerifiedRuntimeAdmission, ACCOUNTABILITY_CUTOVER_SCHEMA, DUTY_SURFACE_MANIFEST_SCHEMA,
+    MAX_RUNTIME_ADMISSION_TTL_SECS, RUNTIME_ADMISSION_SCHEMA,
+};
 pub use audit::{
     audit_integrity_hash, AuditAction, AuditEvent, AuditIntegrityInput, AuditOutcome, AuditSink,
     AuditWrite, Severity,

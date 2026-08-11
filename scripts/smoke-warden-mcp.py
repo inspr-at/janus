@@ -78,7 +78,7 @@ classification = "normal"
         )
         smoke = McpSmoke(proc)
         try:
-            run_smoke(smoke)
+            run_smoke(smoke, expect_authority_denied=bool(args.image))
         finally:
             smoke.close()
 
@@ -251,7 +251,7 @@ class McpSmoke:
                 self.proc.wait(timeout=2)
 
 
-def run_smoke(smoke: McpSmoke) -> None:
+def run_smoke(smoke: McpSmoke, *, expect_authority_denied: bool = False) -> None:
     initialized = smoke.request(
         "initialize",
         {
@@ -270,6 +270,18 @@ def run_smoke(smoke: McpSmoke) -> None:
         {"list_secrets", "describe_secret", "request_use", "health"},
         "tool catalog",
     )
+
+    if expect_authority_denied:
+        denied = structured_denial(
+            smoke.request("tools/call", {"name": "health", "arguments": {}})
+        )
+        assert_equal(
+            denied["error"]["reason_code"],
+            "runtime_authority_denied",
+            "unconfigured container authority denial",
+        )
+        assert_false(denied["value_returned"], "authority denial value_returned")
+        return
 
     unknown = structured_denial(
         smoke.request("tools/call", {"name": "resolve_secret", "arguments": {}})

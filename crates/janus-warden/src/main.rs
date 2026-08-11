@@ -20,15 +20,18 @@ use janus_core::{
     SecretStore, TrustLevel, UseProfile, WorkloadId,
 };
 use janus_local::{
-    enforce_migration_ready_from_env, enforce_recovery_drill_freshness_from_env,
-    enforce_release_admission_from_env, enforce_retention_ready_from_env,
-    enforce_scope_transfer_ready_from_env, load_role_authorization_from_env, DelegationRegistry,
-    FileDelegationRegistry, FilePermitRegistry, JsonlAuditSink, LoadedRoleAuthorization,
-    NoopDelegationRegistry, NoopPermitStore, PermitStore,
+    authorize_runtime_action_from_env, enforce_migration_ready_from_env,
+    enforce_recovery_drill_freshness_from_env, enforce_release_admission_from_env,
+    enforce_retention_ready_from_env, enforce_scope_transfer_ready_from_env,
+    load_role_authorization_from_env, DelegationRegistry, FileDelegationRegistry,
+    FilePermitRegistry, JsonlAuditSink, LoadedRoleAuthorization, NoopDelegationRegistry,
+    NoopPermitStore, PermitStore,
 };
 use janus_provider_age::AgeSecretStore;
 use janus_providers::SecretspecStore;
-use janus_warden::{call_tool_guarded, tool_definitions, WardenEndpointGuard, WardenRuntime};
+use janus_warden::{
+    call_tool_guarded, tool_definitions, warden_runtime_action, WardenEndpointGuard, WardenRuntime,
+};
 use rmcp::{
     model::{
         CallToolRequestParams, CallToolResult, Implementation, ListToolsResult,
@@ -179,6 +182,7 @@ impl SecretStore for WardenStore {
 /// `rmcp` server state.
 struct McpWarden {
     runtime: Arc<Mutex<Runtime>>,
+    authority_gate: Arc<Mutex<()>>,
     guard: WardenEndpointGuard<AuditWrite>,
     principal: PrincipalChain,
 }
@@ -224,17 +228,41 @@ impl ServerHandler for McpWarden {
         req: CallToolRequestParams,
         _: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
+        let _authority_guard = self.authority_gate.lock().await;
         let args = req
             .arguments
             .map(Value::Object)
             .unwrap_or_else(|| Value::Object(Default::default()));
+        let Some(action) = warden_runtime_action(req.name.as_ref()) else {
+            return Ok(CallToolResult::structured_error(serde_json::json!({
+                "ok": false,
+                "error": {"reason_code": "denied_unknown_tool", "detail": "unknown Warden tool"},
+                "value_returned": false
+            })));
+        };
+        let now = SystemTime::now();
+        let admission =
+            match authorize_runtime_action_from_env(action, &self.principal.scope, now).await {
+                Ok(admission) => admission,
+                Err(_) => {
+                    return Ok(CallToolResult::structured_error(serde_json::json!({
+                        "ok": false,
+                        "error": {
+                            "reason_code": "runtime_authority_denied",
+                            "detail": "runtime authority denied Warden tool"
+                        },
+                        "value_returned": false
+                    })));
+                }
+            };
+        self.runtime.lock().await.set_runtime_admission(admission);
         let response = call_tool_guarded(
             self.runtime.as_ref(),
             &self.guard,
             req.name.as_ref(),
             args,
             &self.principal,
-            SystemTime::now(),
+            now,
         )
         .await;
         let response_value =
@@ -265,6 +293,7 @@ async fn main() -> Result<()> {
     let runtime = build_runtime_from_env(release, role_authorization).await?;
     let server = McpWarden {
         runtime: Arc::new(Mutex::new(runtime)),
+        authority_gate: Arc::new(Mutex::new(())),
         guard: WardenEndpointGuard::new(AuditWrite::accepting()),
         principal,
     };

@@ -177,6 +177,10 @@ impl Permission {
             RuntimeAction::BreakGlassList | RuntimeAction::BreakGlassStatus => Self::BreakGlassRead,
             RuntimeAction::BreakGlassRevoke => Self::BreakGlassRevoke,
             RuntimeAction::BreakGlassReview => Self::BreakGlassReview,
+            RuntimeAction::WebTransaction
+            | RuntimeAction::DynamicCustody
+            | RuntimeAction::DynamicDelivery
+            | RuntimeAction::DynamicTransport => Self::LifecycleEntry,
         }
     }
 
@@ -311,6 +315,8 @@ impl SeparationPolicy {
 pub enum DutyAuthorization<'a> {
     /// Truthful pre-cutover posture. No durable-separation claim is made.
     AccountabilityLegacy,
+    /// Signed, context-checked admission minted by the runtime authority.
+    BrokerAdmission(&'a crate::VerifiedRuntimeAdmission),
     /// Verified durable history for one exact candidate operation.
     Recorded {
         view: &'a crate::VerifiedOperationView,
@@ -322,6 +328,10 @@ impl fmt::Debug for DutyAuthorization<'_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::AccountabilityLegacy => formatter.write_str("AccountabilityLegacy"),
+            Self::BrokerAdmission(admission) => formatter
+                .debug_tuple("BrokerAdmission")
+                .field(admission)
+                .finish(),
             Self::Recorded { view, candidate } => formatter
                 .debug_struct("Recorded")
                 .field("view", view)
@@ -757,6 +767,17 @@ impl RolePolicyV1 {
         }
         if input.scope != &input.principal.scope {
             return RoleDecision::deny(input.permission, "authorization_scope_mismatch", false);
+        }
+        if let DutyAuthorization::BrokerAdmission(admission) = &input.duty_authorization {
+            if !admission.authorizes(input.permission, input.scope)
+                || !admission.is_fresh_at(input.now)
+            {
+                return RoleDecision::deny(
+                    input.permission,
+                    "runtime_admission_context_mismatch",
+                    true,
+                );
+            }
         }
         if input.permission.is_use()
             && input

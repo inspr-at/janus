@@ -428,6 +428,7 @@ JANUS_MANAGED_WEB_TRANSACTION_ALLOWED_UID="$(id -u)"
 export JANUS_LIFECYCLE_TOMBSTONE_DIR="${web_tombstones}"
 
 start_web_daemon() {
+  rm -f -- "${web_socket}"
   "${janusd_web_bin}" >>"${web_log}" 2>&1 &
   web_daemon_pid="$!"
   for _ in $(seq 1 100); do

@@ -207,6 +207,12 @@ async fn handle_connection(
     identity_files: &[PathBuf],
     now: SystemTime,
 ) {
+    if super::super::enforce_daemon_runtime_authority(janus_core::RuntimeAction::DynamicDelivery)
+        .await
+        .is_err()
+    {
+        return;
+    }
     let request = match timeout(REQUEST_WAIT, read_request(&mut stream)).await {
         Ok(Ok(request)) => request,
         Ok(Err(_)) => {

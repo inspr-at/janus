@@ -244,6 +244,28 @@ impl fmt::Debug for VerifiedAuthoritativeOperation {
     }
 }
 
+impl VerifiedAuthoritativeOperation {
+    pub fn operation_ref(&self) -> &OperationRef {
+        &self.operation_ref
+    }
+
+    pub fn scope(&self) -> &ScopeRef {
+        &self.scope
+    }
+
+    pub const fn conflict_domain(&self) -> ConflictDomain {
+        self.conflict_domain
+    }
+
+    pub const fn duty(&self) -> Duty {
+        self.duty
+    }
+
+    pub fn release_digest(&self) -> &str {
+        &self.release_digest
+    }
+}
+
 /// Stateful verifier consumes each signed state nonce exactly once.
 pub struct OperationStateVerifier {
     verifying_key: VerifyingKey,
