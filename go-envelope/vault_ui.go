@@ -626,6 +626,31 @@ func (app *App) handleAssurancePage(w http.ResponseWriter, r *http.Request) {
 	renderTemplate(w, app.templates, "assurance_page", data)
 }
 
+func (app *App) handleKnowledgePage(w http.ResponseWriter, r *http.Request) {
+	app.audit(r, "knowledge.view", "allowed", actorFromContext(r.Context()), "")
+	session := currentSession(r.Context())
+	data := app.dashboardData(r, session, nil, "")
+	data["ActivePage"] = "knowledge"
+	data["KnowledgeTerms"] = knowledgeTerms()
+	data["KnowledgeFlows"] = knowledgeFlows()
+	renderTemplate(w, app.templates, "knowledge_page", data)
+}
+
+func (app *App) handleKnowledgeFlowPage(w http.ResponseWriter, r *http.Request) {
+	flow, ok := knowledgeFlowBySlug(r.PathValue("flowSlug"))
+	if !ok {
+		app.renderSafeFailure(w, r, http.StatusNotFound, "knowledge_flow_not_found", "That knowledge workflow does not exist.", nil)
+		return
+	}
+	app.audit(r, "knowledge.flow.view", "allowed", actorFromContext(r.Context()), flow.Slug)
+	session := currentSession(r.Context())
+	data := app.dashboardData(r, session, nil, "")
+	data["ActivePage"] = "knowledge"
+	data["Flow"] = flow
+	data["KnowledgeFlows"] = knowledgeFlows()
+	renderTemplate(w, app.templates, "knowledge_flow_page", data)
+}
+
 func (app *App) handleSettingsPage(w http.ResponseWriter, r *http.Request) {
 	app.audit(r, "settings.view", "allowed", actorFromContext(r.Context()), "")
 	session := currentSession(r.Context())
