@@ -910,9 +910,22 @@ fn unavailable(detail: impl Into<String>) -> JanusError {
 mod tests {
     use super::*;
     use crate::{test_scope, TrustAdapterKind};
-    use std::time::Duration;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{Duration, SystemTime};
 
     const RELEASE: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    fn test_nonce() -> String {
+        static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+        let clock = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        format!(
+            "nce_{:024x}",
+            clock ^ u128::from(SEQUENCE.fetch_add(1, Ordering::Relaxed))
+        )
+    }
 
     fn candidate(
         key: &SigningKey,
@@ -920,7 +933,6 @@ mod tests {
         actor: &ActorSubjectRef,
         domain: ConflictDomain,
         duty: Duty,
-        nonce: u8,
     ) -> PolicyDutyCandidate {
         let now = UNIX_EPOCH + Duration::from_secs(100);
         let operation = OperationRef::derive(domain, "stable-lineage").unwrap();
@@ -935,7 +947,7 @@ mod tests {
             &SafeLabel::new("policy-v1").unwrap(),
             now,
             now + Duration::from_secs(60),
-            &format!("nce_{nonce:024x}"),
+            &test_nonce(),
             "janus-duty",
             RELEASE,
         )
@@ -963,7 +975,6 @@ mod tests {
             &actor,
             ConflictDomain::UseRequest,
             Duty::RequestUse,
-            1,
         );
         assert_eq!(first.duty(), Duty::RequestUse);
         let operation = OperationRef::derive(ConflictDomain::UseRequest, "other").unwrap();
@@ -979,11 +990,12 @@ mod tests {
             &SafeLabel::new("policy-v1").unwrap(),
             now,
             now + Duration::from_secs(60),
-            "nce_000000000000000000000001",
+            &test_nonce(),
             "janus-duty",
             RELEASE,
         )
         .unwrap();
+        assert!(verifier.verify_once(&reference, now).is_ok());
         assert!(verifier.verify_once(&reference, now).is_err());
         let mut wrong_release = OperationStateVerifier::new(
             key.verifying_key(),
@@ -1014,7 +1026,6 @@ mod tests {
             &actor,
             ConflictDomain::UseRequest,
             Duty::RequestUse,
-            1,
         );
         let approve = candidate(
             &domain_key,
@@ -1022,7 +1033,6 @@ mod tests {
             &actor,
             ConflictDomain::UseRequest,
             Duty::ApproveUse,
-            2,
         );
         let epoch1 = DutyEpochCertificateV1::genesis(&first_key).unwrap();
         let epoch2 = DutyEpochCertificateV1::rotate(&epoch1, &first_key, &second_key).unwrap();
@@ -1071,7 +1081,6 @@ mod tests {
             &actor,
             ConflictDomain::Recovery,
             Duty::OperateRecovery,
-            1,
         );
         let epoch = DutyEpochCertificateV1::genesis(&journal_key).unwrap();
         let record = DutyAdmissionV1::issue(

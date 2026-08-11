@@ -724,12 +724,25 @@ mod tests {
         OperationStateVerifier, SafeLabel, ScopePathV1, TrustAdapterKind,
         VerifiedAuthoritativeOperation,
     };
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
     use std::thread;
-    use std::time::{Duration, UNIX_EPOCH};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
     use tempfile::tempdir;
 
     const RELEASE: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    fn test_nonce() -> String {
+        static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+        let clock = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        format!(
+            "nce_{:024x}",
+            clock ^ u128::from(SEQUENCE.fetch_add(1, Ordering::Relaxed))
+        )
+    }
 
     #[derive(Default)]
     struct Audit {
@@ -768,7 +781,7 @@ mod tests {
         domain: ConflictDomain,
         duty: Duty,
         operation_lineage: &str,
-        nonce: u8,
+        policy_revision: u8,
     ) -> VerifiedAuthoritativeOperation {
         let now = UNIX_EPOCH + Duration::from_secs(100);
         let operation = OperationRef::derive(domain, operation_lineage).unwrap();
@@ -780,10 +793,10 @@ mod tests {
             domain,
             duty,
             1,
-            &SafeLabel::new(format!("policy-v{nonce}")).unwrap(),
+            &SafeLabel::new(format!("policy-v{policy_revision}")).unwrap(),
             now,
             now + Duration::from_secs(60),
-            &format!("nce_{nonce:024x}"),
+            &test_nonce(),
             "janus-duty",
             RELEASE,
         )
@@ -798,11 +811,18 @@ mod tests {
         domain: ConflictDomain,
         duty: Duty,
         operation_lineage: &str,
-        nonce: u8,
+        policy_revision: u8,
     ) -> PolicyDutyCandidate {
         PolicyDutyCandidate::from_verified_operation(
             actor.clone(),
-            verified_operation(domain_key, verifier, domain, duty, operation_lineage, nonce),
+            verified_operation(
+                domain_key,
+                verifier,
+                domain,
+                duty,
+                operation_lineage,
+                policy_revision,
+            ),
         )
     }
 
