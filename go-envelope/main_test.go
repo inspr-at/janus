@@ -47,6 +47,10 @@ func newTestApp(t *testing.T) *App {
 	if err != nil {
 		t.Fatal(err)
 	}
+	store.mu.Lock()
+	store.items = testCatalogDescriptors()
+	store.normalizeLocked()
+	store.mu.Unlock()
 	permitStore, err := NewPermitStore(tTempDir)
 	if err != nil {
 		t.Fatal(err)
@@ -57,6 +61,24 @@ func newTestApp(t *testing.T) *App {
 		broker:    NewBroker(store),
 		permits:   permitStore,
 		templates: mustTemplates(),
+	}
+}
+
+func testCatalogDescriptors() []SecretDescriptor {
+	now := time.Now().UTC()
+	return []SecretDescriptor{
+		{
+			ID: "zitadel-janus-oidc", DisplayName: "Janus Zitadel application", Provider: "agenix",
+			Classification: "high", Owner: "platform", Scope: "csb1", Source: "secrets/csb1-janus-env.age",
+			RotationDays: 180, LastCheckedAt: now, Status: "managed", UseEnabled: true, ConsumerCount: 1,
+			Tags: []string{"identity", "oidc"},
+		},
+		{
+			ID: "csb1-age-identity", DisplayName: "csb1 age identity", Provider: "agenix",
+			Classification: "critical", Owner: "platform", Scope: "csb1", Source: "secrets/csb1-age-identity.age",
+			RotationDays: 365, LastCheckedAt: now, Status: "external", UseEnabled: true, ConsumerCount: 1,
+			Tags: []string{"host", "decrypt-only"},
+		},
 	}
 }
 
@@ -219,6 +241,38 @@ func TestLoadsExternalAgenixCatalog(t *testing.T) {
 	}
 	if descriptors[0].Scope != "csb1" || descriptors[0].EgressMode != "none" || descriptors[0].Lifecycle != LifecycleActive {
 		t.Fatalf("expected normalized safe metadata: %#v", descriptors[0])
+	}
+}
+
+func TestFreshStoreStartsWithEmptyCatalog(t *testing.T) {
+	dataDir := t.TempDir()
+	store, err := NewStore(dataDir, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := store.Descriptors(); len(got) != 0 {
+		t.Fatalf("fresh store should not contain sample descriptors: %#v", got)
+	}
+
+	raw, err := os.ReadFile(filepath.Join(dataDir, "catalog.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(raw); got != "[]\n" {
+		t.Fatalf("fresh store should persist an explicit empty catalog, got %q", got)
+	}
+	for _, forbidden := range []string{"csb1", "zitadel", "secrets/"} {
+		if strings.Contains(strings.ToLower(string(raw)), forbidden) {
+			t.Fatalf("fresh catalog contains environment-specific metadata %q: %s", forbidden, raw)
+		}
+	}
+
+	reloaded, err := NewStore(dataDir, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := reloaded.Descriptors(); len(got) != 0 {
+		t.Fatalf("reloaded fresh store should remain empty: %#v", got)
 	}
 }
 

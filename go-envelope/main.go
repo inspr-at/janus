@@ -287,13 +287,13 @@ func NewStore(dataDir, externalCatalogFile string) (*Store, error) {
 		externalCatalogFile: externalCatalogFile,
 		auditFile:           filepath.Join(dataDir, "audit.jsonl"),
 	}
-	if err := s.loadOrSeed(); err != nil {
+	if err := s.loadCatalog(); err != nil {
 		return nil, err
 	}
 	return s, nil
 }
 
-func (s *Store) loadOrSeed() error {
+func (s *Store) loadCatalog() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -311,8 +311,7 @@ func (s *Store) loadOrSeed() error {
 
 	raw, err := os.ReadFile(s.catalogFile)
 	if errors.Is(err, os.ErrNotExist) {
-		s.items = seedCatalog()
-		s.normalizeLocked()
+		s.items = []SecretDescriptor{}
 		return s.persistLocked()
 	}
 	if err != nil {
@@ -3524,48 +3523,6 @@ func (app *App) handleBrokerError(w http.ResponseWriter, r *http.Request, action
 	default:
 		app.auditWithRef(r, action, "denied", actor, "", "broker error")
 		writeJSONError(w, r, http.StatusBadRequest, "broker_error", err.Error())
-	}
-}
-
-func seedCatalog() []SecretDescriptor {
-	now := time.Now().UTC()
-	return []SecretDescriptor{
-		{
-			ID:             "zitadel-janus-oidc",
-			DisplayName:    "Janus Zitadel application",
-			Provider:       "agenix",
-			Classification: "high",
-			Owner:          "platform",
-			Scope:          "csb1",
-			Source:         "secrets/csb1-janus-env.age",
-			RotationDays:   180,
-			LastCheckedAt:  now,
-			Lifecycle:      LifecycleActive,
-			Status:         "managed",
-			RevealAllowed:  false,
-			UseEnabled:     true,
-			ConsumerCount:  1,
-			EgressMode:     "none",
-			Tags:           []string{"identity", "oidc"},
-		},
-		{
-			ID:             "csb1-age-identity",
-			DisplayName:    "csb1 age identity",
-			Provider:       "agenix",
-			Classification: "critical",
-			Owner:          "platform",
-			Scope:          "csb1",
-			Source:         "secrets/csb1-age-identity.age",
-			RotationDays:   365,
-			LastCheckedAt:  now,
-			Lifecycle:      LifecycleActive,
-			Status:         "external",
-			RevealAllowed:  false,
-			UseEnabled:     true,
-			ConsumerCount:  1,
-			EgressMode:     "none",
-			Tags:           []string{"host", "decrypt-only"},
-		},
 	}
 }
 
