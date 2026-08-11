@@ -310,6 +310,18 @@ def run(catalog: Catalog, stack: str) -> None:
                 f"scenario failed id={scenario.id} family={scenario.family}"
             ) from error
         if result.returncode != 0:
+            diagnostic = result.stdout.decode("utf-8", errors="replace")
+            diagnostic = re.sub(
+                r"SENSITIVE_[A-Za-z0-9_]+|janus-[A-Za-z0-9_-]*canary[A-Za-z0-9_-]*|AGE-SECRET-KEY-[A-Z0-9-]+",
+                "[redacted-fixture]",
+                diagnostic,
+            )
+            diagnostic = "\n".join(diagnostic.splitlines()[-20:])[:4096]
+            if diagnostic:
+                print(
+                    "error: redacted scenario diagnostic follows:\n" + diagnostic,
+                    file=sys.stderr,
+                )
             raise AssuranceError(
                 f"scenario failed id={scenario.id} family={scenario.family}"
             )
