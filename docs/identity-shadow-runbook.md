@@ -1,9 +1,10 @@
 # Authenticated actor identity-shadow runbook
 
 Status: implemented foundation for JANUS-427. This slice authenticates local
-kernel peers and emits signed, value-free observations. It does **not** grant
-runtime authority, activate durable duty history, or make separation of duties
-`enforced`.
+kernel peers and emits signed, value-free observations. JANUS-428 adds the
+separate [durable duty journal foundation](durable-duty-journal.md), but runtime
+surfaces still use the legacy posture. Identity shadow does **not** grant runtime
+authority or make separation of duties `enforced`.
 
 ## What is active
 
@@ -116,7 +117,8 @@ migration preflight.
 ## Claims that remain forbidden
 
 Do not report `authenticated_observe`, `enforced_recorded`, or enforced
-separation from this slice. The broker does not yet own runtime authorization,
-operation-lineage verification, durable duty admission, journal recovery, or
-all-surface cutover. Those requirements remain in the accepted
+separation from this slice. Signed operation lineage, durable duty admission,
+and journal recovery now exist as a broker-only foundation, but the broker does
+not yet own every runtime authorization transaction and all-surface cutover.
+Those remaining requirements are tracked by JANUS-429 under the accepted
 [authenticated principals and durable duty history contract](authenticated-principal-duty-history.md).

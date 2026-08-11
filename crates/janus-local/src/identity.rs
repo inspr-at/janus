@@ -385,11 +385,58 @@ struct LocalPeerCredentials {
     pid: Option<i32>,
 }
 
-/// Broker-internal assertion; deliberately impossible for clients to construct.
-struct AuthenticatedActorV1 {
+/// Broker-internal authenticated actor. Public consumers can name the type but
+/// cannot construct or deserialize it; only the kernel-peer broker creates it.
+pub struct BrokerAuthenticatedActorV1 {
     subject: SubjectRegistryEntry,
+    scope: ScopeRef,
+    release_digest: String,
     peer_binding_ref: String,
     channel_binding_ref: String,
+}
+
+impl std::fmt::Debug for BrokerAuthenticatedActorV1 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("BrokerAuthenticatedActorV1")
+            .field("subject_ref", &self.subject.subject_ref)
+            .field("scope", &self.scope)
+            .field("release_digest", &self.release_digest)
+            .field("peer_binding_ref", &self.peer_binding_ref)
+            .field("channel_binding_ref", &self.channel_binding_ref)
+            .finish()
+    }
+}
+
+impl BrokerAuthenticatedActorV1 {
+    pub(crate) fn subject_ref(&self) -> &ActorSubjectRef {
+        &self.subject.subject_ref
+    }
+    pub(crate) fn scope(&self) -> &ScopeRef {
+        &self.scope
+    }
+    pub(crate) fn release_digest(&self) -> &str {
+        &self.release_digest
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fixture(
+        subject_ref: ActorSubjectRef,
+        scope: ScopeRef,
+        release_digest: &str,
+    ) -> Self {
+        Self {
+            subject: SubjectRegistryEntry {
+                subject_ref,
+                subject_class: ActorSubjectClass::Human,
+                status: SubjectRegistryStatus::Active,
+            },
+            scope,
+            release_digest: release_digest.to_string(),
+            peer_binding_ref: "pbr_fixture".to_string(),
+            channel_binding_ref: "cbr_fixture".to_string(),
+        }
+    }
 }
 
 /// Non-authorizing local identity broker.
@@ -522,8 +569,10 @@ impl IdentityShadowBroker {
                 "identity adapter is not locally supported",
             ));
         }
-        let authenticated = AuthenticatedActorV1 {
+        let authenticated = BrokerAuthenticatedActorV1 {
             subject: self.registry.resolve_local_uid(peer.uid)?,
+            scope: scope.clone(),
+            release_digest: self.release_digest.clone(),
             peer_binding_ref: peer_binding_ref(peer),
             channel_binding_ref: channel_binding_ref.to_string(),
         };

@@ -11,6 +11,7 @@
 mod audit;
 mod break_glass;
 mod delegation;
+mod duty;
 mod identity;
 mod migration;
 mod recovery;
@@ -28,12 +29,16 @@ pub use delegation::{
     DelegationListEntry, DelegationRecord, DelegationRegistry, FileDelegationRegistry,
     NoopDelegationRegistry,
 };
+pub use duty::{
+    DutyAuthorizationAuditSink, DutyAuthorizationAuditV1, DutyAuthorizationOutcome,
+    DutyAuthorizationReceiptV1, FileDutyJournal,
+};
 pub use identity::{
     bind_private_identity_socket, load_or_create_identity_signing_key,
     preflight_identity_binding_migration, technical_binding_fingerprint, verify_actor_observation,
-    FileSubjectRegistry, IdentityBindingMigrationPreflightV1, IdentityObservationVerifier,
-    IdentityShadowBroker, IdentityShadowReplyV1, IdentityShadowRequestV1, SubjectRegistryEntry,
-    SubjectRegistryStatus,
+    BrokerAuthenticatedActorV1, FileSubjectRegistry, IdentityBindingMigrationPreflightV1,
+    IdentityObservationVerifier, IdentityShadowBroker, IdentityShadowReplyV1,
+    IdentityShadowRequestV1, SubjectRegistryEntry, SubjectRegistryStatus,
 };
 pub use migration::{enforce_migration_ready_from_env, ApprovalMigrationRunner, MigrationStatus};
 pub use recovery::{

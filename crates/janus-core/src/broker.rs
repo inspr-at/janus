@@ -6,10 +6,10 @@ use crate::{
     authorization_fingerprint, authorize_role_action, consumer::consumer_observe_event,
     ApprovalGrant, AuditAction, AuditEvent, AuditOutcome, AuditSink, ClassPermitPolicy,
     ConsumerDescriptor, DelegatedUseContext, DelegationGrant, DelegationPolicy,
-    DelegationRevocation, Destination, ExecutorRef, JanusError, JanusResult, Permission,
-    PermitIssuer, PolicyDecision, PrincipalChain, ProfilePolicy, RoleBinding, RoleDecisionInput,
-    RolePolicyV1, SecretDescriptor, SecretName, SecretRef, SecretStore, SecretValue, Severity,
-    UsePermit, UseRequest,
+    DelegationRevocation, Destination, DutyAuthorization, ExecutorRef, JanusError, JanusResult,
+    Permission, PermitIssuer, PolicyDecision, PrincipalChain, ProfilePolicy, RoleBinding,
+    RoleDecisionInput, RolePolicyV1, SecretDescriptor, SecretName, SecretRef, SecretStore,
+    SecretValue, Severity, UsePermit, UseRequest,
 };
 
 /// Policy/audit wrapper around a backend store.
@@ -75,7 +75,7 @@ where
             approval_fingerprint,
             delegation_fingerprint,
             audit_available: true,
-            duties: &[],
+            duty_authorization: DutyAuthorization::AccountabilityLegacy,
             bindings: &self.role_bindings,
             now,
         };

@@ -12,6 +12,7 @@ pub mod break_glass;
 pub mod broker;
 pub mod consumer;
 pub mod delegation;
+pub mod duty;
 pub mod error;
 pub mod identity;
 pub mod managed_service;
@@ -57,6 +58,13 @@ pub use delegation::{
     DelegatedUseContext, DelegatedUseContextSnapshotV1, DelegationAction, DelegationDecision,
     DelegationGrant, DelegationGrantSnapshotV1, DelegationId, DelegationPolicy,
     DelegationRevocation, DelegationRevocationSnapshotV1, DelegationScope, DelegationStatus,
+};
+pub use duty::{
+    AuthoritativeOperationRefV1, ConflictDomain, DutyAdmissionV1, DutyEpochCertificateV1,
+    DutyJournalVerifier, OperationRef, OperationStateVerifier, PolicyDutyCandidate,
+    VerifiedAuthoritativeOperation, VerifiedDutyJournal, VerifiedOperationView,
+    DUTY_ADMISSION_SCHEMA, DUTY_EPOCH_SCHEMA, DUTY_JOURNAL_GENESIS_HASH, MAX_DUTIES_PER_OPERATION,
+    MAX_DUTY_RECORDS, MAX_OPERATION_REFERENCE_TTL_SECS, OPERATION_STATE_SCHEMA,
 };
 pub use error::{JanusError, JanusResult};
 pub use identity::{
@@ -125,8 +133,8 @@ pub use retention::{
     RetentionPolicyV1,
 };
 pub use roles::{
-    authorization_fingerprint, authorize_role_action, Duty, DutyConflict, DutyEvidence, Permission,
-    Role, RoleBinding, RoleBindingId, RoleBindingSnapshotV1, RoleBindingSource,
+    authorization_fingerprint, authorize_role_action, Duty, DutyAuthorization, DutyConflict,
+    Permission, Role, RoleBinding, RoleBindingId, RoleBindingSnapshotV1, RoleBindingSource,
     RoleBindingSourceKind, RoleDecision, RoleDecisionInput, RoleDecisionSnapshotV1,
     RolePolicySnapshotV1, RolePolicyV1, SeparationPolicy, MAX_ROLE_BINDING_TTL,
     ROLE_BINDING_SNAPSHOT_VERSION, ROLE_POLICY_SNAPSHOT_VERSION,

@@ -117,7 +117,7 @@ pub async fn run_for_plane(selected_plane: Option<RuntimePlane>) -> Result<()> {
     let role_authorization = if emergency_activation.is_some() || role_bootstrap {
         None
     } else {
-        enforce_runtime_role_from_env(action, &principal, None, &[], SystemTime::now())
+        enforce_runtime_role_from_env(action, &principal, None, SystemTime::now())
             .context("role authorization denied runtime action")?
     };
     if break_glass_admin::is_break_glass_command(&args) {
