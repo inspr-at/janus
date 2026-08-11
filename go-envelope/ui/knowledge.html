@@ -1,0 +1,146 @@
+{{ define "knowledge_term_illustration" -}}
+<svg class="knowledge-illustration" viewBox="0 0 160 72" role="img" aria-labelledby="term-art-{{ .ID }}">
+  <title id="term-art-{{ .ID }}">Relationship illustration for {{ .Name }}</title>
+  <path class="knowledge-link" d="M44 36h72"></path>
+  <circle class="knowledge-node knowledge-node-a" cx="32" cy="36" r="15"></circle>
+  <rect class="knowledge-node knowledge-node-b" x="116" y="21" width="30" height="30" rx="8"></rect>
+  <circle class="knowledge-pulse" cx="80" cy="36" r="7"></circle>
+</svg>
+{{- end }}
+
+{{ define "knowledge_flow_illustration" -}}
+<svg class="flow-illustration" viewBox="0 0 760 150" role="img" aria-labelledby="flow-art-title flow-art-desc">
+  <title id="flow-art-title">{{ .Title }} sequence</title>
+  <desc id="flow-art-desc">Four reviewed stages connected from left to right, with checks between every stage.</desc>
+  <path class="knowledge-link" d="M105 64h550"></path>
+  <path class="flow-arrow" d="m650 57 14 7-14 7"></path>
+  {{ range $index, $step := .Steps }}
+    {{ if eq $index 0 }}<g transform="translate(80 64)">{{ end }}
+    {{ if eq $index 1 }}<g transform="translate(280 64)">{{ end }}
+    {{ if eq $index 2 }}<g transform="translate(480 64)">{{ end }}
+    {{ if eq $index 3 }}<g transform="translate(680 64)">{{ end }}
+      <circle class="flow-node" r="30"></circle>
+      <text class="flow-node-number" text-anchor="middle" dominant-baseline="central">{{ .Number }}</text>
+      <text class="flow-node-actor" text-anchor="middle" y="55">{{ .Actor }}</text>
+    </g>
+  {{ end }}
+</svg>
+{{- end }}
+
+{{ define "knowledge_page" -}}
+<!doctype html>
+<html lang="en">
+<head>
+  <title>Janus — Knowledge</title>
+  {{ template "doorkeeper_head" . }}
+</head>
+<body>
+<div class="layout">
+  {{ template "doorkeeper_side" . }}
+  <main class="main knowledge-main">
+    <div class="pagehead">
+      <div><h1>Knowledge</h1><div class="sub">the words, boundaries, and workflows Janus actually enforces</div></div>
+      <span class="asof">versioned with this release</span>
+    </div>
+
+    <section class="knowledge-intro" aria-labelledby="knowledge-intro-title">
+      <div>
+        <div class="eyebrow">CODE-INVENTORIED FIELD GUIDE</div>
+        <h2 id="knowledge-intro-title">Understand the system before operating it.</h2>
+        <p>This guide follows the closed vocabularies in the Rust engine, the shared role matrix, and the envelope's role and scope handling. When those contracts change, release tests require this inventory to change with them.</p>
+      </div>
+      <div class="knowledge-counts" aria-label="Knowledge inventory">
+        <div><strong>{{ len .KnowledgeTerms }}</strong><span>concepts</span></div>
+        <div><strong>{{ len .KnowledgeFlows }}</strong><span>workflows</span></div>
+        <div><strong>47</strong><span>runtime actions</span></div>
+      </div>
+    </section>
+
+    <section class="knowledge-section" aria-labelledby="flow-index-title">
+      <div class="section-title"><div><div class="eyebrow">WORKFLOWS</div><h2 id="flow-index-title">Follow one governed operation</h2></div><p>Each guide separates present enforcement from intended boundaries.</p></div>
+      <div class="flow-index">
+        {{ range .KnowledgeFlows }}
+        <a class="flow-index-card" href="/knowledge/flows/{{ .Slug }}">
+          <span class="flow-index-mark" aria-hidden="true">→</span>
+          <strong>{{ .Title }}</strong>
+          <span>{{ .Summary }}</span>
+        </a>
+        {{ end }}
+      </div>
+    </section>
+
+    <section class="knowledge-section" aria-labelledby="glossary-title">
+      <div class="section-title"><div><div class="eyebrow">GLOSSARY</div><h2 id="glossary-title">Use the same words as the runtime</h2></div><p>Plain definitions first; exact code values where the vocabulary is closed.</p></div>
+      <div class="knowledge-glossary">
+        {{ range .KnowledgeTerms }}
+        <article class="knowledge-term" id="{{ .ID }}">
+          <div class="knowledge-term-copy">
+            <div class="knowledge-term-heading"><h3>{{ .Name }}</h3><a href="#{{ .ID }}" aria-label="Link to {{ .Name }}">#</a></div>
+            <p class="knowledge-plain">{{ .Plain }}</p>
+            <p>{{ .Detail }}</p>
+          </div>
+          {{ template "knowledge_term_illustration" . }}
+          {{ with .Values }}
+          <div class="knowledge-values" aria-label="Closed vocabulary values" tabindex="0">
+            {{ range . }}<div><code>{{ .Code }}</code><span>{{ .Detail }}</span></div>{{ end }}
+          </div>
+          {{ end }}
+          <div class="knowledge-related"><span>Appears in</span>{{ range .FlowSlugs }}<a href="/knowledge/flows/{{ . }}">{{ knowledgeFlowTitle . }}</a>{{ end }}</div>
+        </article>
+        {{ end }}
+      </div>
+    </section>
+  </main>
+</div>
+</body>
+</html>
+{{- end }}
+
+{{ define "knowledge_flow_page" -}}
+<!doctype html>
+<html lang="en">
+<head>
+  <title>Janus Knowledge — {{ .Flow.Title }}</title>
+  {{ template "doorkeeper_head" . }}
+</head>
+<body>
+<div class="layout">
+  {{ template "doorkeeper_side" . }}
+  <main class="main knowledge-main">
+    <div class="pagehead">
+      <div><a class="knowledge-back" href="/knowledge">← Knowledge</a><h1>{{ .Flow.Title }}</h1><div class="sub">{{ .Flow.Summary }}</div></div>
+      <span class="asof">value-free guide</span>
+    </div>
+
+    <section class="flow-hero" aria-label="Scrollable workflow overview" tabindex="0">
+      {{ template "knowledge_flow_illustration" .Flow }}
+    </section>
+
+    <section class="truth-grid" aria-label="Current and intended enforcement">
+      <article class="truth-card enforced"><div class="truth-label"><span aria-hidden="true">✓</span> Enforced today</div><p>{{ .Flow.Enforced }}</p></article>
+      <article class="truth-card intended"><div class="truth-label"><span aria-hidden="true">◇</span> Boundary and next layer</div><p>{{ .Flow.Intended }}</p></article>
+    </section>
+
+    <section class="knowledge-section" aria-labelledby="steps-title">
+      <div class="section-title"><div><div class="eyebrow">STEP BY STEP</div><h2 id="steps-title">Who acts, what is checked, what remains</h2></div></div>
+      <ol class="flow-steps">
+        {{ range .Flow.Steps }}
+        <li>
+          <div class="flow-step-number">{{ .Number }}</div>
+          <div class="flow-step-body"><div class="flow-step-actor">{{ .Actor }}</div><h3>{{ .Action }}</h3><dl><div><dt>Checks</dt><dd>{{ .Checks }}</dd></div><div><dt>Evidence</dt><dd>{{ .Evidence }}</dd></div></dl></div>
+        </li>
+        {{ end }}
+      </ol>
+    </section>
+
+    <section class="flow-evidence" aria-labelledby="evidence-title">
+      <div><div class="eyebrow">EVIDENCE TO KEEP</div><h2 id="evidence-title">Enough to prove the decision, never the value</h2></div>
+      <p>{{ .Flow.Evidence }}</p>
+    </section>
+
+    <nav class="flow-other" aria-label="Other workflows"><span>Other workflows</span>{{ range .KnowledgeFlows }}{{ if ne .Slug $.Flow.Slug }}<a href="/knowledge/flows/{{ .Slug }}">{{ .Title }}</a>{{ end }}{{ end }}</nav>
+  </main>
+</div>
+</body>
+</html>
+{{- end }}

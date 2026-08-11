@@ -822,6 +822,8 @@ func (app *App) routeSpecs() []routeSpec {
 		{pattern: "GET /requests", permission: PermissionDescriptorRead, authenticated: true, handler: app.handleRequestsPage},
 		{pattern: "GET /ledger", permission: PermissionDescriptorRead, authenticated: true, handler: app.handleLedgerPage},
 		{pattern: "GET /assurance", permission: PermissionDescriptorRead, authenticated: true, handler: app.handleAssurancePage},
+		{pattern: "GET /knowledge", permission: PermissionDescriptorRead, authenticated: true, handler: app.handleKnowledgePage},
+		{pattern: "GET /knowledge/flows/{flowSlug}", permission: PermissionDescriptorRead, authenticated: true, handler: app.handleKnowledgeFlowPage},
 		{pattern: "GET /settings", permission: PermissionDescriptorRead, authenticated: true, handler: app.handleSettingsPage},
 		{pattern: "GET /vault/new", permission: PermissionDescriptorRead, authenticated: true, handler: app.handleNewSecretPage},
 		{pattern: "GET /vault/new/plan.sh", permission: PermissionManagedRun, authenticated: true, handler: app.handleNewSecretScript},
@@ -860,7 +862,7 @@ func (app *App) safeHTTPBoundary(next http.Handler) http.Handler {
 
 func allowedMethodsForPath(path string) ([]string, bool) {
 	switch path {
-	case "/", "/access", "/requests", "/ledger", "/assurance", "/settings", "/vault/new", "/vault/new/plan.sh", "/auth/smoke", "/session-witness", "/session-witness.txt", "/managed-service/setup", "/managed-environment/setup", "/healthz", "/readyz", "/buildz", "/favicon.ico", "/login", "/auth/reset", "/oidc/callback", "/api/warden/descriptors", "/api/audit/recent", "/api/auth/session-witness", "/api/posture", "/api/evidence":
+	case "/", "/access", "/requests", "/ledger", "/assurance", "/knowledge", "/settings", "/vault/new", "/vault/new/plan.sh", "/auth/smoke", "/session-witness", "/session-witness.txt", "/managed-service/setup", "/managed-environment/setup", "/healthz", "/readyz", "/buildz", "/favicon.ico", "/login", "/auth/reset", "/oidc/callback", "/api/warden/descriptors", "/api/audit/recent", "/api/auth/session-witness", "/api/posture", "/api/evidence":
 		return []string{http.MethodGet}, true
 	case "/session-witness/verify":
 		return []string{http.MethodGet, http.MethodPost}, true
@@ -873,6 +875,8 @@ func allowedMethodsForPath(path string) ([]string, bool) {
 	}
 	switch {
 	case strings.HasPrefix(path, "/static/"):
+		return []string{http.MethodGet}, true
+	case knowledgeFlowPath(path):
 		return []string{http.MethodGet}, true
 	case managedSetupCompletionPath(path):
 		return []string{http.MethodGet}, true
@@ -900,6 +904,11 @@ func singleSegmentRunPath(path, prefix string) bool {
 	}
 	permitID, ok := strings.CutSuffix(rest, "/run")
 	return ok && permitID != "" && !strings.Contains(permitID, "/")
+}
+
+func knowledgeFlowPath(path string) bool {
+	slug, ok := strings.CutPrefix(path, "/knowledge/flows/")
+	return ok && slug != "" && !strings.Contains(slug, "/")
 }
 
 func methodAllowed(allowed []string, method string) bool {
@@ -2597,10 +2606,10 @@ func safeLoginReturnPath(raw string) (string, bool) {
 
 func loginReturnPathAllowed(returnPath string) bool {
 	switch returnPath {
-	case "/", "/access", "/requests", "/ledger", "/assurance", "/settings", "/vault/new", "/auth/smoke", "/session-witness", "/session-witness/verify":
+	case "/", "/access", "/requests", "/ledger", "/assurance", "/knowledge", "/settings", "/vault/new", "/auth/smoke", "/session-witness", "/session-witness/verify":
 		return true
 	default:
-		return false
+		return knowledgeFlowPath(returnPath)
 	}
 }
 
@@ -3559,11 +3568,12 @@ func (b *boundedTemplateBuffer) Write(p []byte) (int, error) {
 
 func mustTemplates() *template.Template {
 	t := template.Must(template.New("janus").Funcs(template.FuncMap{
-		"buildCommitShort":  func() string { return shortCommit(buildCommit) },
-		"since":             humanSince,
-		"permitActionLabel": permitActionLabel,
-		"permitStatusLabel": permitStatusLabel,
-		"permitStatusTone":  permitStatusTone,
+		"buildCommitShort":   func() string { return shortCommit(buildCommit) },
+		"since":              humanSince,
+		"permitActionLabel":  permitActionLabel,
+		"permitStatusLabel":  permitStatusLabel,
+		"permitStatusTone":   permitStatusTone,
+		"knowledgeFlowTitle": knowledgeFlowTitle,
 	}).Parse(`
 {{ define "base_top" -}}
 <!doctype html>

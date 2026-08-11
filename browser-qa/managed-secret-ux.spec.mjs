@@ -159,6 +159,53 @@ test("login keeps the centred hero and action clear at every breakpoint", async 
   }
 });
 
+test("knowledge explains every governed workflow accessibly and without layout overflow", async ({
+  page,
+}) => {
+  await page.goto("/__managed-browser/session?kind=create");
+  await page.goto("/knowledge");
+  await expect(page.getByRole("heading", { name: "Knowledge", exact: true })).toBeVisible();
+  await expect(page.getByText("CODE-INVENTORIED FIELD GUIDE")).toBeVisible();
+  await expect(page.locator(".knowledge-term")).toHaveCount(21);
+  await expect(page.locator(".knowledge-illustration")).toHaveCount(21);
+  await expect(page.locator(".flow-index-card")).toHaveCount(8);
+  await expect(page.getByText("admin.dynamic_transport", { exact: true })).toBeVisible();
+
+  const indexAccessibility = await new AxeBuilder({ page }).analyze();
+  expect(
+    indexAccessibility.violations.filter(({ impact }) =>
+      ["serious", "critical"].includes(impact),
+    ),
+  ).toEqual([]);
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth - window.innerWidth,
+    ),
+  ).toBeLessThanOrEqual(0);
+
+  const workflowLinks = await page
+    .locator('.flow-index-card[href^="/knowledge/flows/"]')
+    .evaluateAll((links) => links.map((link) => link.getAttribute("href")));
+  expect(new Set(workflowLinks).size).toBe(8);
+  for (const workflow of workflowLinks) {
+    await page.goto(workflow);
+    await expect(page.locator(".truth-card.enforced .truth-label")).toContainText(
+      "Enforced today",
+    );
+    await expect(page.locator(".truth-card.intended .truth-label")).toContainText(
+      "Boundary and next layer",
+    );
+    await expect(page.locator(".flow-illustration")).toHaveCount(1);
+    await expect(page.locator(".flow-steps > li")).toHaveCount(4);
+    const accessibility = await new AxeBuilder({ page }).analyze();
+    expect(
+      accessibility.violations.filter(({ impact }) =>
+        ["serious", "critical"].includes(impact),
+      ),
+    ).toEqual([]);
+  }
+});
+
 test("passwordless import shows Check, forgets the value, and recovers navigation", async ({
   page,
 }) => {
