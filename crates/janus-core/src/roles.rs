@@ -142,6 +142,7 @@ impl Permission {
             RuntimeAction::WardenHealth => Self::HealthRead,
             RuntimeAction::ManagedRunPreflight | RuntimeAction::ManagedRun => Self::ManagedRun,
             RuntimeAction::EnvFilePreflight | RuntimeAction::EnvFile => Self::EnvFile,
+            RuntimeAction::PermitIssue => Self::SecretUse,
             RuntimeAction::ApprovalIssue => Self::ApprovalIssue,
             RuntimeAction::ApprovalPermit => Self::ApprovalPermit,
             RuntimeAction::ApprovalList => Self::ApprovalRead,

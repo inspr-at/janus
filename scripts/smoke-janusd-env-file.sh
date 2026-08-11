@@ -270,6 +270,45 @@ fi
 grep -F "denied_unknown_permit" "${log_file}" >/dev/null \
   || fail "second env-file attempt did not fail as consumed permit"
 
+python3 - "${metadata}" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+text = path.read_text(encoding="utf-8")
+old = 'classification = "break_glass"'
+if text.count(old) != 1:
+    raise SystemExit("fixture metadata did not contain one break_glass classification")
+path.write_text(text.replace(old, 'classification = "normal"'), encoding="utf-8")
+PY
+
+direct_permit_output="$(
+  run_janus "direct permit issue" "${janusd_use_bin}" permit issue \
+    --secret-ref "${secret_ref}" \
+    --profile "${profile_id}" \
+    --purpose "fixture env file handoff"
+)"
+direct_permit_id="$(printf '%s\n' "${direct_permit_output}" | extract_field "permit_id")"
+[ -n "${direct_permit_id}" ] || fail "permit id missing from direct permit issue output"
+printf '%s\n' "${direct_permit_output}" | grep -F "approval_used=false" >/dev/null \
+  || fail "direct permit issue unexpectedly used approval"
+printf '%s\n' "${direct_permit_output}" | grep -F "value_returned=false" >/dev/null \
+  || fail "direct permit issue outcome did not declare value_returned=false"
+
+direct_env_output="$(
+  run_janus "direct permit env-file" "${janusd_use_bin}" env-file \
+    --profile "${profile_id}" \
+    --permit "${direct_permit_id}"
+)"
+printf '%s\n' "${direct_env_output}" | grep -F "value_returned=false" >/dev/null \
+  || fail "direct permit env-file outcome did not declare value_returned=false"
+cmp -s "${expected_file}" "${env_file}" \
+  || fail "direct permit rendered env file did not match reviewed binding"
+[ "$(file_mode "${env_file}")" = "600" ] \
+  || fail "direct permit rendered env file is not mode 0600"
+[ ! -e "${permit_dir}/${direct_permit_id}.json" ] \
+  || fail "direct permit file still exists after env-file consume"
+
 evidence_file="${evidence_dir}/${secret_ref}.json"
 [ -f "${evidence_file}" ] || fail "lifecycle evidence file missing"
 grep -F '"last_used_at_unix_secs"' "${evidence_file}" >/dev/null \

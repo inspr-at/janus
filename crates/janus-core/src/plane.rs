@@ -55,6 +55,8 @@ pub enum RuntimeAction {
     EnvFilePreflight,
     /// Permit-bound private env-file handoff.
     EnvFile,
+    /// Direct reviewed-profile permit request from the use CLI.
+    PermitIssue,
     /// Approval grant creation.
     ApprovalIssue,
     /// Permit issuance from an approval.
@@ -135,7 +137,7 @@ pub enum RuntimeAction {
 
 impl RuntimeAction {
     /// Every known action, used by release-blocking completeness tests.
-    pub const ALL: [Self; 46] = [
+    pub const ALL: [Self; 47] = [
         Self::WardenListSecrets,
         Self::WardenDescribeSecret,
         Self::WardenRequestUse,
@@ -144,6 +146,7 @@ impl RuntimeAction {
         Self::ManagedRun,
         Self::EnvFilePreflight,
         Self::EnvFile,
+        Self::PermitIssue,
         Self::ApprovalIssue,
         Self::ApprovalPermit,
         Self::ApprovalList,
@@ -194,7 +197,8 @@ impl RuntimeAction {
             | Self::ManagedRunPreflight
             | Self::ManagedRun
             | Self::EnvFilePreflight
-            | Self::EnvFile => RuntimePlane::Use,
+            | Self::EnvFile
+            | Self::PermitIssue => RuntimePlane::Use,
             Self::ApprovalIssue
             | Self::ApprovalPermit
             | Self::ApprovalList
@@ -247,6 +251,7 @@ impl RuntimeAction {
             Self::ManagedRun => "use.run",
             Self::EnvFilePreflight => "use.env_file_preflight",
             Self::EnvFile => "use.env_file",
+            Self::PermitIssue => "use.permit_issue",
             Self::ApprovalIssue => "admin.approval_issue",
             Self::ApprovalPermit => "admin.approval_permit",
             Self::ApprovalList => "admin.approval_list",
@@ -540,6 +545,7 @@ pub const fn runtime_endpoint_policy(action: RuntimeAction) -> RuntimeEndpointPo
         | RuntimeAction::ManagedRun
         | RuntimeAction::EnvFilePreflight
         | RuntimeAction::EnvFile
+        | RuntimeAction::PermitIssue
         | RuntimeAction::ApprovalIssue
         | RuntimeAction::ApprovalPermit
         | RuntimeAction::ApprovalList
@@ -583,12 +589,13 @@ pub const fn runtime_endpoint_policy(action: RuntimeAction) -> RuntimeEndpointPo
 
 /// Closed endpoint-policy catalog. Adding an action requires extending both
 /// [`RuntimeAction::ALL`] and this release-reviewed matrix.
-pub const RUNTIME_ENDPOINT_POLICIES: [RuntimeEndpointPolicy; 46] = [
+pub const RUNTIME_ENDPOINT_POLICIES: [RuntimeEndpointPolicy; 47] = [
     runtime_endpoint_policy(RuntimeAction::WardenListSecrets),
     runtime_endpoint_policy(RuntimeAction::WardenDescribeSecret),
     runtime_endpoint_policy(RuntimeAction::WardenRequestUse),
     runtime_endpoint_policy(RuntimeAction::WardenHealth),
     runtime_endpoint_policy(RuntimeAction::ManagedRunPreflight),
+    runtime_endpoint_policy(RuntimeAction::PermitIssue),
     runtime_endpoint_policy(RuntimeAction::ManagedRun),
     runtime_endpoint_policy(RuntimeAction::EnvFilePreflight),
     runtime_endpoint_policy(RuntimeAction::EnvFile),
@@ -727,13 +734,13 @@ mod tests {
 
     #[test]
     fn every_action_has_exactly_one_operational_plane() {
-        assert_eq!(RuntimeAction::ALL.len(), 46);
+        assert_eq!(RuntimeAction::ALL.len(), 47);
         assert_eq!(
             RuntimeAction::ALL
                 .iter()
                 .filter(|action| action.required_plane() == RuntimePlane::Use)
                 .count(),
-            8
+            9
         );
         assert_eq!(
             RuntimeAction::ALL

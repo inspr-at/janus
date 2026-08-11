@@ -1812,6 +1812,73 @@ mod tests {
     }
 
     #[test]
+    fn class_egress_approval_matrix_is_explicit() {
+        let classes = [
+            SecretClass::Low,
+            SecretClass::Normal,
+            SecretClass::HighValue,
+            SecretClass::BreakGlass,
+        ];
+        let egress_modes = [
+            EgressMode::Connector,
+            EgressMode::Sandboxed,
+            EgressMode::ProxyEnforced,
+            EgressMode::HookGuarded,
+            EgressMode::DeclaredOnly,
+        ];
+
+        for (class, egress, approval_supplied) in classes
+            .into_iter()
+            .flat_map(|class| egress_modes.map(move |egress| (class, egress)))
+            .flat_map(|(class, egress)| {
+                [false, true].map(move |approval| (class, egress, approval))
+            })
+        {
+            let strong_egress = matches!(
+                egress,
+                EgressMode::Connector | EgressMode::Sandboxed | EgressMode::ProxyEnforced
+            );
+            let (expected_reason, approval_bound) = match class {
+                SecretClass::Low | SecretClass::Normal => (None, false),
+                SecretClass::HighValue if strong_egress => (None, false),
+                SecretClass::HighValue if approval_supplied => (None, true),
+                SecretClass::HighValue => (Some("denied_egress_mode_insufficient"), false),
+                SecretClass::BreakGlass if approval_supplied => (None, true),
+                SecretClass::BreakGlass => (Some("approval_missing"), false),
+            };
+            let mut reviewed_profile = profile(true);
+            reviewed_profile.egress = egress;
+            let req = request("deploy-api");
+            let approval = approval_for(
+                &reviewed_profile,
+                &req,
+                class,
+                SystemTime::UNIX_EPOCH + Duration::from_secs(30),
+            );
+            let policy = ProfilePolicy::new(vec![reviewed_profile]);
+            let mut issuer = PermitIssuer::new(policy, AuditWrite::accepting());
+            let result = issuer.issue_for_class_with_approval(
+                &req,
+                &principal("runner-a"),
+                SystemTime::UNIX_EPOCH,
+                class,
+                approval_supplied.then_some(&approval),
+            );
+
+            match expected_reason {
+                None => assert_eq!(result.unwrap().approval().is_some(), approval_bound),
+                Some(reason_code) => assert!(matches!(
+                    result.unwrap_err(),
+                    JanusError::PolicyDenied {
+                        reason_code: actual,
+                        ..
+                    } if actual == reason_code
+                )),
+            }
+        }
+    }
+
+    #[test]
     fn issuer_uses_class_aware_audit_severity() {
         let policy = ProfilePolicy::new(vec![profile(true)]);
         let mut issuer = PermitIssuer::new(policy, AuditWrite::accepting());

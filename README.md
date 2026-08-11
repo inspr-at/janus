@@ -12,10 +12,10 @@ agents - without making raw credentials part of prompts, command arguments,
 logs, or application code.
 
 [![License: AGPL-3.0-only](https://img.shields.io/badge/license-AGPL--3.0--only-1f7a72.svg)](LICENSE)
-[![Rust engine](https://img.shields.io/badge/Rust_engine-v0.1.27-cb7c28.svg)](https://github.com/inspr-at/janus/releases/tag/rust-engine-v0.1.27)
+[![Rust engine](https://img.shields.io/badge/Rust_engine-v0.1.28-cb7c28.svg)](https://github.com/inspr-at/janus/releases/tag/rust-engine-v0.1.28)
 
 [Product site](https://janus.inspr.at) ·
-[Rust engine v0.1.27](https://github.com/inspr-at/janus/releases/tag/rust-engine-v0.1.27) ·
+[Rust engine v0.1.28](https://github.com/inspr-at/janus/releases/tag/rust-engine-v0.1.28) ·
 [INSPR](https://www.inspr.at)
 
 ## What Janus does
@@ -82,7 +82,7 @@ Janus has two layers with different histories:
 
 | Layer | Role | Language | Status |
 |---|---|---|---|
-| **Rust engine** | Secret store contracts, Warden, permits, approved-use execution, rotation, lifecycle, and operator CLI | Rust | Active and released. Current tag: `rust-engine-v0.1.27`. |
+| **Rust engine** | Secret store contracts, Warden, permits, approved-use execution, rotation, lifecycle, and operator CLI | Rust | Active and released. Current tag: `rust-engine-v0.1.28`. |
 | **Go envelope** | Existing governance, audit, evidence, and oversight surface | Go | Shipped, operational, and transitional. New core capability work lands in Rust. |
 
 The Rust engine is no longer a skeleton. Core execution paths ship with unit,
@@ -362,6 +362,23 @@ Optional `JANUS_SCOPE_NAMESPACE` and `JANUS_SCOPE_WORKLOAD` refine the leaf
 `scp_...` reference, and never treats a parent or neighboring path as
 authorized.
 
+### Permit issuance
+
+For `low`, `normal`, and strong-egress `high_value` secrets, request a
+single-use permit without an approval or MCP client:
+
+```bash
+janusd-use permit issue \
+  --secret-ref sec_... \
+  --profile profile.deploy \
+  --purpose "deploy reviewed release"
+```
+
+The reviewed policy—not CLI input—owns destination, executor, egress, and TTL.
+`break_glass` and weak-egress `high_value` use the separate approval-backed
+operator path. The complete class/surface matrix is in the
+[`env-file handoff runbook`](docs/env-file-handoff-runbook.md#permit-issuance-surface-by-class).
+
 ### Managed command
 
 Preflight an executable and its exact argument vector without reading a
@@ -371,7 +388,7 @@ secret or consuming a permit:
 janusd-use run preflight --profile profile.deploy -- release apply
 ```
 
-After reviewed approval, consume the permit once:
+Consume the resulting direct or approval-backed permit once:
 
 ```bash
 janusd-use run --profile profile.deploy --permit use_... -- release apply

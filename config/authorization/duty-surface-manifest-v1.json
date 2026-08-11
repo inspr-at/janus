@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "runtime_endpoint_catalog_fingerprint": "sha256:ad841f3cb574e307d1c40249388d8f1bbd077b31b395af10a7afd1946aeac20e",
-  "identity_transport_manifest_fingerprint": "sha256:107be1a2f57f02c6ad00f699d44491035502904eb83d34146365d646de245269",
+  "runtime_endpoint_catalog_fingerprint": "sha256:2a4537242a06185d4e14ff60053491b77594092156c425ae1ee104ea99474301",
+  "identity_transport_manifest_fingerprint": "sha256:34c5f2d55106cc8dbbcec465480893ad6d23c18549754dbf2b8bf77e678f1228",
   "authority_service": "janusd-identityd",
   "remote_authorizing_transports": [],
   "actions": [
@@ -10,6 +10,7 @@
     {"action":"warden.request_use","surface":"janus-warden","transport":"mcp_stdio","classification":"recorded","allowed_duties":[{"conflict_domain":"use_request","duty":"request_use"},{"conflict_domain":"delegation_grant","duty":"receive_delegation"}]},
     {"action":"warden.health","surface":"janus-warden","transport":"mcp_stdio","classification":"no_conflict","allowed_duties":[]},
     {"action":"use.run_preflight","surface":"janusd-use","transport":"process_argv","classification":"no_conflict","allowed_duties":[]},
+    {"action":"use.permit_issue","surface":"janusd-use","transport":"process_argv","classification":"recorded","allowed_duties":[{"conflict_domain":"use_request","duty":"request_use"}]},
     {"action":"use.run","surface":"janusd-use","transport":"process_argv","classification":"recorded","allowed_duties":[{"conflict_domain":"use_request","duty":"execute_use"},{"conflict_domain":"break_glass","duty":"use_break_glass"}]},
     {"action":"use.env_file_preflight","surface":"janusd-use","transport":"process_argv","classification":"no_conflict","allowed_duties":[]},
     {"action":"use.env_file","surface":"janusd-use","transport":"process_argv","classification":"recorded","allowed_duties":[{"conflict_domain":"use_request","duty":"execute_use"},{"conflict_domain":"break_glass","duty":"use_break_glass"}]},

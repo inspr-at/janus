@@ -199,6 +199,7 @@ pub async fn run_for_plane(selected_plane: Option<RuntimePlane>) -> Result<()> {
         Command::RunManaged(config) => run_managed_command(config).await,
         Command::EnvFilePreflight(config) => run_env_file_preflight(config).await,
         Command::EnvFile(config) => run_env_file(config).await,
+        Command::PermitIssue(config) => run_permit_issue(config).await,
         Command::Approve(command) => run_approve(command, &principal).await,
         Command::Delegation(command) => run_delegation(command).await,
         Command::LifecycleTransition(config) => run_lifecycle_transition(config).await,
@@ -404,6 +405,7 @@ enum Command {
     RunManaged(RunManagedCommandConfig),
     EnvFilePreflight(EnvFilePreflightConfig),
     EnvFile(EnvFileConfig),
+    PermitIssue(PermitIssueConfig),
     Approve(ApproveCommand),
     Delegation(DelegationCommand),
     LifecycleTransition(LifecycleTransitionConfig),
@@ -423,6 +425,7 @@ impl Command {
             Self::RunManaged(_) => RuntimeAction::ManagedRun,
             Self::EnvFilePreflight(_) => RuntimeAction::EnvFilePreflight,
             Self::EnvFile(_) => RuntimeAction::EnvFile,
+            Self::PermitIssue(_) => RuntimeAction::PermitIssue,
             Self::Approve(ApproveCommand::Issue(_)) => RuntimeAction::ApprovalIssue,
             Self::Approve(ApproveCommand::Permit(_)) => RuntimeAction::ApprovalPermit,
             Self::Approve(ApproveCommand::List) => RuntimeAction::ApprovalList,
@@ -504,6 +507,13 @@ struct EnvFileConfig {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct EnvFilePreflightConfig {
     profile_id: ProfileId,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PermitIssueConfig {
+    secret_ref: SecretRef,
+    profile_id: ProfileId,
+    purpose: Purpose,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1195,6 +1205,29 @@ async fn run_env_file_preflight(config: EnvFilePreflightConfig) -> Result<()> {
     let profiles = ManagedCommandProfileCatalog::load(&manifest_path)?;
     let outcome = run_env_file_preflight_with(&config, &profiles)?;
     emit_env_file_preflight_outcome(&outcome);
+    Ok(())
+}
+
+async fn run_permit_issue(config: PermitIssueConfig) -> Result<()> {
+    let profiles = ManagedCommandProfileCatalog::load(&run_profile_manifest_path()?)?;
+    let store = load_age_store_from_env()?;
+    let descriptors = store
+        .list()
+        .await
+        .context("failed to load current descriptors for permit issue")?;
+    let policy = profiles.use_policy(&descriptors)?;
+    let permits = FilePermitRegistry::new(run_permit_registry_dir()?);
+    let principal = run_principal_from_env()?;
+    let permit = issue_profile_permit_with(
+        &config,
+        policy,
+        &permits,
+        store,
+        &principal,
+        SystemTime::now(),
+    )
+    .await?;
+    emit_permit_issue_outcome(&permit);
     Ok(())
 }
 
@@ -2248,6 +2281,32 @@ where
     Ok(())
 }
 
+async fn issue_profile_permit_with<S, P>(
+    config: &PermitIssueConfig,
+    policy: ProfilePolicy,
+    permits: &P,
+    store: S,
+    principal: &PrincipalChain,
+    now: SystemTime,
+) -> Result<UsePermit>
+where
+    S: SecretStore,
+    P: SharedPermitStore,
+{
+    let mut broker = SecretBroker::new(store, policy, AuditWrite::accepting());
+    let permit = broker
+        .request_profile_use(
+            &config.secret_ref,
+            &config.profile_id,
+            config.purpose.clone(),
+            principal,
+            now,
+        )
+        .await?;
+    permits.store(&permit)?;
+    Ok(permit)
+}
+
 async fn issue_approved_permit_with<S, R, P>(
     config: &ApprovePermitConfig,
     approvals: &R,
@@ -2454,6 +2513,17 @@ fn emit_approve_issue_outcome(approval: &ApprovalGrant) {
         snapshot.class,
         snapshot.egress,
         snapshot.expires_at_unix_secs
+    );
+}
+
+fn emit_permit_issue_outcome(permit: &UsePermit) {
+    println!(
+        "janusd-use permit issue ok permit_id={} secret_ref={} profile_id={} executor={} destination={} approval_used=false value_returned=false",
+        permit.id().as_str(),
+        permit.secret_ref().as_str(),
+        permit.profile_id().as_str(),
+        permit.executor().as_str(),
+        permit.destination().as_str(),
     );
 }
 
@@ -3077,10 +3147,12 @@ impl ManagedCommandProfileCatalog {
     }
 
     fn use_policy(&self, descriptors: &[SecretDescriptor]) -> Result<ProfilePolicy> {
-        let ttl = env::var("JANUS_WARDEN_PERMIT_TTL_SECONDS")
-            .ok()
-            .and_then(|value| value.parse::<u64>().ok())
-            .unwrap_or(300);
+        let ttl = env_first(&[
+            "JANUS_RUN_PERMIT_TTL_SECONDS",
+            "JANUS_WARDEN_PERMIT_TTL_SECONDS",
+        ])
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(300);
         let mut profiles = Vec::new();
         for descriptor in descriptors {
             for profile_id in &descriptor.allowed_uses {
@@ -3608,6 +3680,7 @@ fn classify_runtime_action(args: &[String]) -> Result<RuntimeAction> {
             RuntimeAction::EnvFilePreflight
         }
         [env_file, ..] if env_file == "env-file" => RuntimeAction::EnvFile,
+        [permit, issue, ..] if permit == "permit" && issue == "issue" => RuntimeAction::PermitIssue,
         [approve, issue, ..] if approve == "approve" && issue == "issue" => {
             RuntimeAction::ApprovalIssue
         }
@@ -3799,6 +3872,9 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command> {
         }
         [env_file, rest @ ..] if env_file == "env-file" => {
             parse_env_file(rest.iter().cloned()).map(Command::EnvFile)
+        }
+        [permit, issue, rest @ ..] if permit == "permit" && issue == "issue" => {
+            parse_permit_issue(rest.iter().cloned()).map(Command::PermitIssue)
         }
         [approve, issue, rest @ ..] if approve == "approve" && issue == "issue" => {
             parse_approve_issue(rest.iter().cloned())
@@ -4225,6 +4301,65 @@ fn parse_lifecycle_destroy_reconcile(
     }
 
     Ok(LifecycleDestroyReconcileConfig { metadata_file })
+}
+
+fn parse_permit_issue(args: impl IntoIterator<Item = String>) -> Result<PermitIssueConfig> {
+    let mut secret_ref = None;
+    let mut profile_id = None;
+    let mut purpose = None;
+    let mut args = args.into_iter();
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--secret-ref" => {
+                if secret_ref
+                    .replace(SecretRef::new(required_arg("--secret-ref", args.next())?)?)
+                    .is_some()
+                {
+                    anyhow::bail!("--secret-ref may only be provided once");
+                }
+            }
+            "--profile" => {
+                if profile_id
+                    .replace(ProfileId::new(required_arg("--profile", args.next())?)?)
+                    .is_some()
+                {
+                    anyhow::bail!("--profile may only be provided once");
+                }
+            }
+            "--purpose" => {
+                if purpose
+                    .replace(Purpose::new(required_arg("--purpose", args.next())?)?)
+                    .is_some()
+                {
+                    anyhow::bail!("--purpose may only be provided once");
+                }
+            }
+            "--secret"
+            | "--value"
+            | "--raw-value"
+            | "--approval"
+            | "--egress"
+            | "--destination"
+            | "--executor"
+            | "--permit-ttl-seconds"
+            | "--expires-in-seconds" => {
+                anyhow::bail!(
+                    "permit issue accepts only a secret ref, reviewed profile, and purpose"
+                )
+            }
+            other if other.starts_with('-') => {
+                anyhow::bail!("unsupported janusd permit issue flag")
+            }
+            _ => anyhow::bail!("unsupported janusd permit issue argument"),
+        }
+    }
+
+    Ok(PermitIssueConfig {
+        secret_ref: secret_ref.context("--secret-ref is required")?,
+        profile_id: profile_id.context("--profile is required")?,
+        purpose: purpose.context("--purpose is required")?,
+    })
 }
 
 fn parse_approve_issue(args: impl IntoIterator<Item = String>) -> Result<ApproveIssueConfig> {
@@ -5449,7 +5584,7 @@ fn print_usage(selected_plane: Option<RuntimePlane>) {
             "janusd\n\nThe mixed Janus runtime entry point is retired and performs no operational command.\nUse 'janusd-use --help' for permit-bound use or 'janusd-admin --help' for administration.\nreason_code=legacy_mixed_entrypoint_retired value_returned=false"
         ),
         Some(RuntimePlane::Use) => eprintln!(
-            "janusd-use\n\nPermit-bound use commands:\n  run preflight --profile PROFILE -- ARG...\n  run --profile PROFILE (--permit use_...|--break-glass-activation bga_...) -- ARG...\n  env-file preflight --profile PROFILE\n  env-file --profile PROFILE (--permit use_...|--break-glass-activation bga_...)\n\nThis process cannot issue approvals, change lifecycle state, rotate, migrate, transfer scope, run recovery drills, or retire hosts.\nManaged-command preflight validates the reviewed profile, exact argv, and executable without a permit, backend, or secret read.\nEnv-file preflight checks the reviewed profile and target path without a permit, backend, or secret read.\nAll non-help commands require JANUS_SCOPE_ORGANIZATION, JANUS_SCOPE_PROJECT, JANUS_SCOPE_REPOSITORY, and JANUS_SCOPE_ENVIRONMENT. JANUS_SCOPE_NAMESPACE and JANUS_SCOPE_WORKLOAD are optional; workload requires namespace."
+            "janusd-use\n\nPermit-bound use commands:\n  permit issue --secret-ref REF --profile PROFILE --purpose PURPOSE\n  run preflight --profile PROFILE -- ARG...\n  run --profile PROFILE (--permit use_...|--break-glass-activation bga_...) -- ARG...\n  env-file preflight --profile PROFILE\n  env-file --profile PROFILE (--permit use_...|--break-glass-activation bga_...)\n\nThis process cannot issue approvals, change lifecycle state, rotate, migrate, transfer scope, run recovery drills, or retire hosts.\nPermit issue derives destination, executor, egress, and TTL from reviewed policy and cannot mint approval-required use.\nManaged-command preflight validates the reviewed profile, exact argv, and executable without a permit, backend, or secret read.\nEnv-file preflight checks the reviewed profile and target path without a permit, backend, or secret read.\nAll non-help commands require JANUS_SCOPE_ORGANIZATION, JANUS_SCOPE_PROJECT, JANUS_SCOPE_REPOSITORY, and JANUS_SCOPE_ENVIRONMENT. JANUS_SCOPE_NAMESPACE and JANUS_SCOPE_WORKLOAD are optional; workload requires namespace."
         ),
         Some(RuntimePlane::Admin) => eprintln!("{ADMIN_USAGE}"),
     }
@@ -5593,6 +5728,7 @@ mod tests {
                 RuntimeAction::EnvFilePreflight,
             ),
             (&["env-file"][..], RuntimeAction::EnvFile),
+            (&["permit", "issue"][..], RuntimeAction::PermitIssue),
             (&["approve", "issue"][..], RuntimeAction::ApprovalIssue),
             (&["approve", "permit"][..], RuntimeAction::ApprovalPermit),
             (&["approve", "list"][..], RuntimeAction::ApprovalList),
@@ -5778,6 +5914,7 @@ mod tests {
             Command::RunManaged(_) => panic!("expected forge config"),
             Command::EnvFilePreflight(_) => panic!("expected forge config"),
             Command::EnvFile(_) => panic!("expected forge config"),
+            Command::PermitIssue(_) => panic!("expected forge config"),
             Command::Approve(_) => panic!("expected forge config"),
             Command::Delegation(_) => panic!("expected forge config"),
             Command::LifecycleTransition(_) => panic!("expected forge config"),
@@ -5796,6 +5933,7 @@ mod tests {
             Command::ForgeRotateGenerated(_) => panic!("expected run config"),
             Command::EnvFilePreflight(_) => panic!("expected run config"),
             Command::EnvFile(_) => panic!("expected run config"),
+            Command::PermitIssue(_) => panic!("expected run config"),
             Command::Help => panic!("expected run config"),
             Command::Approve(_) => panic!("expected run config"),
             Command::Delegation(_) => panic!("expected run config"),
@@ -5822,6 +5960,7 @@ mod tests {
             Command::ForgeRotateGenerated(_) => panic!("expected env-file config"),
             Command::RunManagedPreflight(_) => panic!("expected env-file config"),
             Command::RunManaged(_) => panic!("expected env-file config"),
+            Command::PermitIssue(_) => panic!("expected env-file config"),
             Command::Approve(_) => panic!("expected env-file config"),
             Command::Delegation(_) => panic!("expected env-file config"),
             Command::Help => panic!("expected env-file config"),
@@ -5841,6 +5980,7 @@ mod tests {
             Command::ForgeRotateGenerated(_) => panic!("expected env-file preflight config"),
             Command::RunManagedPreflight(_) => panic!("expected env-file preflight config"),
             Command::RunManaged(_) => panic!("expected env-file preflight config"),
+            Command::PermitIssue(_) => panic!("expected env-file preflight config"),
             Command::Approve(_) => panic!("expected env-file preflight config"),
             Command::Delegation(_) => panic!("expected env-file preflight config"),
             Command::Help => panic!("expected env-file preflight config"),
@@ -5861,6 +6001,7 @@ mod tests {
             Command::RunManaged(_) => panic!("expected approve issue config"),
             Command::EnvFilePreflight(_) => panic!("expected approve issue config"),
             Command::EnvFile(_) => panic!("expected approve issue config"),
+            Command::PermitIssue(_) => panic!("expected approve issue config"),
             Command::Approve(_) => panic!("expected approve issue config"),
             Command::Delegation(_) => panic!("expected approve issue config"),
             Command::Help => panic!("expected approve issue config"),
@@ -5881,6 +6022,7 @@ mod tests {
             Command::RunManaged(_) => panic!("expected approve permit config"),
             Command::EnvFilePreflight(_) => panic!("expected approve permit config"),
             Command::EnvFile(_) => panic!("expected approve permit config"),
+            Command::PermitIssue(_) => panic!("expected approve permit config"),
             Command::Approve(_) => panic!("expected approve permit config"),
             Command::Delegation(_) => panic!("expected approve permit config"),
             Command::Help => panic!("expected approve permit config"),
@@ -5901,6 +6043,7 @@ mod tests {
             Command::RunManaged(_) => panic!("expected approve revoke config"),
             Command::EnvFilePreflight(_) => panic!("expected approve revoke config"),
             Command::EnvFile(_) => panic!("expected approve revoke config"),
+            Command::PermitIssue(_) => panic!("expected approve revoke config"),
             Command::Approve(_) => panic!("expected approve revoke config"),
             Command::Delegation(_) => panic!("expected approve revoke config"),
             Command::Help => panic!("expected approve revoke config"),
@@ -5921,6 +6064,7 @@ mod tests {
             Command::RunManaged(_) => panic!("expected lifecycle config"),
             Command::EnvFilePreflight(_) => panic!("expected lifecycle config"),
             Command::EnvFile(_) => panic!("expected lifecycle config"),
+            Command::PermitIssue(_) => panic!("expected lifecycle config"),
             Command::Approve(_) => panic!("expected lifecycle config"),
             Command::Delegation(_) => panic!("expected lifecycle config"),
             Command::Help => panic!("expected lifecycle config"),
@@ -5943,6 +6087,7 @@ mod tests {
             Command::RunManaged(_) => panic!("expected lifecycle stale-report config"),
             Command::EnvFilePreflight(_) => panic!("expected lifecycle stale-report config"),
             Command::EnvFile(_) => panic!("expected lifecycle stale-report config"),
+            Command::PermitIssue(_) => panic!("expected lifecycle stale-report config"),
             Command::Approve(_) => panic!("expected lifecycle stale-report config"),
             Command::Delegation(_) => panic!("expected lifecycle stale-report config"),
             Command::Help => panic!("expected lifecycle stale-report config"),
@@ -5971,6 +6116,7 @@ mod tests {
             Command::RunManaged(_) => panic!("expected lifecycle destroy-record config"),
             Command::EnvFilePreflight(_) => panic!("expected lifecycle destroy-record config"),
             Command::EnvFile(_) => panic!("expected lifecycle destroy-record config"),
+            Command::PermitIssue(_) => panic!("expected lifecycle destroy-record config"),
             Command::Approve(_) => panic!("expected lifecycle destroy-record config"),
             Command::Delegation(_) => panic!("expected lifecycle destroy-record config"),
             Command::Help => panic!("expected lifecycle destroy-record config"),
@@ -6003,6 +6149,7 @@ mod tests {
             Command::RunManaged(_) => panic!("expected lifecycle destroy-finalize config"),
             Command::EnvFilePreflight(_) => panic!("expected lifecycle destroy-finalize config"),
             Command::EnvFile(_) => panic!("expected lifecycle destroy-finalize config"),
+            Command::PermitIssue(_) => panic!("expected lifecycle destroy-finalize config"),
             Command::Approve(_) => panic!("expected lifecycle destroy-finalize config"),
             Command::Delegation(_) => panic!("expected lifecycle destroy-finalize config"),
             Command::Help => panic!("expected lifecycle destroy-finalize config"),
@@ -6039,6 +6186,7 @@ mod tests {
                 panic!("expected lifecycle destroy-reconcile config")
             }
             Command::EnvFile(_) => panic!("expected lifecycle destroy-reconcile config"),
+            Command::PermitIssue(_) => panic!("expected lifecycle destroy-reconcile config"),
             Command::Approve(_) => panic!("expected lifecycle destroy-reconcile config"),
             Command::Delegation(_) => panic!("expected lifecycle destroy-reconcile config"),
             Command::Help => panic!("expected lifecycle destroy-reconcile config"),
@@ -6330,6 +6478,61 @@ mod tests {
             .unwrap_err();
             assert!(err.to_string().contains("reviewed profile"));
             assert!(!err.to_string().contains("unreviewed"));
+        }
+    }
+
+    #[test]
+    fn parses_direct_permit_issue_without_policy_critical_inputs() {
+        let command = parse_args(
+            [
+                "permit",
+                "issue",
+                "--secret-ref",
+                "sec_fixture",
+                "--profile",
+                "profile.canary",
+                "--purpose",
+                "fixture service handoff",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        )
+        .unwrap();
+        let Command::PermitIssue(config) = command else {
+            panic!("expected permit issue config")
+        };
+        assert_eq!(config.secret_ref.as_str(), "sec_fixture");
+        assert_eq!(config.profile_id.as_str(), "profile.canary");
+        assert_eq!(config.purpose.as_str(), "fixture service handoff");
+
+        for flag in [
+            "--approval",
+            "--egress",
+            "--destination",
+            "--executor",
+            "--permit-ttl-seconds",
+            "--value",
+        ] {
+            let error = parse_args(
+                [
+                    "permit",
+                    "issue",
+                    "--secret-ref",
+                    "sec_fixture",
+                    "--profile",
+                    "profile.canary",
+                    "--purpose",
+                    "fixture service handoff",
+                    flag,
+                    "SENSITIVE_PERMIT_POLICY_CANARY",
+                ]
+                .into_iter()
+                .map(str::to_string),
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(error.contains("reviewed profile"));
+            assert!(!error.contains("SENSITIVE_PERMIT_POLICY_CANARY"));
         }
     }
 
@@ -7320,6 +7523,66 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("approval_expired"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn direct_permit_issue_supports_non_approval_classes_only() {
+        let secret_ref = SecretRef::new("sec_fixture").unwrap();
+        let name = SecretName::new("CANARY").unwrap();
+        let profile_id = ProfileId::new("profile.canary").unwrap();
+        let principal = fixture_principal();
+        let config = PermitIssueConfig {
+            secret_ref: secret_ref.clone(),
+            profile_id: profile_id.clone(),
+            purpose: Purpose::new("fixture service handoff").unwrap(),
+        };
+
+        for (class, expected_reason) in [
+            (SecretClass::Low, None),
+            (SecretClass::Normal, None),
+            (SecretClass::HighValue, None),
+            (SecretClass::BreakGlass, Some("approval_missing")),
+        ] {
+            let permit_dir = tempfile::tempdir().unwrap();
+            let permits = FilePermitRegistry::new(permit_dir.path());
+            let policy = ProfilePolicy::new(vec![UseProfile {
+                id: profile_id.clone(),
+                scope: test_scope(),
+                secret_ref: secret_ref.clone(),
+                executor: ExecutorRef::new("janus-run@fixture").unwrap(),
+                destination: Destination::new("fixture-destination").unwrap(),
+                egress: EgressMode::Connector,
+                trust_level: TrustLevel::L2,
+                ttl: Duration::from_secs(60),
+                single_use: true,
+                enabled: true,
+            }]);
+            let result = issue_profile_permit_with(
+                &config,
+                policy,
+                &permits,
+                fixture_store_with_class(&secret_ref, &name, &profile_id, class),
+                &principal,
+                SystemTime::UNIX_EPOCH,
+            )
+            .await;
+
+            match expected_reason {
+                None => {
+                    let permit = result.unwrap();
+                    assert!(permit.approval().is_none());
+                    assert_eq!(permit.secret_ref(), &secret_ref);
+                    assert_eq!(permit.profile_id(), &profile_id);
+                    assert!(SharedPermitRegistry::take(&permits, permit.id().as_str()).is_ok());
+                }
+                Some(expected_reason) => {
+                    let error = result.unwrap_err();
+                    assert!(error.to_string().contains(expected_reason));
+                    assert_eq!(std::fs::read_dir(permit_dir.path()).unwrap().count(), 0);
+                }
+            }
+        }
     }
 
     #[cfg(unix)]
