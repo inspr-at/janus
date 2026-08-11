@@ -97,7 +97,23 @@ The OIDC project, its role keys, and the `janus-vault-barta-cm` application are
 declaratively owned by `inspr-services/services/zitadel`; the deployed issuer,
 exact project ID, and exact role-claim mappings are owned by the csb1
 configuration in `nixcfg`. Client credentials remain in the encrypted
-deployment pipeline.
+deployment pipeline and should reach the container as mounted files, not
+secret-bearing environment values.
+
+The envelope supports file-backed configuration for its two secret values:
+
+| Value variable | Preferred file variable |
+| --- | --- |
+| `OIDC_CLIENT_SECRET` | `OIDC_CLIENT_SECRET_FILE` |
+| `COOKIE_KEY` | `COOKIE_KEY_FILE` |
+
+When the `_FILE` variable is present, its file wins even if the value variable
+is also set. Janus removes exactly one trailing LF or CRLF, accepts a file with
+no trailing newline, and fails startup with a variable-specific error if the
+configured path is empty or unreadable. The value variables remain supported
+for compatibility. Production deployments should mount private credential
+files and set only the corresponding `_FILE` paths so secret values do not
+enter container configuration or the process environment.
 
 Janus has no local-password route. Browser sign-in uses the OIDC authorization
 code flow with a nonce and S256 PKCE. Break-glass recovery remains out of band
