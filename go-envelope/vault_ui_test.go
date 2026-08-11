@@ -845,3 +845,36 @@ func TestBrandArtworkUsesIntendedScaleAlignmentAndCanonicalMark(t *testing.T) {
 		}
 	}
 }
+
+func TestFreshVaultRendersCatalogOnboardingWithoutSampleEntries(t *testing.T) {
+	app := newTestApp(t)
+	app.cfg.RequireAuth = false
+	app.store.mu.Lock()
+	app.store.items = []SecretDescriptor{}
+	app.store.mu.Unlock()
+
+	pageReq := httptest.NewRequest(http.MethodGet, "/", nil)
+	pageOut := httptest.NewRecorder()
+	app.routes().ServeHTTP(pageOut, pageReq)
+	if pageOut.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", pageOut.Code, pageOut.Body.String())
+	}
+	pageBody := pageOut.Body.String()
+	for _, want := range []string{"No secrets are configured yet", "JANUS_CATALOG_FILE", "reviewed JSON descriptor catalog", "Advanced manual setup", "Janus does not add sample entries"} {
+		if !strings.Contains(pageBody, want) {
+			t.Fatalf("fresh vault should render onboarding guidance %q: %s", want, pageBody)
+		}
+	}
+	for _, forbidden := range []string{"zitadel-janus-oidc", "csb1-age-identity", "secrets/csb1"} {
+		if strings.Contains(strings.ToLower(pageBody), forbidden) {
+			t.Fatalf("fresh vault rendered sample metadata %q: %s", forbidden, pageBody)
+		}
+	}
+
+	apiReq := httptest.NewRequest(http.MethodGet, "/api/warden/descriptors", nil)
+	apiOut := httptest.NewRecorder()
+	app.routes().ServeHTTP(apiOut, apiReq)
+	if apiOut.Code != http.StatusOK || apiOut.Body.String() != "{\"descriptors\":[],\"value_returned\":false}\n" {
+		t.Fatalf("fresh descriptor API should return an explicit empty list, got %d body=%s", apiOut.Code, apiOut.Body.String())
+	}
+}

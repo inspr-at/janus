@@ -225,7 +225,7 @@
         {{ else if .TotalCount }}
         <div class="empty">Nothing matches these filters. <a href="/#vault">Clear them</a> to see all {{ .TotalCount }} secrets.</div>
         {{ else }}
-        <div class="empty">No secrets in the catalog yet. Managed service secrets start from the service in Pharos. <a href="/vault/new">Advanced manual setup</a> remains available as a fallback.</div>
+        <div class="empty">No secrets are configured yet. Point <code>JANUS_CATALOG_FILE</code> at a reviewed JSON descriptor catalog, or use <a href="/vault/new">Advanced manual setup</a> to prepare one. Janus does not add sample entries.</div>
         {{ end }}
       </section>
 
