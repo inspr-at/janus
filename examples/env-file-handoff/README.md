@@ -7,7 +7,8 @@ service, no production path.
 Files:
 - `secretspec.toml`: one manifest-declared canary secret.
 - `metadata.toml`: owner/class/lifecycle overlay. The canary is `break_glass`
-  so the smoke exercises the approval-required path.
+  so the smoke retains the approval-required path; its disposable runtime copy
+  is then reclassified to `normal` to exercise direct CLI permit issuance too.
 - `approved-use.env-file.toml.in`: reviewed env-file profile template.
 - `consumer-contract.md`: named nonprod consumer contract for the fixture
   service.
@@ -18,7 +19,8 @@ Run it from the repo root:
 devenv shell -- ./scripts/smoke-janusd-env-file.sh
 ```
 
-The smoke renders the template into a disposable runtime, issues an approval,
-preflights the target without a permit or secret read, issues a single-use
-permit, writes a private env file, and verifies a tiny fixture service can
-consume it without printing the secret literal.
+The smoke renders the template into a disposable runtime, preflights the target
+without a permit or secret read, verifies the approval-backed BreakGlass path,
+then verifies the direct non-approval Normal path. Both paths write a private
+env file that a tiny fixture service consumes without printing the secret
+literal.

@@ -46,6 +46,8 @@ janusd-use env-file preflight ...
 janusd-admin approve issue ...
 janusd-admin approve permit ...
 janusd-use env-file ...
+janusd-use permit issue ...
+janusd-use env-file ...
 ```
 
 It verifies:
@@ -96,6 +98,8 @@ export JANUS_AGE_IDENTITY_FILE=/run/janus/age/identity
 export JANUS_AGE_RECIPIENT=age1...
 export JANUS_AGE_METADATA_FILE=/etc/janus/metadata.toml
 export JANUS_RUN_EXECUTOR=janus-run@HOST
+# Optional policy-owned TTL; defaults to 300 seconds.
+export JANUS_RUN_PERMIT_TTL_SECONDS=300
 export JANUS_SCOPE_ORGANIZATION=acme
 export JANUS_SCOPE_PROJECT=payments
 export JANUS_SCOPE_REPOSITORY=payments-api
@@ -122,19 +126,50 @@ Expected output is value-free and shaped like:
 janusd-use env-file preflight ok secret_ref=sec_... profile_id=profile.SERVICE output_path=/run/... hash_output_path=none hash_format=none consumer_ref=consumer... reason_code=ok value_returned=false
 ```
 
-Issue an approval when policy requires it:
+## Permit Issuance Surface By Class
+
+Callers never choose the permit destination, executor, egress, or TTL on the
+direct surfaces. The reviewed Janus policy owns those fields.
+
+| Secret class | `janusd-use permit issue` | Warden `request_use` | Approval-backed `janusd-admin` path |
+| --- | --- | --- | --- |
+| `low` | Supported | Supported | Not used; approval is not attached |
+| `normal` | Supported | Supported | Not used; approval is not attached |
+| `high_value` | Supported with strong egress and a maximum 300-second TTL | Supported under the same policy | Required only to override weak `hook_guarded` or `declared_only` egress |
+| `break_glass` | Denied with `approval_missing` | Denied with `approval_missing` | Required; maximum 60-second TTL |
+
+Strong egress is `connector`, `sandboxed`, or `proxy_enforced`. The direct CLI
+is the operator-facing non-MCP equivalent of Warden and therefore lives on the
+use plane with `secret.use` authorization. It cannot accept an approval or any
+policy-critical override.
+
+For `low`, `normal`, or strong-egress `high_value`, issue a single-use permit
+directly:
+
+```bash
+janusd-use permit issue \
+  --secret-ref sec_... \
+  --profile profile.SERVICE \
+  --purpose "service env file handoff"
+```
+
+The output is value-free and includes the opaque `permit_id`. Skip the approval
+commands below and continue with `janusd-use env-file`.
+
+For `break_glass`, or an explicitly approved weak-egress `high_value` use,
+issue an approval:
 
 ```bash
 janusd-admin approve issue \
   --secret-ref sec_... \
   --profile profile.SERVICE \
   --purpose "service env file handoff" \
-  --reason "JANUS-..." \
+  --reason "JANUS-... reviewed exception" \
   --egress connector \
   --expires-in-seconds 120
 ```
 
-Issue a single-use permit:
+Then turn that approval into a single-use permit:
 
 ```bash
 janusd-admin approve permit \
@@ -144,7 +179,8 @@ janusd-admin approve permit \
   --revoke-approval
 ```
 
-The reviewed profile fixes the recipient executor. Optional
+The approval path is intentionally separate from direct permit issuance. The
+reviewed profile fixes the recipient executor. Optional
 `--recipient-human`, `--recipient-agent`, and `--recipient-workload` flags bind
 the permit to the exact remaining principal chain. The approving actor cannot
 also be that recipient.
@@ -167,7 +203,7 @@ If the env file was rendered but the consumer was not switched:
 - stop the consumer before removing the env file
 - remove the rendered env file deliberately
 - leave lifecycle evidence intact
-- issue a new approval/permit for retries; permits are single-use
+- issue a new permit, and a new approval where required, for retries; permits are single-use
 
 If the profile/output path is wrong:
 - remove the rendered env file if present
@@ -182,8 +218,8 @@ as spent.
 Keep value-free evidence only:
 - commit that introduced/changed the reviewed profile
 - `janusd-use env-file preflight` value-free outcome
-- `janusd-admin approve issue` output
-- `janusd-admin approve permit` output
+- either `janusd-use permit issue` output or the required
+  `janusd-admin approve issue` and `janusd-admin approve permit` outputs
 - `janusd-use env-file` value-free outcome
 - file mode/path check
 - consumer validation result

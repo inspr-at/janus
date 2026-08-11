@@ -1,4 +1,7 @@
 [defaults]
 owner = "infra"
+# Intentionally approval-required so the checked fixture retains coverage of
+# the BreakGlass issuance path; the smoke also reclassifies its disposable copy
+# to normal and verifies the direct non-approval CLI path.
 classification = "break_glass"
 lifecycle = "active"
