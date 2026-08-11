@@ -32,15 +32,15 @@ echo "==> janus engine release assurance: reviewed adversarial recovery corpus"
 python3 scripts/run-adversarial-scenarios.py --self-test
 python3 scripts/run-adversarial-scenarios.py
 
+echo "==> janus engine release assurance: build smoke binaries"
+cargo build --locked -p janus-warden -p janusd
+
 echo "==> janus engine release assurance: managed-service secret UX"
 python3 scripts/run-managed-service-ux-assurance.py --self-test
 python3 scripts/run-managed-service-ux-assurance.py --stack rust
 
 echo "==> janus engine release assurance: cargo tests"
 cargo test --all --locked
-
-echo "==> janus engine release assurance: build smoke binaries"
-cargo build --locked -p janus-warden -p janusd
 
 # Isolated fixtures have no durable operator binding registry. They must opt in
 # explicitly to the only non-production compatibility posture; trusted product
