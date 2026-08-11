@@ -21,7 +21,10 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::time::timeout;
 
-use crate::RoleBindingRegistry;
+use crate::{
+    denied_runtime_authority_reply, RoleBindingRegistry, RuntimeAuthorityBroker,
+    RuntimeAuthorityRequestV1,
+};
 
 const SUBJECT_SCHEMA: u8 = 1;
 const MAX_SUBJECT_RECORDS: usize = 4_096;
@@ -439,6 +442,25 @@ impl BrokerAuthenticatedActorV1 {
     }
 }
 
+impl FileSubjectRegistry {
+    pub(crate) fn authenticate_local_uid(
+        &self,
+        uid: u32,
+        scope: ScopeRef,
+        release_digest: &str,
+        peer_binding_ref: String,
+        channel_binding_ref: String,
+    ) -> JanusResult<BrokerAuthenticatedActorV1> {
+        Ok(BrokerAuthenticatedActorV1 {
+            subject: self.resolve_local_uid(uid)?,
+            scope,
+            release_digest: release_digest.to_string(),
+            peer_binding_ref,
+            channel_binding_ref,
+        })
+    }
+}
+
 /// Non-authorizing local identity broker.
 #[derive(Clone)]
 pub struct IdentityShadowBroker {
@@ -449,6 +471,7 @@ pub struct IdentityShadowBroker {
     release_digest: String,
     ttl: Duration,
     connection_budget: Arc<tokio::sync::Semaphore>,
+    runtime_authority: Option<Arc<RuntimeAuthorityBroker>>,
 }
 
 impl IdentityShadowBroker {
@@ -479,7 +502,23 @@ impl IdentityShadowBroker {
             release_digest,
             ttl,
             connection_budget: Arc::new(tokio::sync::Semaphore::new(64)),
+            runtime_authority: None,
         })
+    }
+
+    /// Activate broker-owned authorization on the same authenticated socket.
+    pub fn with_runtime_authority(
+        mut self,
+        authority: RuntimeAuthorityBroker,
+    ) -> JanusResult<Self> {
+        if authority.verifying_key() != self.signing_key.verifying_key() {
+            return Err(identity_error(
+                "runtime_authority_signer_mismatch",
+                "runtime authority must share the configured broker identity",
+            ));
+        }
+        self.runtime_authority = Some(Arc::new(authority));
+        Ok(self)
     }
 
     pub fn verifying_key(&self) -> VerifyingKey {
@@ -529,19 +568,51 @@ impl IdentityShadowBroker {
                     }
                     Err(_) => return Ok(()),
                 };
-            let reply = serde_json::from_slice::<IdentityShadowRequestV1>(&frame)
-                .map_err(|_| ())
-                .and_then(|request| {
-                    self.observe(
-                        credentials,
-                        &channel_binding_ref,
-                        request,
-                        SystemTime::now(),
-                    )
+            let is_runtime_authority = serde_json::from_slice::<serde_json::Value>(&frame)
+                .ok()
+                .and_then(|value| value.get("action").cloned())
+                .is_some();
+            let encoded = if is_runtime_authority {
+                let reply = self
+                    .runtime_authority
+                    .as_ref()
+                    .and_then(|authority| {
+                        serde_json::from_slice::<RuntimeAuthorityRequestV1>(&frame)
+                            .ok()
+                            .and_then(|request| {
+                                authority
+                                    .authorize_peer(
+                                        crate::authority::RuntimePeerCredentials {
+                                            uid: credentials.uid,
+                                            gid: credentials.gid,
+                                            pid: credentials.pid,
+                                        },
+                                        &channel_binding_ref,
+                                        request,
+                                        SystemTime::now(),
+                                    )
+                                    .ok()
+                            })
+                    })
+                    .unwrap_or_else(|| {
+                        denied_runtime_authority_reply("runtime_authority_request_denied")
+                    });
+                serde_json::to_vec(&reply).map_err(io::Error::other)?
+            } else {
+                let reply = serde_json::from_slice::<IdentityShadowRequestV1>(&frame)
                     .map_err(|_| ())
-                })
-                .unwrap_or_else(|_| denied_reply("identity_request_denied"));
-            let encoded = serde_json::to_vec(&reply).map_err(io::Error::other)?;
+                    .and_then(|request| {
+                        self.observe(
+                            credentials,
+                            &channel_binding_ref,
+                            request,
+                            SystemTime::now(),
+                        )
+                        .map_err(|_| ())
+                    })
+                    .unwrap_or_else(|_| denied_reply("identity_request_denied"));
+                serde_json::to_vec(&reply).map_err(io::Error::other)?
+            };
             writer.write_all(&encoded).await?;
             writer.write_all(b"\n").await?;
         }
@@ -966,7 +1037,7 @@ fn write_new_private_bytes(path: &Path, bytes: &[u8], kind: &'static str) -> Jan
         .map_err(|_| unavailable(format!("{kind} persistence failed")))
 }
 
-fn random_bytes<const N: usize>() -> JanusResult<[u8; N]> {
+pub(crate) fn random_bytes<const N: usize>() -> JanusResult<[u8; N]> {
     let mut bytes = [0u8; N];
     File::open("/dev/urandom")
         .and_then(|mut file| file.read_exact(&mut bytes))
@@ -982,7 +1053,7 @@ fn peer_binding_ref(peer: LocalPeerCredentials) -> String {
     opaque_ref("pbr_", "janus-identity-peer-binding-v1", &bytes, 12)
 }
 
-fn opaque_ref(prefix: &str, domain: &str, bytes: &[u8], length: usize) -> String {
+pub(crate) fn opaque_ref(prefix: &str, domain: &str, bytes: &[u8], length: usize) -> String {
     let digest = digest(domain, bytes);
     format!("{prefix}{}", hex::encode(&digest[..length]))
 }

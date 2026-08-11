@@ -9,6 +9,7 @@
 #![forbid(unsafe_code)]
 
 mod audit;
+mod authority;
 mod break_glass;
 mod delegation;
 mod duty;
@@ -21,6 +22,12 @@ mod roles;
 mod transfer;
 
 pub use audit::{AuditRecovery, JsonlAuditSink};
+pub use authority::{
+    authorize_runtime_action_from_env, denied_runtime_authority_reply, load_runtime_verifying_key,
+    provision_runtime_verifying_key, JsonlRuntimeAuthorityAudit, RuntimeAuthorityAudit,
+    RuntimeAuthorityAuditV1, RuntimeAuthorityBroker, RuntimeAuthorityClient,
+    RuntimeAuthorityReplyV1, RuntimeAuthorityRequestV1,
+};
 pub use break_glass::{
     BreakGlassListEntry, BreakGlassRecord, BreakGlassRegistry, BreakGlassStatus,
     FileBreakGlassRegistry,
@@ -31,7 +38,7 @@ pub use delegation::{
 };
 pub use duty::{
     DutyAuthorizationAuditSink, DutyAuthorizationAuditV1, DutyAuthorizationOutcome,
-    DutyAuthorizationReceiptV1, FileDutyJournal,
+    DutyAuthorizationReceiptV1, DutyJournalHealthV1, FileDutyJournal,
 };
 pub use identity::{
     bind_private_identity_socket, load_or_create_identity_signing_key,

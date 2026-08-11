@@ -10,7 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use janus_core::{
     authorize_role_action, DutyAuthorization, JanusError, JanusResult, Permission, PrincipalChain,
     ProductMode, Role, RoleBinding, RoleBindingId, RoleBindingSnapshotV1, RoleBindingSourceKind,
-    RoleDecisionInput, RolePolicyV1, RuntimeAction, SafeLabel, ScopeRef,
+    RoleDecisionInput, RolePolicyV1, RuntimeAction, SafeLabel, ScopeRef, VerifiedRuntimeAdmission,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -83,6 +83,7 @@ pub fn enforce_runtime_role_from_env(
     action: RuntimeAction,
     principal: &PrincipalChain,
     target_binding: Option<&str>,
+    admission: Option<&VerifiedRuntimeAdmission>,
     now: SystemTime,
 ) -> JanusResult<Option<LoadedRoleAuthorization>> {
     let Some(authorization) = load_role_authorization_from_env()? else {
@@ -90,6 +91,12 @@ pub fn enforce_runtime_role_from_env(
     };
     let audit_path = required_env_path("JANUS_ROLE_AUDIT_FILE")?;
     let mut audit = crate::JsonlAuditSink::open(audit_path)?;
+    let admission = admission.ok_or_else(|| {
+        role_error(
+            "runtime_admission_missing",
+            "role authorization requires broker runtime admission",
+        )
+    })?;
     let input = RoleDecisionInput {
         principal,
         permission: Permission::for_runtime_action(action),
@@ -101,7 +108,7 @@ pub fn enforce_runtime_role_from_env(
         approval_fingerprint: None,
         delegation_fingerprint: None,
         audit_available: true,
-        duty_authorization: DutyAuthorization::AccountabilityLegacy,
+        duty_authorization: DutyAuthorization::BrokerAdmission(admission),
         bindings: &authorization.bindings,
         now,
     };
@@ -987,6 +994,11 @@ mod tests {
             RuntimeAction::WardenDescribeSecret,
             &principal,
             None,
+            Some(&crate::authority::test_runtime_admission(
+                RuntimeAction::WardenDescribeSecret,
+                binding.scope().clone(),
+                UNIX_EPOCH + Duration::from_secs(20),
+            )),
             UNIX_EPOCH + Duration::from_secs(20),
         )
         .unwrap();

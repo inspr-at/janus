@@ -19,7 +19,7 @@ use janus_core::{
     HealthStatus, JanusError, JanusResult, PrincipalChain, ProductMode, ProfileId, Purpose,
     ReleaseAdmission, RuntimeAbuseBudget, RuntimeAction, RuntimePlane, RuntimeTimeoutPolicy,
     RuntimeTransport, SecretBroker, SecretDescriptor, SecretRef, SecretStore, Severity, TrustLevel,
-    UsePermit,
+    UsePermit, VerifiedRuntimeAdmission,
 };
 use janus_local::{DelegationRegistry, NoopDelegationRegistry, NoopPermitStore, PermitStore};
 use serde::Serialize;
@@ -511,6 +511,11 @@ where
     P: PermitStore,
     D: DelegationRegistry,
 {
+    /// Attach the broker-minted admission for the next tool dispatch.
+    pub fn set_runtime_admission(&mut self, admission: VerifiedRuntimeAdmission) {
+        self.broker.set_runtime_admission(admission);
+    }
+
     /// Attach the release posture established during runtime startup.
     pub fn with_release_admission(mut self, release: ReleaseAdmission) -> Self {
         self.release = release;

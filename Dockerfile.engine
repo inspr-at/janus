@@ -6,6 +6,7 @@ COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates ./crates
 COPY config/release-channels/v1.json ./config/release-channels/v1.json
 COPY config/authorization/role-matrix-v1.json ./config/authorization/role-matrix-v1.json
+COPY config/authorization/duty-surface-manifest-v1.json ./config/authorization/duty-surface-manifest-v1.json
 COPY config/identity/transport-manifest-v1.json ./config/identity/transport-manifest-v1.json
 RUN set -eux; \
     case "${TARGETARCH}" in amd64|arm64) ;; *) echo "unsupported target arch: ${TARGETARCH}" >&2; exit 1 ;; esac; \
@@ -31,6 +32,7 @@ RUN set -eux; \
     cp target/release/janus-host-executor /out/rootfs/usr/local/bin/janus-host-executor; \
     cp target/release/janus-warden /out/rootfs/usr/local/bin/janus-warden; \
     cp config/release-channels/v1.json /out/rootfs/etc/janus/release-channels-v1.json; \
+    cp config/authorization/duty-surface-manifest-v1.json /out/rootfs/etc/janus/duty-surface-manifest-v1.json; \
     cp config/identity/transport-manifest-v1.json /out/rootfs/etc/janus/identity-transport-manifest-v1.json; \
     cp /etc/ssl/certs/ca-certificates.crt /out/rootfs/etc/ssl/certs/ca-certificates.crt
 

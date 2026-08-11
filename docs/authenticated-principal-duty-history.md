@@ -417,7 +417,7 @@ fails CI.
 
 ## Implementation slices
 
-Implementation begins only through separate reviewed tickets:
+The contract was delivered through three separately reviewed tickets:
 
 1. authenticated actor types, local identity broker, subject registry, and
    binding migration/observation mode;
@@ -426,8 +426,9 @@ Implementation begins only through separate reviewed tickets:
 3. complete runtime-surface wiring, enforced posture, recovery, release
    assurance, and staged production activation.
 
-No slice may advertise enforced separation before the third slice is deployed
-and live-verified.
+The merged third slice makes the posture available; a deployment may advertise
+enforced separation only after that exact artifact is deployed and live-verified
+with its release/scope-bound cutover evidence.
 
 ## Standards alignment
 

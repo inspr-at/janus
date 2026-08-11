@@ -37,18 +37,19 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use janus_core::{
-    authorize_runtime_action, load_secretspec_manifest_secret_names, ApprovalGrant, AuditAction,
-    AuditEvent, AuditOutcome, AuditSink, AuditWrite, BlastRadius, BreakGlassActivation,
-    BreakGlassActivationId, BreakGlassAttempt, BreakGlassCompletion, BreakGlassCompletionOutcome,
-    ClassPermitPolicy, ConsumerDescriptor, ConsumerKind, ConsumerRef, ConsumerRegistry,
-    DelegationId, DelegationPolicy, Destination, EgressMode, Environment, ExecutorRef, JanusError,
-    LifecycleTransitionPolicy, NamespaceId, OwnerRef, Permission, Principal, PrincipalChain,
-    PrincipalId, PrincipalKind, ProfileId, ProfilePolicy, Purpose, ReloadMethod, RotationOutcome,
-    RuntimeAction, RuntimePlane, RuntimeTransport, SafeLabel, ScopePathV1, ScopeRef,
-    SecretAgeEvidence, SecretBroker, SecretDescriptor, SecretLifecycle, SecretMetadataOverlay,
-    SecretName, SecretRef, SecretStore, SecretTombstoneRequest, Severity, StaleSecretPolicy,
-    StaleSecretReportRow, StaleSecretReporter, TombstonePolicy, TrustLevel, UsePermit, UseProfile,
-    UseRequest, ValidationProbe, WorkloadId,
+    authorize_runtime_action, load_secretspec_manifest_secret_names, AccountabilityCutoverV1,
+    AccountabilityPosture, ApprovalGrant, AuditAction, AuditEvent, AuditOutcome, AuditSink,
+    AuditWrite, BlastRadius, BreakGlassActivation, BreakGlassActivationId, BreakGlassAttempt,
+    BreakGlassCompletion, BreakGlassCompletionOutcome, ClassPermitPolicy, ConsumerDescriptor,
+    ConsumerKind, ConsumerRef, ConsumerRegistry, DelegationId, DelegationPolicy, Destination,
+    DutySurfaceManifestV1, EgressMode, Environment, ExecutorRef, JanusError,
+    LifecycleTransitionPolicy, NamespaceId, OperationStateVerifier, OwnerRef, Permission,
+    Principal, PrincipalChain, PrincipalId, PrincipalKind, ProfileId, ProfilePolicy, Purpose,
+    ReloadMethod, RotationOutcome, RuntimeAction, RuntimePlane, RuntimeTransport, SafeLabel,
+    ScopePathV1, ScopeRef, SecretAgeEvidence, SecretBroker, SecretDescriptor, SecretLifecycle,
+    SecretMetadataOverlay, SecretName, SecretRef, SecretStore, SecretTombstoneRequest, Severity,
+    StaleSecretPolicy, StaleSecretReportRow, StaleSecretReporter, TombstonePolicy, TrustLevel,
+    UsePermit, UseProfile, UseRequest, ValidationProbe, WorkloadId,
 };
 use janus_executor::{
     ApprovedUseExecutor, EnvFileHashSidecarFormat, EnvFileHashSidecarSpec, EnvFilePlan,
@@ -60,9 +61,10 @@ use janus_forge::{
     RotationApproval,
 };
 use janus_local::{
-    enforce_migration_ready_from_env, enforce_recovery_drill_freshness_from_env,
-    enforce_release_admission_from_env, enforce_retention_ready_from_env,
-    enforce_runtime_role_from_env, enforce_scope_transfer_ready_from_env, ApprovalListEntry,
+    authorize_runtime_action_from_env, enforce_migration_ready_from_env,
+    enforce_recovery_drill_freshness_from_env, enforce_release_admission_from_env,
+    enforce_retention_ready_from_env, enforce_runtime_role_from_env,
+    enforce_scope_transfer_ready_from_env, ApprovalListEntry,
     ApprovalRegistry as SharedApprovalRegistry, BreakGlassRegistry, DelegationRegistry,
     FileApprovalRegistry, FileBreakGlassRegistry, FileDelegationRegistry,
     FileLifecycleEvidenceRegistry, FilePermitRegistry, FileTombstoneRegistry, JsonlAuditSink,
@@ -109,6 +111,11 @@ pub async fn run_for_plane(selected_plane: Option<RuntimePlane>) -> Result<()> {
     let principal = release_principal_from_env()?;
     enforce_process_plane(selected_plane, action, &principal)?;
     enforce_cli_argument_budget(action, &args)?;
+    let authorization_now = SystemTime::now();
+    let runtime_admission =
+        authorize_runtime_action_from_env(action, &principal.scope, authorization_now)
+            .await
+            .context("runtime authority denied action")?;
     let emergency_activation = requested_break_glass_activation(&args, action)?;
     // Role authorization is gated on the binding registry, so the command that
     // populates an empty registry cannot itself require a binding (JANUS-416).
@@ -117,8 +124,14 @@ pub async fn run_for_plane(selected_plane: Option<RuntimePlane>) -> Result<()> {
     let role_authorization = if emergency_activation.is_some() || role_bootstrap {
         None
     } else {
-        enforce_runtime_role_from_env(action, &principal, None, SystemTime::now())
-            .context("role authorization denied runtime action")?
+        enforce_runtime_role_from_env(
+            action,
+            &principal,
+            None,
+            Some(&runtime_admission),
+            authorization_now,
+        )
+        .context("role authorization denied runtime action")?
     };
     if break_glass_admin::is_break_glass_command(&args) {
         return break_glass_admin::run(&args, &principal);
@@ -259,6 +272,111 @@ pub async fn run_identity_shadow_service() -> Result<()> {
         janus_local::load_or_create_identity_signing_key(Path::new(&signing_key_file))
             .context("identity signing key unavailable")?;
     let registry = janus_local::FileSubjectRegistry::new(registry_root, trust_domain);
+    let duty_manifest_file = env::var("JANUS_DUTY_SURFACE_MANIFEST")
+        .context("JANUS_DUTY_SURFACE_MANIFEST is required")?;
+    let duty_manifest = DutySurfaceManifestV1::parse_json(
+        &fs::read_to_string(&duty_manifest_file).context("duty surface manifest unavailable")?,
+    )
+    .context("duty surface manifest denied")?;
+    let posture = AccountabilityPosture::parse(
+        &env::var("JANUS_ACCOUNTABILITY_POSTURE")
+            .context("JANUS_ACCOUNTABILITY_POSTURE is required")?,
+    )
+    .context("accountability posture denied")?;
+    let runtime_audience = env::var("JANUS_RUNTIME_AUTHORITY_AUDIENCE")
+        .context("JANUS_RUNTIME_AUTHORITY_AUDIENCE is required")?;
+    let runtime_verifying_key_file = env::var("JANUS_RUNTIME_AUTHORITY_VERIFYING_KEY_FILE")
+        .context("JANUS_RUNTIME_AUTHORITY_VERIFYING_KEY_FILE is required")?;
+    if posture == AccountabilityPosture::AccountabilityLegacy
+        && fs::symlink_metadata(&runtime_verifying_key_file).is_err()
+    {
+        janus_local::provision_runtime_verifying_key(
+            Path::new(&runtime_verifying_key_file),
+            &signing_key.verifying_key(),
+        )?;
+    }
+    let configured_verifier =
+        janus_local::load_runtime_verifying_key(Path::new(&runtime_verifying_key_file))
+            .context("runtime authority verifying key unavailable")?;
+    if configured_verifier != signing_key.verifying_key() {
+        anyhow::bail!("runtime authority verifying key does not match identity broker signer");
+    }
+    let operation_verifier = OperationStateVerifier::new(
+        janus_local::load_runtime_verifying_key(Path::new(
+            &env::var("JANUS_OPERATION_VERIFYING_KEY_FILE")
+                .context("JANUS_OPERATION_VERIFYING_KEY_FILE is required")?,
+        ))?,
+        &env::var("JANUS_OPERATION_DOMAIN_SERVICE")
+            .context("JANUS_OPERATION_DOMAIN_SERVICE is required")?,
+        &env::var("JANUS_OPERATION_AUDIENCE").context("JANUS_OPERATION_AUDIENCE is required")?,
+        &release_digest,
+    )?;
+    let journal = if posture.requires_verified_journal() {
+        let journal_key_file = env::var("JANUS_DUTY_SIGNING_KEY_FILE")
+            .context("JANUS_DUTY_SIGNING_KEY_FILE is required")?;
+        Some(janus_local::FileDutyJournal::open_or_create(
+            env::var("JANUS_DUTY_JOURNAL_ROOT").context("JANUS_DUTY_JOURNAL_ROOT is required")?,
+            release_digest.clone(),
+            janus_local::load_or_create_identity_signing_key(Path::new(&journal_key_file))?,
+        )?)
+    } else {
+        None
+    };
+    let cutover = if posture == AccountabilityPosture::EnforcedRecorded {
+        Some(AccountabilityCutoverV1::parse_json(
+            &fs::read_to_string(
+                env::var("JANUS_ACCOUNTABILITY_CUTOVER_FILE")
+                    .context("JANUS_ACCOUNTABILITY_CUTOVER_FILE is required")?,
+            )
+            .context("accountability cutover evidence unavailable")?,
+        )?)
+    } else {
+        None
+    };
+    if let Some(cutover) = cutover.as_ref() {
+        let migration = janus_core::IdentityBindingMigrationManifestV1::parse_json(
+            &fs::read_to_string(
+                env::var("JANUS_IDENTITY_BINDING_MIGRATION_FILE")
+                    .context("JANUS_IDENTITY_BINDING_MIGRATION_FILE is required")?,
+            )
+            .context("identity binding migration manifest unavailable")?,
+        )?;
+        let migration_preflight = janus_local::preflight_identity_binding_migration(
+            &migration,
+            &registry,
+            &janus_local::FileRoleBindingRegistry::new(
+                env::var("JANUS_ROLE_BINDINGS_ROOT")
+                    .context("JANUS_ROLE_BINDINGS_ROOT is required")?,
+            ),
+        )
+        .context("identity binding migration denied")?;
+        if migration_preflight.manifest_fingerprint != cutover.identity_migration_fingerprint() {
+            anyhow::bail!("identity binding migration does not match cutover evidence");
+        }
+    }
+    let runtime_ttl = env::var("JANUS_RUNTIME_ADMISSION_TTL_SECONDS")
+        .unwrap_or_else(|_| "60".to_string())
+        .parse::<u64>()
+        .context("JANUS_RUNTIME_ADMISSION_TTL_SECONDS is invalid")?;
+    let authority = janus_local::RuntimeAuthorityBroker::new(
+        registry.clone(),
+        manifest.clone(),
+        duty_manifest,
+        signing_key.clone(),
+        operation_verifier,
+        journal,
+        posture,
+        runtime_scope_from_env()?,
+        &runtime_audience,
+        release_digest.clone(),
+        Duration::from_secs(runtime_ttl),
+        cutover.as_ref(),
+        Box::new(janus_local::JsonlRuntimeAuthorityAudit::open(
+            env::var("JANUS_RUNTIME_AUTHORITY_AUDIT_FILE")
+                .context("JANUS_RUNTIME_AUTHORITY_AUDIT_FILE is required")?,
+        )?),
+    )
+    .context("runtime authority configuration denied")?;
     let broker = janus_local::IdentityShadowBroker::new(
         registry,
         manifest,
@@ -267,7 +385,9 @@ pub async fn run_identity_shadow_service() -> Result<()> {
         release_digest,
         Duration::from_secs(ttl),
     )
-    .context("identity broker configuration denied")?;
+    .context("identity broker configuration denied")?
+    .with_runtime_authority(authority)
+    .context("runtime authority attachment denied")?;
     let listener = janus_local::bind_private_identity_socket(Path::new(&socket))
         .context("identity broker socket unavailable")?;
     broker
@@ -5226,6 +5346,20 @@ fn runtime_scope_from_env() -> Result<ScopeRef> {
     Ok(scope.scope_ref())
 }
 
+#[cfg(not(test))]
+pub(crate) async fn enforce_daemon_runtime_authority(action: RuntimeAction) -> Result<()> {
+    let scope = runtime_scope_from_env()?;
+    authorize_runtime_action_from_env(action, &scope, SystemTime::now())
+        .await
+        .context("runtime authority denied daemon request")?;
+    Ok(())
+}
+
+#[cfg(test)]
+pub(crate) async fn enforce_daemon_runtime_authority(_action: RuntimeAction) -> Result<()> {
+    Ok(())
+}
+
 fn required_scope_env(key: &'static str) -> Result<String> {
     optional_scope_env(key)?.with_context(|| format!("{key} is required"))
 }
@@ -5560,7 +5694,7 @@ mod tests {
                 RuntimeAction::BreakGlassReview,
             ),
         ];
-        assert_eq!(cases.len(), RuntimeAction::ALL.len() - 4);
+        assert_eq!(cases.len(), RuntimeAction::ALL.len() - 8);
         for (args, expected) in cases {
             let args = args
                 .iter()

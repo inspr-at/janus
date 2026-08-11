@@ -233,6 +233,12 @@ async fn handle_connection(
     receipt_dir: &Path,
     recipients: &[String],
 ) {
+    if super::super::enforce_daemon_runtime_authority(janus_core::RuntimeAction::DynamicCustody)
+        .await
+        .is_err()
+    {
+        return;
+    }
     let request = match timeout(
         REQUEST_WAIT,
         read_json_frame::<CustodyRequest>(&mut stream, MAX_REQUEST_BYTES),

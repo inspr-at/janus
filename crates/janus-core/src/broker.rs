@@ -9,7 +9,7 @@ use crate::{
     DelegationRevocation, Destination, DutyAuthorization, ExecutorRef, JanusError, JanusResult,
     Permission, PermitIssuer, PolicyDecision, PrincipalChain, ProfilePolicy, RoleBinding,
     RoleDecisionInput, RolePolicyV1, SecretDescriptor, SecretName, SecretRef, SecretStore,
-    SecretValue, Severity, UsePermit, UseRequest,
+    SecretValue, Severity, UsePermit, UseRequest, VerifiedRuntimeAdmission,
 };
 
 /// Policy/audit wrapper around a backend store.
@@ -19,6 +19,7 @@ pub struct SecretBroker<S, A> {
     audit: A,
     role_policy: Option<RolePolicyV1>,
     role_bindings: Vec<RoleBinding>,
+    runtime_admission: Option<VerifiedRuntimeAdmission>,
 }
 
 impl<S, A> SecretBroker<S, A>
@@ -34,6 +35,7 @@ where
             audit,
             role_policy: None,
             role_bindings: Vec::new(),
+            runtime_admission: None,
         }
     }
 
@@ -48,6 +50,11 @@ where
         self
     }
 
+    /// Attach the fresh authority admission for the next runtime operation.
+    pub fn set_runtime_admission(&mut self, admission: VerifiedRuntimeAdmission) {
+        self.runtime_admission = Some(admission);
+    }
+
     fn authorize(
         &mut self,
         principal: &PrincipalChain,
@@ -60,6 +67,12 @@ where
         let Some(policy) = self.role_policy.as_ref() else {
             return Ok(());
         };
+        let admission = self.runtime_admission.as_ref().ok_or_else(|| {
+            JanusError::policy_denied(
+                "runtime_admission_missing",
+                "role-enforced broker operation requires runtime authority admission",
+            )
+        })?;
         let owner_fingerprint = descriptor
             .and_then(|descriptor| descriptor.owner.as_ref())
             .map(|owner| authorization_fingerprint("janus-resource-owner-v1", owner.as_str()))
@@ -75,7 +88,7 @@ where
             approval_fingerprint,
             delegation_fingerprint,
             audit_available: true,
-            duty_authorization: DutyAuthorization::AccountabilityLegacy,
+            duty_authorization: DutyAuthorization::BrokerAdmission(admission),
             bindings: &self.role_bindings,
             now,
         };

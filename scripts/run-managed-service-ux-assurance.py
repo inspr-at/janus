@@ -89,7 +89,11 @@ class Scenario:
             ]
         if self.runner == "npm":
             return ["npm", "run", self.target]
-        return [str(REPO / self.target)]
+        return [
+            str(REPO / "scripts/with-runtime-authority.sh"),
+            "dev",
+            str(REPO / self.target),
+        ]
 
 
 @dataclass(frozen=True)
