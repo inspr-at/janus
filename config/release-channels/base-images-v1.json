@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "reviewed_at": "2026-07-22",
+  "reviewed_at": "2026-08-17",
   "update_policy": {
     "source": "Docker Official Images",
     "trigger": "Open a reviewed change when an upstream patch release, base distribution update, tag movement, or vulnerability finding changes the selected artifact.",
@@ -12,8 +12,8 @@
       "dockerfile": "go-envelope/Dockerfile",
       "stage": "build",
       "name": "golang",
-      "tag": "1.26.5-alpine3.24",
-      "digest": "sha256:0178a641fbb4858c5f1b48e34bdaabe0350a330a1b1149aabd498d0699ff5fb2",
+      "tag": "1.26.6-alpine3.24",
+      "digest": "sha256:3889b425f035be855a72fb4755265311293b6d414521f0a519d819df32222d83",
       "required_platforms": ["linux/amd64"]
     },
     {
