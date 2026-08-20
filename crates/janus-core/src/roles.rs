@@ -143,6 +143,7 @@ impl Permission {
             RuntimeAction::ManagedRunPreflight | RuntimeAction::ManagedRun => Self::ManagedRun,
             RuntimeAction::EnvFilePreflight | RuntimeAction::EnvFile => Self::EnvFile,
             RuntimeAction::PermitIssue => Self::SecretUse,
+            RuntimeAction::ProjectionPreflight | RuntimeAction::ProjectionIssue => Self::EnvFile,
             RuntimeAction::ApprovalIssue => Self::ApprovalIssue,
             RuntimeAction::ApprovalPermit => Self::ApprovalPermit,
             RuntimeAction::ApprovalList => Self::ApprovalRead,

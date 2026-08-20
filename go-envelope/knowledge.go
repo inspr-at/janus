@@ -96,7 +96,7 @@ func permissionKnowledgeValues() []KnowledgeValue {
 }
 
 func runtimeActionKnowledgeValues() []KnowledgeValue {
-	use := []string{"warden.list_secrets", "warden.describe_secret", "warden.request_use", "warden.health", "use.run_preflight", "use.run", "use.env_file_preflight", "use.env_file", "use.permit_issue"}
+	use := []string{"warden.list_secrets", "warden.describe_secret", "warden.request_use", "warden.health", "use.run_preflight", "use.run", "use.env_file_preflight", "use.env_file", "use.permit_issue", "use.projection_preflight", "use.projection_issue"}
 	admin := []string{
 		"admin.approval_issue", "admin.approval_permit", "admin.approval_list", "admin.approval_revoke",
 		"admin.delegation_issue", "admin.delegation_list", "admin.delegation_inspect", "admin.delegation_revoke",

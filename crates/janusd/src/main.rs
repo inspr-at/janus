@@ -52,9 +52,11 @@ use janus_core::{
     UsePermit, UseProfile, UseRequest, ValidationProbe, WorkloadId,
 };
 use janus_executor::{
-    ApprovedUseExecutor, EnvFileHashSidecarFormat, EnvFileHashSidecarSpec, EnvFilePlan,
-    EnvFileProfile, EnvFileProfileSpec, EnvFileRequest, ManagedCommandPlan, ManagedCommandProfile,
-    ManagedCommandProfileSpec, ManagedCommandRequest, ManagedCommandRuntimeLimits,
+    resolve_host_projection_profile, ApprovedUseExecutor, EnvFileHashSidecarFormat,
+    EnvFileHashSidecarSpec, EnvFilePlan, EnvFileProfile, EnvFileProfileSpec, EnvFileRequest,
+    HostProjectionCapability, HostProjectionOutcome, HostProjectionPlan, HostProjectionRef,
+    HostProjectionSelector, ManagedCommandPlan, ManagedCommandProfile, ManagedCommandProfileSpec,
+    ManagedCommandRequest, ManagedCommandRuntimeLimits,
 };
 use janus_forge::{
     ConsumerRotationHooks, GeneratedAlphabet, GeneratedRotationBroker, GeneratedValuePolicy,
@@ -199,6 +201,8 @@ pub async fn run_for_plane(selected_plane: Option<RuntimePlane>) -> Result<()> {
         Command::RunManaged(config) => run_managed_command(config).await,
         Command::EnvFilePreflight(config) => run_env_file_preflight(config).await,
         Command::EnvFile(config) => run_env_file(config).await,
+        Command::ProjectionPreflight(config) => run_projection_preflight(config).await,
+        Command::ProjectionIssue(config) => run_projection_issue(config).await,
         Command::PermitIssue(config) => run_permit_issue(config).await,
         Command::Approve(command) => run_approve(command, &principal).await,
         Command::Delegation(command) => run_delegation(command).await,
@@ -405,6 +409,8 @@ enum Command {
     RunManaged(RunManagedCommandConfig),
     EnvFilePreflight(EnvFilePreflightConfig),
     EnvFile(EnvFileConfig),
+    ProjectionPreflight(ProjectionPreflightConfig),
+    ProjectionIssue(ProjectionIssueConfig),
     PermitIssue(PermitIssueConfig),
     Approve(ApproveCommand),
     Delegation(DelegationCommand),
@@ -425,6 +431,8 @@ impl Command {
             Self::RunManaged(_) => RuntimeAction::ManagedRun,
             Self::EnvFilePreflight(_) => RuntimeAction::EnvFilePreflight,
             Self::EnvFile(_) => RuntimeAction::EnvFile,
+            Self::ProjectionPreflight(_) => RuntimeAction::ProjectionPreflight,
+            Self::ProjectionIssue(_) => RuntimeAction::ProjectionIssue,
             Self::PermitIssue(_) => RuntimeAction::PermitIssue,
             Self::Approve(ApproveCommand::Issue(_)) => RuntimeAction::ApprovalIssue,
             Self::Approve(ApproveCommand::Permit(_)) => RuntimeAction::ApprovalPermit,
@@ -507,6 +515,16 @@ struct EnvFileConfig {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct EnvFilePreflightConfig {
     profile_id: ProfileId,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ProjectionPreflightConfig {
+    selector: HostProjectionSelector,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ProjectionIssueConfig {
+    selector: HostProjectionSelector,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1205,6 +1223,40 @@ async fn run_env_file_preflight(config: EnvFilePreflightConfig) -> Result<()> {
     let profiles = ManagedCommandProfileCatalog::load(&manifest_path)?;
     let outcome = run_env_file_preflight_with(&config, &profiles)?;
     emit_env_file_preflight_outcome(&outcome);
+    Ok(())
+}
+
+async fn run_projection_issue(config: ProjectionIssueConfig) -> Result<()> {
+    let manifest_path = run_profile_manifest_path()?;
+    let profiles = ManagedCommandProfileCatalog::load(&manifest_path)?;
+    let principal = run_principal_from_env()?;
+    let store = load_age_store_from_env()?;
+    let descriptors = store
+        .list()
+        .await
+        .context("failed to load current descriptors for projection issue")?;
+    let policy = profiles.use_policy(&descriptors)?;
+    let executor =
+        ApprovedUseExecutor::new(SecretBroker::new(store, policy, AuditWrite::accepting()));
+    let mut runner = ProfileManifestEnvFileRunner {
+        profiles,
+        permits: (),
+        executor,
+        principal,
+        clock: SystemManagedCommandClock,
+    };
+    let outcome = run_projection_issue_with(&config, &mut runner).await?;
+    let lifecycle_evidence = FileLifecycleEvidenceRegistry::new(lifecycle_evidence_registry_dir());
+    record_secret_use_evidence(&outcome.secret_ref, &lifecycle_evidence, SystemTime::now())?;
+    emit_projection_issue_outcome(&outcome);
+    Ok(())
+}
+
+async fn run_projection_preflight(config: ProjectionPreflightConfig) -> Result<()> {
+    let manifest_path = run_profile_manifest_path()?;
+    let profiles = ManagedCommandProfileCatalog::load(&manifest_path)?;
+    let outcome = run_projection_preflight_with(&config, &profiles)?;
+    emit_projection_preflight_outcome(&outcome);
     Ok(())
 }
 
@@ -2828,6 +2880,17 @@ fn run_env_file_preflight_with(
     ))
 }
 
+fn run_projection_preflight_with(
+    config: &ProjectionPreflightConfig,
+    profiles: &ManagedCommandProfileCatalog,
+) -> Result<HostProjectionCliOutcome> {
+    let profile =
+        resolve_host_projection_profile(profiles.env_file_profiles.iter(), &config.selector)?;
+    let plan =
+        HostProjectionPlan::from_env_file_plan(&config.selector, profile.preflight_target()?)?;
+    Ok(HostProjectionCliOutcome::from_plan(plan, "ok"))
+}
+
 #[async_trait]
 trait EnvFileRunner {
     async fn run(&mut self, config: &EnvFileConfig) -> Result<EnvFileCliOutcome>;
@@ -2842,6 +2905,14 @@ trait EnvFileExecutor {
         principal: &PrincipalChain,
         now: SystemTime,
     ) -> Result<EnvFileCliOutcome>;
+
+    async fn issue_projection(
+        &mut self,
+        selector: &HostProjectionSelector,
+        profile: &EnvFileProfile,
+        principal: &PrincipalChain,
+        now: SystemTime,
+    ) -> Result<HostProjectionCliOutcome>;
 }
 
 #[async_trait]
@@ -2864,6 +2935,19 @@ where
                 principal,
                 now,
             })
+            .await?;
+        Ok(outcome.into())
+    }
+
+    async fn issue_projection(
+        &mut self,
+        selector: &HostProjectionSelector,
+        profile: &EnvFileProfile,
+        principal: &PrincipalChain,
+        now: SystemTime,
+    ) -> Result<HostProjectionCliOutcome> {
+        let outcome = self
+            .issue_host_projection(selector, profile, principal, now)
             .await?;
         Ok(outcome.into())
     }
@@ -2904,6 +2988,20 @@ where
             .await?;
         Ok(outcome.into())
     }
+
+    async fn issue_projection(
+        &mut self,
+        selector: &HostProjectionSelector,
+        profile: &EnvFileProfile,
+        principal: &PrincipalChain,
+        now: SystemTime,
+    ) -> Result<HostProjectionCliOutcome> {
+        let outcome = self
+            .executor
+            .issue_host_projection(selector, profile, principal, now)
+            .await?;
+        Ok(outcome.into())
+    }
 }
 
 struct ProfileManifestEnvFileRunner<R, E, C = SystemManagedCommandClock> {
@@ -2936,6 +3034,29 @@ where
             .render(profile, &permit, &self.principal, self.clock.now())
             .await
     }
+}
+
+async fn run_projection_issue_with<R, E, C>(
+    config: &ProjectionIssueConfig,
+    runner: &mut ProfileManifestEnvFileRunner<R, E, C>,
+) -> Result<HostProjectionCliOutcome>
+where
+    E: EnvFileExecutor + Send,
+    C: ManagedCommandClock + Send,
+{
+    let profile = resolve_host_projection_profile(
+        runner.profiles.env_file_profiles.iter(),
+        &config.selector,
+    )?;
+    runner
+        .executor
+        .issue_projection(
+            &config.selector,
+            profile,
+            &runner.principal,
+            runner.clock.now(),
+        )
+        .await
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3008,6 +3129,66 @@ impl EnvFileCliOutcome {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct HostProjectionCliOutcome {
+    capability: HostProjectionCapability,
+    host: SafeLabel,
+    secret_ref: SecretRef,
+    profile_id: ProfileId,
+    output_path: PathBuf,
+    hash_output_path: PathBuf,
+    hash_format: &'static str,
+    consumer_ref: ConsumerRef,
+    generation: Option<String>,
+    projection_ref: Option<HostProjectionRef>,
+    reason_code: &'static str,
+    value_returned: bool,
+}
+
+impl From<HostProjectionOutcome> for HostProjectionCliOutcome {
+    fn from(outcome: HostProjectionOutcome) -> Self {
+        let generation = outcome.generation;
+        let projection_ref = outcome.projection_ref;
+        let value_returned = outcome.value_returned || outcome.plan.value_returned;
+        Self::from_plan(outcome.plan, outcome.reason_code).with_issue_evidence(
+            generation,
+            projection_ref,
+            value_returned,
+        )
+    }
+}
+
+impl HostProjectionCliOutcome {
+    fn from_plan(plan: HostProjectionPlan, reason_code: &'static str) -> Self {
+        Self {
+            capability: plan.capability,
+            host: plan.host,
+            secret_ref: plan.secret_ref,
+            profile_id: plan.profile_id,
+            output_path: plan.output_path,
+            hash_output_path: plan.hash_output_path,
+            hash_format: plan.hash_format.as_str(),
+            consumer_ref: plan.consumer_ref,
+            generation: None,
+            projection_ref: None,
+            reason_code,
+            value_returned: plan.value_returned,
+        }
+    }
+
+    fn with_issue_evidence(
+        mut self,
+        generation: String,
+        projection_ref: HostProjectionRef,
+        value_returned: bool,
+    ) -> Self {
+        self.generation = Some(generation);
+        self.projection_ref = Some(projection_ref);
+        self.value_returned = value_returned;
+        self
+    }
+}
+
 fn emit_run_managed_outcome(outcome: &ManagedCommandCliOutcome) {
     print!("{}", outcome.stdout);
     eprint!("{}", outcome.stderr);
@@ -3056,6 +3237,43 @@ fn emit_env_file_preflight_outcome(outcome: &EnvFileCliOutcome) {
         outcome.output_path.display(),
         optional_path(outcome.hash_output_path.as_deref()),
         outcome.hash_format.unwrap_or("none"),
+        outcome.consumer_ref.as_str(),
+        outcome.reason_code,
+        outcome.value_returned
+    );
+}
+
+fn emit_projection_issue_outcome(outcome: &HostProjectionCliOutcome) {
+    println!(
+        "janusd-use projection issue ok capability={} host={} projection_ref={} generation={} secret_ref={} profile_id={} output_path={} hash_output_path={} hash_format={} consumer_ref={} reason_code={} value_returned={}",
+        outcome.capability.as_str(),
+        outcome.host.as_str(),
+        outcome
+            .projection_ref
+            .as_ref()
+            .map_or("none", HostProjectionRef::as_str),
+        outcome.generation.as_deref().unwrap_or("none"),
+        outcome.secret_ref.as_str(),
+        outcome.profile_id.as_str(),
+        outcome.output_path.display(),
+        outcome.hash_output_path.display(),
+        outcome.hash_format,
+        outcome.consumer_ref.as_str(),
+        outcome.reason_code,
+        outcome.value_returned
+    );
+}
+
+fn emit_projection_preflight_outcome(outcome: &HostProjectionCliOutcome) {
+    println!(
+        "janusd-use projection preflight ok capability={} host={} secret_ref={} profile_id={} output_path={} hash_output_path={} hash_format={} consumer_ref={} reason_code={} value_returned={}",
+        outcome.capability.as_str(),
+        outcome.host.as_str(),
+        outcome.secret_ref.as_str(),
+        outcome.profile_id.as_str(),
+        outcome.output_path.display(),
+        outcome.hash_output_path.display(),
+        outcome.hash_format,
         outcome.consumer_ref.as_str(),
         outcome.reason_code,
         outcome.value_returned
@@ -3680,6 +3898,12 @@ fn classify_runtime_action(args: &[String]) -> Result<RuntimeAction> {
             RuntimeAction::EnvFilePreflight
         }
         [env_file, ..] if env_file == "env-file" => RuntimeAction::EnvFile,
+        [projection, preflight, ..] if projection == "projection" && preflight == "preflight" => {
+            RuntimeAction::ProjectionPreflight
+        }
+        [projection, issue, ..] if projection == "projection" && issue == "issue" => {
+            RuntimeAction::ProjectionIssue
+        }
         [permit, issue, ..] if permit == "permit" && issue == "issue" => RuntimeAction::PermitIssue,
         [approve, issue, ..] if approve == "approve" && issue == "issue" => {
             RuntimeAction::ApprovalIssue
@@ -3872,6 +4096,14 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command> {
         }
         [env_file, rest @ ..] if env_file == "env-file" => {
             parse_env_file(rest.iter().cloned()).map(Command::EnvFile)
+        }
+        [projection, preflight, rest @ ..]
+            if projection == "projection" && preflight == "preflight" =>
+        {
+            parse_projection_preflight(rest.iter().cloned()).map(Command::ProjectionPreflight)
+        }
+        [projection, issue, rest @ ..] if projection == "projection" && issue == "issue" => {
+            parse_projection_issue(rest.iter().cloned()).map(Command::ProjectionIssue)
         }
         [permit, issue, rest @ ..] if permit == "permit" && issue == "issue" => {
             parse_permit_issue(rest.iter().cloned()).map(Command::PermitIssue)
@@ -4937,6 +5169,104 @@ fn parse_env_file_preflight(
     })
 }
 
+fn parse_projection_issue(args: impl IntoIterator<Item = String>) -> Result<ProjectionIssueConfig> {
+    let mut capability = None;
+    let mut host = None;
+    let mut args = args.into_iter();
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--capability" => {
+                if capability
+                    .replace(HostProjectionCapability::parse(&required_arg(
+                        "--capability",
+                        args.next(),
+                    )?)?)
+                    .is_some()
+                {
+                    anyhow::bail!("--capability may only be provided once");
+                }
+            }
+            "--host" => {
+                if host.replace(required_arg("--host", args.next())?).is_some() {
+                    anyhow::bail!("--host may only be provided once");
+                }
+            }
+            "--permit" => {
+                anyhow::bail!("janusd projection issue derives and consumes its permit internally")
+            }
+            "--break-glass-activation" => {
+                anyhow::bail!("janusd projection issue does not accept break-glass activation")
+            }
+            "--profile" | "--secret" | "--secret-ref" | "--value" | "--raw-value" | "--env"
+            | "--output" | "--destination" | "--executor" | "--binary" | "--reveal" => {
+                anyhow::bail!("projection policy fields come from the reviewed capability")
+            }
+            "--" => anyhow::bail!("janusd projection issue does not accept command arguments"),
+            other if other.starts_with('-') => {
+                anyhow::bail!("unsupported janusd projection issue flag")
+            }
+            _ => anyhow::bail!("unsupported janusd projection issue argument"),
+        }
+    }
+
+    let capability = capability.context("--capability is required")?;
+    let host = host.context("--host is required")?;
+    Ok(ProjectionIssueConfig {
+        selector: HostProjectionSelector::new(capability, host)?,
+    })
+}
+
+fn parse_projection_preflight(
+    args: impl IntoIterator<Item = String>,
+) -> Result<ProjectionPreflightConfig> {
+    let mut capability = None;
+    let mut host = None;
+    let mut args = args.into_iter();
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--capability" => {
+                if capability
+                    .replace(HostProjectionCapability::parse(&required_arg(
+                        "--capability",
+                        args.next(),
+                    )?)?)
+                    .is_some()
+                {
+                    anyhow::bail!("--capability may only be provided once");
+                }
+            }
+            "--host" => {
+                if host.replace(required_arg("--host", args.next())?).is_some() {
+                    anyhow::bail!("--host may only be provided once");
+                }
+            }
+            "--permit" => anyhow::bail!("janusd projection preflight does not accept permits"),
+            "--break-glass-activation" => {
+                anyhow::bail!("janusd projection preflight does not accept break-glass activation")
+            }
+            "--profile" | "--secret" | "--secret-ref" | "--value" | "--raw-value" | "--env"
+            | "--output" | "--destination" | "--executor" | "--binary" | "--reveal" => {
+                anyhow::bail!("projection policy fields come from the reviewed capability")
+            }
+            "--" => {
+                anyhow::bail!("janusd projection preflight does not accept command arguments")
+            }
+            other if other.starts_with('-') => {
+                anyhow::bail!("unsupported janusd projection preflight flag")
+            }
+            _ => anyhow::bail!("unsupported janusd projection preflight argument"),
+        }
+    }
+
+    let capability = capability.context("--capability is required")?;
+    let host = host.context("--host is required")?;
+    Ok(ProjectionPreflightConfig {
+        selector: HostProjectionSelector::new(capability, host)?,
+    })
+}
+
 fn parse_forge_rotate_generated(
     args: impl IntoIterator<Item = String>,
 ) -> Result<ForgeRotateGeneratedConfig> {
@@ -5584,7 +5914,7 @@ fn print_usage(selected_plane: Option<RuntimePlane>) {
             "janusd\n\nThe mixed Janus runtime entry point is retired and performs no operational command.\nUse 'janusd-use --help' for permit-bound use or 'janusd-admin --help' for administration.\nreason_code=legacy_mixed_entrypoint_retired value_returned=false"
         ),
         Some(RuntimePlane::Use) => eprintln!(
-            "janusd-use\n\nPermit-bound use commands:\n  permit issue --secret-ref REF --profile PROFILE --purpose PURPOSE\n  run preflight --profile PROFILE -- ARG...\n  run --profile PROFILE (--permit use_...|--break-glass-activation bga_...) -- ARG...\n  env-file preflight --profile PROFILE\n  env-file --profile PROFILE (--permit use_...|--break-glass-activation bga_...)\n\nThis process cannot issue approvals, change lifecycle state, rotate, migrate, transfer scope, run recovery drills, or retire hosts.\nPermit issue derives destination, executor, egress, and TTL from reviewed policy and cannot mint approval-required use.\nManaged-command preflight validates the reviewed profile, exact argv, and executable without a permit, backend, or secret read.\nEnv-file preflight checks the reviewed profile and target path without a permit, backend, or secret read.\nAll non-help commands require JANUS_SCOPE_ORGANIZATION, JANUS_SCOPE_PROJECT, JANUS_SCOPE_REPOSITORY, and JANUS_SCOPE_ENVIRONMENT. JANUS_SCOPE_NAMESPACE and JANUS_SCOPE_WORKLOAD are optional; workload requires namespace."
+            "janusd-use\n\nPermit-bound use commands:\n  permit issue --secret-ref REF --profile PROFILE --purpose PURPOSE\n  run preflight --profile PROFILE -- ARG...\n  run --profile PROFILE (--permit use_...|--break-glass-activation bga_...) -- ARG...\n  env-file preflight --profile PROFILE\n  env-file --profile PROFILE (--permit use_...|--break-glass-activation bga_...)\n  projection preflight --capability NAME --host HOST\n  projection issue --capability NAME --host HOST\n\nThis process cannot issue approvals, change lifecycle state, rotate, migrate, transfer scope, run recovery drills, or retire hosts.\nPermit issue derives destination, executor, egress, and TTL from reviewed policy and cannot mint approval-required use.\nManaged-command preflight validates the reviewed profile, exact argv, and executable without a permit, backend, or secret read.\nEnv-file and projection preflight check reviewed targets without a permit, backend, or secret read.\nProjection callers name only a release-reviewed capability and host; Janus derives and consumes the permit internally and never returns the credential.\nAll non-help commands require JANUS_SCOPE_ORGANIZATION, JANUS_SCOPE_PROJECT, JANUS_SCOPE_REPOSITORY, and JANUS_SCOPE_ENVIRONMENT. JANUS_SCOPE_NAMESPACE and JANUS_SCOPE_WORKLOAD are optional; workload requires namespace."
         ),
         Some(RuntimePlane::Admin) => eprintln!("{ADMIN_USAGE}"),
     }
@@ -5666,6 +5996,14 @@ mod tests {
             ]),
             Just(vec![RedactedCliArg("env-file".to_string())]),
             Just(vec![
+                RedactedCliArg("projection".to_string()),
+                RedactedCliArg("issue".to_string()),
+            ]),
+            Just(vec![
+                RedactedCliArg("projection".to_string()),
+                RedactedCliArg("preflight".to_string()),
+            ]),
+            Just(vec![
                 RedactedCliArg("approve".to_string()),
                 RedactedCliArg("permit".to_string()),
             ]),
@@ -5728,6 +6066,11 @@ mod tests {
                 RuntimeAction::EnvFilePreflight,
             ),
             (&["env-file"][..], RuntimeAction::EnvFile),
+            (
+                &["projection", "preflight"][..],
+                RuntimeAction::ProjectionPreflight,
+            ),
+            (&["projection", "issue"][..], RuntimeAction::ProjectionIssue),
             (&["permit", "issue"][..], RuntimeAction::PermitIssue),
             (&["approve", "issue"][..], RuntimeAction::ApprovalIssue),
             (&["approve", "permit"][..], RuntimeAction::ApprovalPermit),
@@ -5914,6 +6257,9 @@ mod tests {
             Command::RunManaged(_) => panic!("expected forge config"),
             Command::EnvFilePreflight(_) => panic!("expected forge config"),
             Command::EnvFile(_) => panic!("expected forge config"),
+            Command::ProjectionPreflight(_) | Command::ProjectionIssue(_) => {
+                panic!("expected forge config")
+            }
             Command::PermitIssue(_) => panic!("expected forge config"),
             Command::Approve(_) => panic!("expected forge config"),
             Command::Delegation(_) => panic!("expected forge config"),
@@ -5933,6 +6279,9 @@ mod tests {
             Command::ForgeRotateGenerated(_) => panic!("expected run config"),
             Command::EnvFilePreflight(_) => panic!("expected run config"),
             Command::EnvFile(_) => panic!("expected run config"),
+            Command::ProjectionPreflight(_) | Command::ProjectionIssue(_) => {
+                panic!("expected run config")
+            }
             Command::PermitIssue(_) => panic!("expected run config"),
             Command::Help => panic!("expected run config"),
             Command::Approve(_) => panic!("expected run config"),
@@ -5960,6 +6309,9 @@ mod tests {
             Command::ForgeRotateGenerated(_) => panic!("expected env-file config"),
             Command::RunManagedPreflight(_) => panic!("expected env-file config"),
             Command::RunManaged(_) => panic!("expected env-file config"),
+            Command::ProjectionPreflight(_) | Command::ProjectionIssue(_) => {
+                panic!("expected env-file config")
+            }
             Command::PermitIssue(_) => panic!("expected env-file config"),
             Command::Approve(_) => panic!("expected env-file config"),
             Command::Delegation(_) => panic!("expected env-file config"),
@@ -5977,6 +6329,9 @@ mod tests {
         match parse_args(args.iter().map(|arg| arg.to_string())).unwrap() {
             Command::EnvFilePreflight(config) => config,
             Command::EnvFile(_) => panic!("expected env-file preflight config"),
+            Command::ProjectionPreflight(_) | Command::ProjectionIssue(_) => {
+                panic!("expected env-file preflight config")
+            }
             Command::ForgeRotateGenerated(_) => panic!("expected env-file preflight config"),
             Command::RunManagedPreflight(_) => panic!("expected env-file preflight config"),
             Command::RunManaged(_) => panic!("expected env-file preflight config"),
@@ -5993,6 +6348,20 @@ mod tests {
         }
     }
 
+    fn parse_projection_issue_ok(args: &[&str]) -> ProjectionIssueConfig {
+        match parse_args(args.iter().map(|arg| arg.to_string())).unwrap() {
+            Command::ProjectionIssue(config) => config,
+            _ => panic!("expected projection issue config"),
+        }
+    }
+
+    fn parse_projection_preflight_ok(args: &[&str]) -> ProjectionPreflightConfig {
+        match parse_args(args.iter().map(|arg| arg.to_string())).unwrap() {
+            Command::ProjectionPreflight(config) => config,
+            _ => panic!("expected projection preflight config"),
+        }
+    }
+
     fn parse_approve_issue_ok(args: &[&str]) -> ApproveIssueConfig {
         match parse_args(args.iter().map(|arg| arg.to_string())).unwrap() {
             Command::Approve(ApproveCommand::Issue(config)) => config,
@@ -6001,6 +6370,9 @@ mod tests {
             Command::RunManaged(_) => panic!("expected approve issue config"),
             Command::EnvFilePreflight(_) => panic!("expected approve issue config"),
             Command::EnvFile(_) => panic!("expected approve issue config"),
+            Command::ProjectionPreflight(_) | Command::ProjectionIssue(_) => {
+                panic!("expected approve issue config")
+            }
             Command::PermitIssue(_) => panic!("expected approve issue config"),
             Command::Approve(_) => panic!("expected approve issue config"),
             Command::Delegation(_) => panic!("expected approve issue config"),
@@ -6022,6 +6394,9 @@ mod tests {
             Command::RunManaged(_) => panic!("expected approve permit config"),
             Command::EnvFilePreflight(_) => panic!("expected approve permit config"),
             Command::EnvFile(_) => panic!("expected approve permit config"),
+            Command::ProjectionPreflight(_) | Command::ProjectionIssue(_) => {
+                panic!("expected approve permit config")
+            }
             Command::PermitIssue(_) => panic!("expected approve permit config"),
             Command::Approve(_) => panic!("expected approve permit config"),
             Command::Delegation(_) => panic!("expected approve permit config"),
@@ -6043,6 +6418,9 @@ mod tests {
             Command::RunManaged(_) => panic!("expected approve revoke config"),
             Command::EnvFilePreflight(_) => panic!("expected approve revoke config"),
             Command::EnvFile(_) => panic!("expected approve revoke config"),
+            Command::ProjectionPreflight(_) | Command::ProjectionIssue(_) => {
+                panic!("expected approve revoke config")
+            }
             Command::PermitIssue(_) => panic!("expected approve revoke config"),
             Command::Approve(_) => panic!("expected approve revoke config"),
             Command::Delegation(_) => panic!("expected approve revoke config"),
@@ -6064,6 +6442,9 @@ mod tests {
             Command::RunManaged(_) => panic!("expected lifecycle config"),
             Command::EnvFilePreflight(_) => panic!("expected lifecycle config"),
             Command::EnvFile(_) => panic!("expected lifecycle config"),
+            Command::ProjectionPreflight(_) | Command::ProjectionIssue(_) => {
+                panic!("expected lifecycle config")
+            }
             Command::PermitIssue(_) => panic!("expected lifecycle config"),
             Command::Approve(_) => panic!("expected lifecycle config"),
             Command::Delegation(_) => panic!("expected lifecycle config"),
@@ -6087,6 +6468,9 @@ mod tests {
             Command::RunManaged(_) => panic!("expected lifecycle stale-report config"),
             Command::EnvFilePreflight(_) => panic!("expected lifecycle stale-report config"),
             Command::EnvFile(_) => panic!("expected lifecycle stale-report config"),
+            Command::ProjectionPreflight(_) | Command::ProjectionIssue(_) => {
+                panic!("expected lifecycle stale-report config")
+            }
             Command::PermitIssue(_) => panic!("expected lifecycle stale-report config"),
             Command::Approve(_) => panic!("expected lifecycle stale-report config"),
             Command::Delegation(_) => panic!("expected lifecycle stale-report config"),
@@ -6116,6 +6500,9 @@ mod tests {
             Command::RunManaged(_) => panic!("expected lifecycle destroy-record config"),
             Command::EnvFilePreflight(_) => panic!("expected lifecycle destroy-record config"),
             Command::EnvFile(_) => panic!("expected lifecycle destroy-record config"),
+            Command::ProjectionPreflight(_) | Command::ProjectionIssue(_) => {
+                panic!("expected lifecycle destroy-record config")
+            }
             Command::PermitIssue(_) => panic!("expected lifecycle destroy-record config"),
             Command::Approve(_) => panic!("expected lifecycle destroy-record config"),
             Command::Delegation(_) => panic!("expected lifecycle destroy-record config"),
@@ -6149,6 +6536,9 @@ mod tests {
             Command::RunManaged(_) => panic!("expected lifecycle destroy-finalize config"),
             Command::EnvFilePreflight(_) => panic!("expected lifecycle destroy-finalize config"),
             Command::EnvFile(_) => panic!("expected lifecycle destroy-finalize config"),
+            Command::ProjectionPreflight(_) | Command::ProjectionIssue(_) => {
+                panic!("expected lifecycle destroy-finalize config")
+            }
             Command::PermitIssue(_) => panic!("expected lifecycle destroy-finalize config"),
             Command::Approve(_) => panic!("expected lifecycle destroy-finalize config"),
             Command::Delegation(_) => panic!("expected lifecycle destroy-finalize config"),
@@ -6186,6 +6576,9 @@ mod tests {
                 panic!("expected lifecycle destroy-reconcile config")
             }
             Command::EnvFile(_) => panic!("expected lifecycle destroy-reconcile config"),
+            Command::ProjectionPreflight(_) | Command::ProjectionIssue(_) => {
+                panic!("expected lifecycle destroy-reconcile config")
+            }
             Command::PermitIssue(_) => panic!("expected lifecycle destroy-reconcile config"),
             Command::Approve(_) => panic!("expected lifecycle destroy-reconcile config"),
             Command::Delegation(_) => panic!("expected lifecycle destroy-reconcile config"),
@@ -6479,6 +6872,140 @@ mod tests {
             assert!(err.to_string().contains("reviewed profile"));
             assert!(!err.to_string().contains("unreviewed"));
         }
+    }
+
+    #[test]
+    fn parses_capability_named_projection_without_profile_or_secret_inputs() {
+        let config = parse_projection_issue_ok(&[
+            "projection",
+            "issue",
+            "--capability",
+            "pharos-beacon-token",
+            "--host",
+            "ares",
+        ]);
+
+        assert_eq!(
+            config.selector.capability(),
+            HostProjectionCapability::PharosBeaconToken
+        );
+        assert_eq!(config.selector.host().as_str(), "ares");
+
+        for flag in [
+            "--profile",
+            "--secret-ref",
+            "--value",
+            "--raw-value",
+            "--env",
+            "--output",
+            "--destination",
+            "--executor",
+            "--reveal",
+        ] {
+            let error = parse_args(
+                [
+                    "projection",
+                    "issue",
+                    "--capability",
+                    "pharos-beacon-token",
+                    "--host",
+                    "ares",
+                    flag,
+                    "SENSITIVE_PROJECTION_CANARY",
+                ]
+                .into_iter()
+                .map(str::to_string),
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("reviewed capability"));
+            assert!(!error.to_string().contains("SENSITIVE_PROJECTION_CANARY"));
+        }
+
+        let permit = parse_args(
+            [
+                "projection",
+                "issue",
+                "--capability",
+                "pharos-beacon-token",
+                "--host",
+                "ares",
+                "--permit",
+                "use_abc123",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        )
+        .unwrap_err();
+        assert!(permit.to_string().contains("permit internally"));
+        assert!(!permit.to_string().contains("use_abc123"));
+    }
+
+    #[test]
+    fn projection_preflight_and_unknown_capabilities_fail_closed() {
+        let config = parse_projection_preflight_ok(&[
+            "projection",
+            "preflight",
+            "--capability",
+            "pharos-beacon-token",
+            "--host",
+            "host_58f36c72a91e",
+        ]);
+        assert_eq!(
+            config.selector.capability(),
+            HostProjectionCapability::PharosBeaconToken
+        );
+        assert_eq!(config.selector.host().as_str(), "host_58f36c72a91e");
+
+        let unknown = parse_args(
+            [
+                "projection",
+                "preflight",
+                "--capability",
+                "SENSITIVE_CAPABILITY_CANARY",
+                "--host",
+                "ares",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        )
+        .unwrap_err();
+        assert!(unknown
+            .to_string()
+            .contains("projection capability is not release-reviewed"));
+        assert!(!unknown.to_string().contains("SENSITIVE_CAPABILITY_CANARY"));
+
+        let reserved = parse_args(
+            [
+                "projection",
+                "issue",
+                "--capability",
+                "managed-service-environment",
+                "--host",
+                "ares",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        )
+        .unwrap_err();
+        assert!(reserved.to_string().contains("setup-intent"));
+
+        let permit = parse_args(
+            [
+                "projection",
+                "preflight",
+                "--capability",
+                "pharos-beacon-token",
+                "--host",
+                "ares",
+                "--permit",
+                "use_abc123",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        )
+        .unwrap_err();
+        assert!(permit.to_string().contains("does not accept permits"));
+        assert!(!permit.to_string().contains("use_abc123"));
     }
 
     #[test]
@@ -9386,6 +9913,16 @@ mod tests {
             }
         }
 
+        fn projection_config(&self, host: &str) -> ProjectionIssueConfig {
+            ProjectionIssueConfig {
+                selector: HostProjectionSelector::new(
+                    HostProjectionCapability::PharosBeaconToken,
+                    host,
+                )
+                .unwrap(),
+            }
+        }
+
         fn runner_mut(&mut self) -> &mut FixtureEnvFileRunner {
             &mut self.runner
         }
@@ -9614,6 +10151,108 @@ mod tests {
         let metadata = std::fs::symlink_metadata(hash_output_path).unwrap();
         assert!(metadata.file_type().is_file());
         assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+        assert!(!format!("{outcome:?}").contains("expected-canary"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn projection_issue_accepts_capability_and_returns_value_free_evidence() {
+        let output_dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(output_dir.path(), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        let mut harness = FixtureEnvFileHarness::new_with_hash_sidecar(output_dir.path()).await;
+        let config = harness.projection_config("ares");
+
+        let outcome = run_projection_issue_with(&config, harness.runner_mut())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            outcome.capability,
+            HostProjectionCapability::PharosBeaconToken
+        );
+        assert_eq!(outcome.host.as_str(), "ares");
+        assert_eq!(outcome.profile_id, harness.profile_id);
+        assert_eq!(outcome.output_path, harness.output_path);
+        assert_eq!(
+            &outcome.hash_output_path,
+            harness.hash_output_path.as_ref().expect("hash sidecar")
+        );
+        assert_eq!(outcome.hash_format, "pharos-beacon-token-generation-v2");
+        assert_eq!(outcome.reason_code, "ok");
+        assert!(!outcome.value_returned);
+        assert!(outcome
+            .projection_ref
+            .as_ref()
+            .is_some_and(|reference| reference.as_str().starts_with("prj_")));
+        let generation = outcome.generation.as_deref().expect("generation evidence");
+        assert_eq!(generation.len(), 64);
+        assert_eq!(
+            std::fs::read_to_string(output_dir.path().join("current"))
+                .unwrap()
+                .trim(),
+            generation
+        );
+        assert_eq!(
+            std::fs::read_to_string(&outcome.output_path).unwrap(),
+            "SERVICE_TOKEN=expected-canary\n"
+        );
+        let rendered = format!("{outcome:?}");
+        assert!(!rendered.contains("expected-canary"));
+        assert!(!rendered.contains("SERVICE_TOKEN="));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn projection_unknown_host_fails_before_permit_use() {
+        let output_dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(output_dir.path(), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        let mut harness = FixtureEnvFileHarness::new_with_hash_sidecar(output_dir.path()).await;
+        let unknown = harness.projection_config("hera");
+
+        let error = run_projection_issue_with(&unknown, harness.runner_mut())
+            .await
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("no reviewed env-file profile projects this capability"));
+        assert!(!harness.output_path.exists());
+        assert!(!output_dir.path().join("current").exists());
+
+        let reviewed = harness.projection_config("ares");
+        let outcome = run_projection_issue_with(&reviewed, harness.runner_mut())
+            .await
+            .expect("failed resolution must not consume the permit");
+        assert_eq!(outcome.host.as_str(), "ares");
+        assert!(!outcome.value_returned);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn projection_preflight_returns_value_free_plan_without_secret_use() {
+        let output_dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(output_dir.path(), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        let harness = FixtureEnvFileHarness::new_with_hash_sidecar(output_dir.path()).await;
+        let config = ProjectionPreflightConfig {
+            selector: HostProjectionSelector::new(
+                HostProjectionCapability::PharosBeaconToken,
+                "ares",
+            )
+            .unwrap(),
+        };
+
+        let outcome = run_projection_preflight_with(&config, &harness.runner.profiles).unwrap();
+
+        assert_eq!(outcome.host.as_str(), "ares");
+        assert_eq!(outcome.profile_id, harness.profile_id);
+        assert!(outcome.generation.is_none());
+        assert!(outcome.projection_ref.is_none());
+        assert_eq!(outcome.reason_code, "ok");
+        assert!(!outcome.value_returned);
+        assert!(!outcome.output_path.exists());
+        assert!(!outcome.hash_output_path.exists());
         assert!(!format!("{outcome:?}").contains("expected-canary"));
     }
 

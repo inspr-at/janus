@@ -38,8 +38,8 @@ func TestKnowledgeInventoryCoversCodeVocabularies(t *testing.T) {
 	assertKnowledgeValues(t, byID["binding-source"].Values, []string{"local_reviewed", "oidc_subject", "oidc_group", "unsafe_bootstrap"})
 	assertKnowledgeValues(t, byID["product-mode"].Values, []string{"dev", "self_hosted", "production", "enterprise"})
 	assertKnowledgeValues(t, byID["role"].Values, AllRoles())
-	if len(byID["runtime-action"].Values) != 47 {
-		t.Fatalf("runtime action glossary has %d values, want 47", len(byID["runtime-action"].Values))
+	if len(byID["runtime-action"].Values) != 49 {
+		t.Fatalf("runtime action glossary has %d values, want 49", len(byID["runtime-action"].Values))
 	}
 }
 
