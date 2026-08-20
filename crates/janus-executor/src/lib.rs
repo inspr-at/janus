@@ -32,7 +32,8 @@ use std::time::{Duration, Instant, SystemTime};
 use janus_core::{
     AuditSink, ConsumerDescriptor, ConsumerKind, ConsumerRef, DelegationGrant,
     DelegationRevocation, Destination, ExecutorRef, JanusError, JanusResult, PrincipalChain,
-    ProfileId, SafeLabel, SecretBroker, SecretRef, SecretStore, SecretValue, UsePermit,
+    ProfileId, Purpose, SafeLabel, SecretBroker, SecretRef, SecretStore, SecretValue, UsePermit,
+    UseRequest,
 };
 #[cfg(test)]
 use sha2::{Digest, Sha256};
@@ -1081,10 +1082,65 @@ where
         selector: &HostProjectionSelector,
         request: EnvFileRequest<'_>,
     ) -> JanusResult<HostProjectionOutcome> {
+        self.render_host_projection_with_delegation(selector, request, None)
+            .await
+    }
+
+    /// Resolve policy into a short-lived permit and immediately consume it for
+    /// one capability-named host projection.
+    ///
+    /// This is the agent-facing boundary: the caller supplies only the
+    /// reviewed selector and profile resolved from it. Janus derives all
+    /// permit fields from that reviewed profile and never returns the permit or
+    /// credential.
+    pub async fn issue_host_projection(
+        &mut self,
+        selector: &HostProjectionSelector,
+        profile: &EnvFileProfile,
+        principal: &PrincipalChain,
+        now: SystemTime,
+    ) -> JanusResult<HostProjectionOutcome> {
+        HostProjectionPlan::from_env_file_plan(selector, profile.plan())?;
+        let permit = self
+            .broker
+            .request_use(
+                &UseRequest {
+                    secret_ref: profile.secret_ref().clone(),
+                    scope: principal.scope.clone(),
+                    profile_id: profile.profile_id().clone(),
+                    destination: profile.destination().clone(),
+                    purpose: Purpose::new("capability-named host projection")?,
+                },
+                principal,
+                now,
+            )
+            .await?;
+        self.render_host_projection(
+            selector,
+            EnvFileRequest {
+                profile,
+                permit: &permit,
+                principal,
+                now,
+            },
+        )
+        .await
+    }
+
+    /// Issue one capability-named host projection using exact current
+    /// delegation evidence for a delegated permit.
+    pub async fn render_host_projection_with_delegation(
+        &mut self,
+        selector: &HostProjectionSelector,
+        request: EnvFileRequest<'_>,
+        delegation: Option<(&DelegationGrant, Option<&DelegationRevocation>)>,
+    ) -> JanusResult<HostProjectionOutcome> {
         // Fail closed before any permit or secret work if the reviewed profile
         // does not project the selection.
         HostProjectionPlan::from_env_file_plan(selector, request.profile.plan())?;
-        let outcome = self.render_env_file(request).await?;
+        let outcome = self
+            .render_env_file_with_delegation(request, delegation)
+            .await?;
         HostProjectionOutcome::from_env_file_outcome(selector, outcome)
     }
 

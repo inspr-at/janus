@@ -29,6 +29,9 @@ logs, or application code.
   arguments without handing the credential back to the caller.
 - **Private service handoff** - `janusd-use env-file` renders reviewed `0600` env
   files and optional value-free hash sidecars atomically.
+- **Capability-named host projections** - Pharos names a reviewed capability
+  and host while Janus resolves the profile, derives and consumes the permit,
+  and returns only value-free projection evidence.
 - **Generated rotation** - Forge creates replacement values internally and can
   run reviewed validation and reload hooks. There is deliberately no
   caller-supplied `--value` argument.
@@ -445,6 +448,33 @@ The output path and environment variable come from the profile. Janus writes
 the file atomically and privately, and reports only value-free outcome fields.
 See [`docs/env-file-handoff-runbook.md`](docs/env-file-handoff-runbook.md) for
 the complete checked flow.
+
+### Capability-named host projection
+
+Preflight the reviewed capability and host without a permit, backend read, or
+file write:
+
+```bash
+janusd-use projection preflight \
+  --capability pharos-beacon-token \
+  --host ares
+```
+
+Issue the projection using the same value-free selector:
+
+```bash
+janusd-use projection issue \
+  --capability pharos-beacon-token \
+  --host ares
+```
+
+Janus resolves exactly one reviewed env-file profile, derives and immediately
+consumes its short-lived permit, writes the private host env file, and
+publishes the `pharos-beacon-token-generation-v2` verifier generation. The
+outcome contains identifiers, reviewed paths, a generation, and an opaque
+`prj_...` handle—never the permit or credential. Unknown, reserved, missing,
+and ambiguous capabilities fail closed; managed-service environment setup
+continues to use its value-free setup-intent path.
 
 ### Exact-use delegation
 
