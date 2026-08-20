@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "posture": "identity_shadow_only",
-  "runtime_endpoint_catalog_fingerprint": "sha256:2a4537242a06185d4e14ff60053491b77594092156c425ae1ee104ea99474301",
+  "runtime_endpoint_catalog_fingerprint": "sha256:55cc75ac23c2e20643a0bcbeba82152c524fb716b6e1be248c2c7351cb840412",
   "remote_authorizing_transports": [],
   "surfaces": [
     { "surface": "janus-claude-hook", "transport": "process_argv", "trust_adapter": "local_peer" },

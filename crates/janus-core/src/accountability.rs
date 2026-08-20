@@ -675,7 +675,9 @@ pub const fn runtime_surface(action: RuntimeAction) -> &'static str {
         | RuntimeAction::ManagedRun
         | RuntimeAction::EnvFilePreflight
         | RuntimeAction::EnvFile
-        | RuntimeAction::PermitIssue => "janusd-use",
+        | RuntimeAction::PermitIssue
+        | RuntimeAction::ProjectionPreflight
+        | RuntimeAction::ProjectionIssue => "janusd-use",
         RuntimeAction::WebTransaction => "janusd-web-transactiond",
         RuntimeAction::DynamicCustody => "janusd-dynamic-custodyd",
         RuntimeAction::DynamicDelivery => "janusd-dynamic-deliveryd",

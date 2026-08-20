@@ -9,10 +9,15 @@
 #![forbid(unsafe_code)]
 
 mod pharos_generation;
+mod projection;
 
 pub use pharos_generation::{
     publish_host as publish_pharos_beacon_token_generation_host,
     retire_host as retire_pharos_beacon_token_generation_host,
+};
+pub use projection::{
+    resolve_host_projection_profile, HostProjectionCapability, HostProjectionOutcome,
+    HostProjectionPlan, HostProjectionRef, HostProjectionSelector,
 };
 
 use std::ffi::OsString;
@@ -839,6 +844,10 @@ pub struct ManagedCommandOutcome {
 pub struct EnvFileOutcome {
     /// Value-free reviewed plan.
     pub plan: EnvFilePlan,
+    /// Immutable generation id published for the reviewed hash sidecar, when
+    /// the profile declares one. It is a value-free verifier-set pointer, not
+    /// credential material.
+    pub hash_generation: Option<String>,
     /// Stable value-free outcome reason.
     pub reason_code: &'static str,
     /// Invariant marker.
@@ -1044,16 +1053,39 @@ where
             )
             .await?;
         write_env_file_atomic(&plan.output_path, &plan.env_name, &value)?;
-        if let Some(sidecar) = request.profile.hash_sidecar() {
-            write_hash_sidecar_atomic(sidecar, &value)?;
-        }
+        let hash_generation = match request.profile.hash_sidecar() {
+            Some(sidecar) => Some(write_hash_sidecar_atomic(sidecar, &value)?),
+            None => None,
+        };
         self.broker
             .record_consumer_observe(request.profile.consumer(), request.principal)?;
         Ok(EnvFileOutcome {
             plan,
+            hash_generation,
             reason_code: "ok",
             value_returned: false,
         })
+    }
+
+    /// Issue one capability-named host projection through the reviewed
+    /// env-file handoff.
+    ///
+    /// The profile must project exactly the selected capability for the
+    /// selected host; the caller names nothing else. The permit is consumed
+    /// like any env-file permit, the private env file and value-free hash
+    /// sidecar are written atomically, and the returned outcome carries only
+    /// identifiers, reviewed paths, the published generation, and an opaque
+    /// projection handle.
+    pub async fn render_host_projection(
+        &mut self,
+        selector: &HostProjectionSelector,
+        request: EnvFileRequest<'_>,
+    ) -> JanusResult<HostProjectionOutcome> {
+        // Fail closed before any permit or secret work if the reviewed profile
+        // does not project the selection.
+        HostProjectionPlan::from_env_file_plan(selector, request.profile.plan())?;
+        let outcome = self.render_env_file(request).await?;
+        HostProjectionOutcome::from_env_file_outcome(selector, outcome)
     }
 
     /// Consume and return the underlying broker for inspection or embedding.
@@ -1130,7 +1162,12 @@ fn write_env_file_atomic(
     result
 }
 
-fn write_hash_sidecar_atomic(sidecar: &EnvFileHashSidecar, value: &SecretValue) -> JanusResult<()> {
+/// Write the value-free hash sidecar atomically and publish the immutable
+/// generation. Returns the published generation id; never the hash or value.
+fn write_hash_sidecar_atomic(
+    sidecar: &EnvFileHashSidecar,
+    value: &SecretValue,
+) -> JanusResult<String> {
     let path = sidecar.output_path();
     preflight_hash_sidecar_target(path)?;
     let parent = path
@@ -1147,7 +1184,7 @@ fn write_hash_sidecar_atomic(sidecar: &EnvFileHashSidecar, value: &SecretValue) 
         .as_nanos();
     let temp_path = parent.join(format!(".{file_name}.{}.{}.tmp", std::process::id(), nonce));
     let mut created_temp = false;
-    let result = (|| -> JanusResult<()> {
+    let result = (|| -> JanusResult<String> {
         let mut options = OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]
@@ -1172,8 +1209,7 @@ fn write_hash_sidecar_atomic(sidecar: &EnvFileHashSidecar, value: &SecretValue) 
             detail: "failed to replace hash sidecar atomically".to_string(),
         })?;
         created_temp = false;
-        pharos_generation::publish_entry(parent, sidecar.subject(), &token_sha256)?;
-        Ok(())
+        pharos_generation::publish_entry(parent, sidecar.subject(), &token_sha256)
     })();
     if created_temp {
         let _ = fs::remove_file(&temp_path);
@@ -2618,5 +2654,146 @@ mod tests {
             zero_timeout,
             Err(JanusError::InvalidManifest { .. })
         ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn host_projection_issues_value_free_handle_and_publishes_generation() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (mut executor, permit, principal, executor_ref, destination, managed_profile) =
+            executor_fixture().await;
+        let dir = marker_path("host-projection-ok");
+        fs::create_dir(&dir).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+        let output_path = dir.join("ares.env");
+        let hash_output_path = dir.join("ares.json");
+        let profile = env_file_profile_with_hash_sidecar(
+            managed_profile.profile_id().clone(),
+            managed_profile.secret_ref().clone(),
+            executor_ref,
+            destination,
+            output_path.clone(),
+            hash_output_path.clone(),
+        );
+        let selector =
+            HostProjectionSelector::new(HostProjectionCapability::PharosBeaconToken, "ares")
+                .unwrap();
+
+        let outcome = executor
+            .render_host_projection(
+                &selector,
+                EnvFileRequest {
+                    profile: &profile,
+                    permit: &permit,
+                    principal: &principal,
+                    now: run_at(),
+                },
+            )
+            .await
+            .unwrap();
+
+        let current = fs::read_to_string(dir.join("current"))
+            .expect("generation pointer exists")
+            .trim()
+            .to_string();
+        assert_eq!(current.len(), 64);
+        assert_eq!(outcome.generation, current);
+        assert_eq!(
+            outcome.plan.capability,
+            HostProjectionCapability::PharosBeaconToken
+        );
+        assert_eq!(outcome.plan.host.as_str(), "ares");
+        assert_eq!(
+            outcome.plan.profile_id,
+            managed_profile.profile_id().clone()
+        );
+        assert_eq!(
+            outcome.plan.secret_ref,
+            managed_profile.secret_ref().clone()
+        );
+        assert_eq!(outcome.plan.output_path, output_path);
+        assert_eq!(outcome.plan.hash_output_path, hash_output_path);
+        assert_eq!(outcome.plan.projection_root, dir);
+        assert_eq!(
+            outcome.projection_ref,
+            HostProjectionRef::derive(
+                HostProjectionCapability::PharosBeaconToken,
+                &SafeLabel::new("ares").unwrap(),
+                &current,
+            )
+        );
+        assert!(outcome.projection_ref.as_str().starts_with("prj_"));
+        assert_eq!(outcome.reason_code, "ok");
+        assert!(!outcome.value_returned);
+        let rendered = format!("{outcome:?}");
+        assert!(!rendered.contains("expected-canary"));
+        assert!(!rendered.contains(&sha256_hex(b"expected-canary")));
+        let generation_payload = fs::read_to_string(dir.join(format!("generation-{current}.json")))
+            .expect("immutable generation exists");
+        assert!(generation_payload.contains("\"name\":\"ares\""));
+        assert!(!generation_payload.contains("expected-canary"));
+        assert_eq!(
+            fs::metadata(&output_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn host_projection_rejects_mismatched_selection_before_secret_use() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (mut executor, permit, principal, executor_ref, destination, managed_profile) =
+            executor_fixture().await;
+        let dir = marker_path("host-projection-mismatch");
+        fs::create_dir(&dir).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+        let output_path = dir.join("ares.env");
+        let hash_output_path = dir.join("ares.json");
+        let profile = env_file_profile_with_hash_sidecar(
+            managed_profile.profile_id().clone(),
+            managed_profile.secret_ref().clone(),
+            executor_ref,
+            destination,
+            output_path.clone(),
+            hash_output_path.clone(),
+        );
+        let other_host =
+            HostProjectionSelector::new(HostProjectionCapability::PharosBeaconToken, "hera")
+                .unwrap();
+
+        let err = executor
+            .render_host_projection(
+                &other_host,
+                EnvFileRequest {
+                    profile: &profile,
+                    permit: &permit,
+                    principal: &principal,
+                    now: run_at(),
+                },
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            JanusError::PolicyDenied {
+                reason_code: "projection_profile_mismatch",
+                ..
+            }
+        ));
+        assert!(!output_path.exists());
+        assert!(!hash_output_path.exists());
+        assert!(!dir.join("current").exists());
+        let (_store, _policy, audit) = executor.into_broker().into_parts();
+        assert!(!audit
+            .events()
+            .iter()
+            .any(|event| event.action == AuditAction::SecretUse));
+
+        let _ = fs::remove_dir_all(dir);
     }
 }

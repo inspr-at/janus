@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "runtime_endpoint_catalog_fingerprint": "sha256:2a4537242a06185d4e14ff60053491b77594092156c425ae1ee104ea99474301",
-  "identity_transport_manifest_fingerprint": "sha256:34c5f2d55106cc8dbbcec465480893ad6d23c18549754dbf2b8bf77e678f1228",
+  "runtime_endpoint_catalog_fingerprint": "sha256:55cc75ac23c2e20643a0bcbeba82152c524fb716b6e1be248c2c7351cb840412",
+  "identity_transport_manifest_fingerprint": "sha256:4ed860dc12af5ef263af109a21026d2811bee319df89365b6438c73b3ea27c74",
   "authority_service": "janusd-identityd",
   "remote_authorizing_transports": [],
   "actions": [
@@ -14,6 +14,8 @@
     {"action":"use.run","surface":"janusd-use","transport":"process_argv","classification":"recorded","allowed_duties":[{"conflict_domain":"use_request","duty":"execute_use"},{"conflict_domain":"break_glass","duty":"use_break_glass"}]},
     {"action":"use.env_file_preflight","surface":"janusd-use","transport":"process_argv","classification":"no_conflict","allowed_duties":[]},
     {"action":"use.env_file","surface":"janusd-use","transport":"process_argv","classification":"recorded","allowed_duties":[{"conflict_domain":"use_request","duty":"execute_use"},{"conflict_domain":"break_glass","duty":"use_break_glass"}]},
+    {"action":"use.projection_preflight","surface":"janusd-use","transport":"process_argv","classification":"no_conflict","allowed_duties":[]},
+    {"action":"use.projection_issue","surface":"janusd-use","transport":"process_argv","classification":"recorded","allowed_duties":[{"conflict_domain":"use_request","duty":"request_use"},{"conflict_domain":"use_request","duty":"execute_use"}]},
     {"action":"admin.approval_issue","surface":"janusd-admin","transport":"process_argv","classification":"recorded","allowed_duties":[{"conflict_domain":"use_request","duty":"approve_use"}]},
     {"action":"admin.approval_permit","surface":"janusd-admin","transport":"process_argv","classification":"no_conflict","allowed_duties":[]},
     {"action":"admin.approval_list","surface":"janusd-admin","transport":"process_argv","classification":"no_conflict","allowed_duties":[]},
