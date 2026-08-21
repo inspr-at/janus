@@ -42,10 +42,10 @@ pub use duty::{
 };
 pub use identity::{
     bind_private_identity_socket, load_or_create_identity_signing_key,
-    preflight_identity_binding_migration, technical_binding_fingerprint, verify_actor_observation,
-    BrokerAuthenticatedActorV1, FileSubjectRegistry, IdentityBindingMigrationPreflightV1,
-    IdentityObservationVerifier, IdentityShadowBroker, IdentityShadowReplyV1,
-    IdentityShadowRequestV1, SubjectRegistryEntry, SubjectRegistryStatus,
+    preflight_identity_binding_migration, technical_binding_fingerprint, unlink_identity_socket,
+    verify_actor_observation, BrokerAuthenticatedActorV1, FileSubjectRegistry,
+    IdentityBindingMigrationPreflightV1, IdentityObservationVerifier, IdentityShadowBroker,
+    IdentityShadowReplyV1, IdentityShadowRequestV1, SubjectRegistryEntry, SubjectRegistryStatus,
 };
 pub use migration::{enforce_migration_ready_from_env, ApprovalMigrationRunner, MigrationStatus};
 pub use recovery::{

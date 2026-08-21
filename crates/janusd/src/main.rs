@@ -417,12 +417,31 @@ pub async fn run_identity_shadow_service() -> Result<()> {
     .context("identity broker configuration denied")?
     .with_runtime_authority(authority)
     .context("runtime authority attachment denied")?;
-    let listener = janus_local::bind_private_identity_socket(Path::new(&socket))
+    let socket_path = PathBuf::from(&socket);
+    let listener = janus_local::bind_private_identity_socket(&socket_path)
         .context("identity broker socket unavailable")?;
-    broker
-        .serve(listener)
-        .await
-        .context("identity broker failed")
+    // Unlink our socket on every exit path, including SIGTERM/SIGINT from the
+    // sidecar lifecycle, so the next start never meets a stale file (JANUS-451).
+    let _socket_cleanup = IdentitySocketCleanup(socket_path);
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .context("identity broker signal handling unavailable")?;
+    let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+        .context("identity broker signal handling unavailable")?;
+    tokio::select! {
+        served = broker.serve(listener) => served.context("identity broker failed"),
+        _ = terminate.recv() => Ok(()),
+        _ = interrupt.recv() => Ok(()),
+    }
+}
+
+/// Removes the identity socket when the broker stops, but only while the path
+/// is still a socket; a file another process placed there is left alone.
+struct IdentitySocketCleanup(PathBuf);
+
+impl Drop for IdentitySocketCleanup {
+    fn drop(&mut self) {
+        janus_local::unlink_identity_socket(&self.0);
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

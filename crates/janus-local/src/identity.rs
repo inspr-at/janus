@@ -29,6 +29,8 @@ use crate::{
 const SUBJECT_SCHEMA: u8 = 1;
 const MAX_SUBJECT_RECORDS: usize = 4_096;
 const MAX_REQUEST_BYTES: usize = 16 * 1024;
+const STALE_SOCKET_PROBES: u32 = 10;
+const STALE_SOCKET_PROBE_PAUSE: Duration = Duration::from_millis(50);
 
 /// Private durable enrollment. The local UID never appears in public output.
 #[derive(Clone, Deserialize, Serialize)]
@@ -840,19 +842,73 @@ pub fn load_or_create_identity_signing_key(path: &Path) -> JanusResult<SigningKe
 }
 
 /// Bind one new private identity socket; occupied paths fail closed.
+/// Bind the private identity socket. An absent path binds directly. A socket
+/// file left behind by a previous broker (sidecar torn down, host crash) is
+/// reclaimed only when it is a real socket, owned like its private parent, and
+/// refuses connections. A live broker, symlink, non-socket entry, or foreign
+/// owner fails closed with `identity_socket_occupied` (JANUS-451).
 pub fn bind_private_identity_socket(path: &Path) -> JanusResult<UnixListener> {
     let parent = path
         .parent()
         .ok_or_else(|| unavailable("identity socket path invalid"))?;
     ensure_private_directory(parent)?;
-    if fs::symlink_metadata(path).is_ok() {
-        return Err(unavailable("identity socket path occupied"));
+    if let Ok(existing) = fs::symlink_metadata(path) {
+        reclaim_dead_identity_socket(path, parent, &existing)?;
     }
     let listener =
         UnixListener::bind(path).map_err(|_| unavailable("identity socket bind failed"))?;
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))
         .map_err(|_| unavailable("identity socket permissions failed"))?;
     Ok(listener)
+}
+
+fn reclaim_dead_identity_socket(
+    path: &Path,
+    parent: &Path,
+    existing: &fs::Metadata,
+) -> JanusResult<()> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    let occupied = |detail: &'static str| identity_error("identity_socket_occupied", detail);
+    if existing.file_type().is_symlink() || !existing.file_type().is_socket() {
+        return Err(occupied(
+            "identity socket path is occupied by a non-socket entry",
+        ));
+    }
+    let parent_metadata = fs::symlink_metadata(parent)
+        .map_err(|_| unavailable("private identity directory unavailable"))?;
+    if existing.uid() != parent_metadata.uid() {
+        return Err(occupied("identity socket path is owned by another user"));
+    }
+    // A broker that just exited can leave a socket the kernel still reports as
+    // connectable for a moment; a live broker stays connectable. Probe a few
+    // times with short pauses and reclaim on the first refusal, so a
+    // restart-immediately lifecycle does not fail closed on a dying predecessor.
+    for attempt in 0..STALE_SOCKET_PROBES {
+        match std::os::unix::net::UnixStream::connect(path) {
+            Ok(_) if attempt + 1 < STALE_SOCKET_PROBES => {
+                std::thread::sleep(STALE_SOCKET_PROBE_PAUSE);
+            }
+            Ok(_) => return Err(occupied("identity socket is served by a live broker")),
+            Err(error) if error.kind() == io::ErrorKind::ConnectionRefused => {
+                return fs::remove_file(path)
+                    .map_err(|_| unavailable("stale identity socket removal failed"));
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(_) => return Err(occupied("identity socket liveness could not be determined")),
+        }
+    }
+    Err(occupied("identity socket is served by a live broker"))
+}
+
+/// Remove the broker's socket on shutdown. Only a socket is removed; a file
+/// another process placed at the path is left untouched.
+pub fn unlink_identity_socket(path: &Path) {
+    use std::os::unix::fs::FileTypeExt;
+    if let Ok(metadata) = fs::symlink_metadata(path) {
+        if metadata.file_type().is_socket() && !metadata.file_type().is_symlink() {
+            let _ = fs::remove_file(path);
+        }
+    }
 }
 
 /// Value-free migration preflight result. It never mutates role bindings.
@@ -1158,6 +1214,64 @@ mod tests {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
     use crate::FileRoleBindingRegistry;
+
+    fn private_tempdir() -> TempDir {
+        let directory = tempfile::tempdir().unwrap();
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        directory
+    }
+
+    fn reason_of(error: JanusError) -> String {
+        match error {
+            JanusError::PolicyDenied { reason_code, .. } => reason_code.to_string(),
+            other => format!("{other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn bind_takes_over_only_dead_sockets_and_fails_closed_otherwise() {
+        let directory = private_tempdir();
+        let socket = directory.path().join("identity.sock");
+
+        // A fresh path binds; a dead leftover from a previous broker is reclaimed.
+        drop(bind_private_identity_socket(&socket).unwrap());
+        assert!(
+            socket.exists(),
+            "socket file must outlive the listener here"
+        );
+        let reclaimed = bind_private_identity_socket(&socket).unwrap();
+
+        // A live broker is never displaced.
+        let occupied = bind_private_identity_socket(&socket).unwrap_err();
+        assert_eq!(reason_of(occupied), "identity_socket_occupied");
+        assert!(socket.exists());
+        drop(reclaimed);
+
+        // Non-socket entries are never removed.
+        let regular = directory.path().join("regular.sock");
+        fs::write(&regular, b"not a socket").unwrap();
+        assert_eq!(
+            reason_of(bind_private_identity_socket(&regular).unwrap_err()),
+            "identity_socket_occupied"
+        );
+        assert!(regular.exists());
+
+        let target = directory.path().join("target");
+        fs::write(&target, b"").unwrap();
+        let link = directory.path().join("link.sock");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert_eq!(
+            reason_of(bind_private_identity_socket(&link).unwrap_err()),
+            "identity_socket_occupied"
+        );
+        assert!(link.exists() && target.exists());
+
+        // Shutdown cleanup removes only a socket.
+        unlink_identity_socket(&socket);
+        assert!(!socket.exists());
+        unlink_identity_socket(&regular);
+        assert!(regular.exists());
+    }
 
     fn scope() -> ScopeRef {
         ScopePathV1::new(

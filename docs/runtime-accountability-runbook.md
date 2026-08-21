@@ -47,6 +47,32 @@ reviewed `JANUS_RUNTIME_OPERATION_REFERENCE_FILE`. The caller cannot submit an
 actor, UID, duty, transport, or posture. No-conflict actions reject operation
 authority and still require a healthy verified journal.
 
+## Broker sidecar lifecycle
+
+`janusd-identityd` is commonly run as a short-lived sidecar around a render
+cycle. Its state must outlive the sidecar, its socket must not:
+
+- Keep `JANUS_IDENTITY_REGISTRY_ROOT` and `JANUS_RUNTIME_AUTHORITY_AUDIT_FILE`
+  on persistent private storage (0700 directory, 0600 files) outside any
+  container-ephemeral layer. The registry directory may contain only
+  `.registry.lock`, `<act_ref>.json`, and `<act_ref>.revoked.json`; any other
+  entry (a backup, a note) makes the whole registry unavailable and every peer
+  is denied. Keep backups elsewhere.
+- On start the broker reclaims a **dead** socket left by a previous instance —
+  a real socket, owned like its private parent directory, refusing connections
+  (probed up to ten times over half a second, so a predecessor that is still
+  exiting is not mistaken for a live broker) — and serves on the same path. A live broker, a symlink, a non-socket file, or a
+  socket owned by another user stops startup with `identity_socket_occupied`.
+- Readiness is **accept-connect**, never file existence: a leftover socket file
+  exists before the broker listens. Gate Warden and `janusd-use` on a successful
+  `AF_UNIX` connect as the peer UID that will use the socket; optionally send
+  `{"schema_version":1,"scope_ref":"scp_…","surface":"janusd-use"}` and expect
+  any value-free reply. `scripts/smoke-janusd-identity.sh` is the reference.
+- On `SIGTERM`/`SIGINT` and on any exit path the broker unlinks its own socket
+  (only if the path is still a socket) and exits 0. A lifecycle that stops the
+  sidecar with `SIGKILL` should still unlink the path itself; the next start
+  reclaims it either way.
+
 ## Reason codes and denial evidence
 
 Every broker decision leaves one `RuntimeAuthorityAuditV1` line in
@@ -80,8 +106,10 @@ before it serves and are printed by `janusd-identityd` as
 `runtime_authority_manifest_fingerprint_mismatch` (the duty-surface manifest
 does not bind the loaded identity-transport manifest, usually a reformatted
 vendored JSON), `runtime_authority_surface_mismatch`,
-`runtime_authority_cutover_unexpected`, `enforced_recorded_not_ready`, and
-`enforced_recorded_subjects_mismatch`. Warden structured errors expose
+`runtime_authority_cutover_unexpected`, `enforced_recorded_not_ready`,
+`enforced_recorded_subjects_mismatch`, and `identity_socket_occupied` (the socket
+path holds a live broker, a symlink, a non-socket file, or a socket owned by
+another user; a dead socket left by a previous broker is reclaimed). Warden structured errors expose
 `reason_code` and, when the broker answered, `broker_reason_code`; the CLI
 prints the code inside its error chain. No code is ever accompanied by a secret
 value, a credential path, or free text from the wire.
