@@ -25,40 +25,8 @@ trap cleanup EXIT
 mkdir -p "${fixture}/registry" "${fixture}/run" "${fixture}/state" "${fixture}/audit"
 chmod 0700 "${fixture}/registry" "${fixture}/run" "${fixture}/state" "${fixture}/audit"
 
-python3 - "${fixture}/registry" <<'PY'
-import hashlib
-import json
-import os
-import pathlib
-import sys
-import time
-
-root = pathlib.Path(sys.argv[1])
-subject = "act_11111111111111111111111111111111"
-
-def fingerprint(domain: str, value: bytes) -> str:
-    digest = hashlib.sha256()
-    encoded = domain.encode()
-    digest.update(len(encoded).to_bytes(8, "big"))
-    digest.update(encoded)
-    digest.update(len(value).to_bytes(8, "big"))
-    digest.update(value)
-    return "sha256:" + digest.hexdigest()
-
-record = {
-    "schema_version": 1,
-    "subject_ref": subject,
-    "subject_class": "human",
-    "trust_adapter": "local_peer",
-    "trust_domain_fingerprint": fingerprint("janus-identity-trust-domain-v1", b"assurance-host"),
-    "local_uid": os.getuid(),
-    "enrolled_at_unix_secs": int(time.time()),
-    "review_fingerprint": fingerprint("janus-subject-review-v1", b"synthetic-assurance-review"),
-}
-path = root / f"{subject}.json"
-path.write_text(json.dumps(record, separators=(",", ":")), encoding="utf-8")
-path.chmod(0o600)
-PY
+mkdir -p "${fixture}/review"
+chmod 0700 "${fixture}/review"
 
 export JANUS_SCOPE_ORGANIZATION="fixture-org"
 export JANUS_SCOPE_PROJECT="janus"
@@ -80,6 +48,37 @@ export JANUS_OPERATION_DOMAIN_SERVICE="assurance-domain"
 export JANUS_OPERATION_AUDIENCE="janus-runtime-assurance"
 export JANUS_RUNTIME_AUTHORITY_AUDIT_FILE="${fixture}/audit/runtime-authority.jsonl"
 export JANUS_RELEASE_DIGEST="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+# Reviewed offline enrollment of the assurance peer (JANUS-453), before the
+# broker starts: no hand-written registry JSON.
+export JANUS_IDENTITY_REVIEW_VERIFYING_KEY_FILE="${fixture}/review/reviewer.pub"
+export JANUS_IDENTITY_ADMIN_AUDIT_FILE="${fixture}/audit/identity-admin.jsonl"
+"${repo}/target/debug/janusd-identity-admin" review-keys \
+  --signing-key-file "${fixture}/review/reviewer.key" \
+  --verifying-key-file "${JANUS_IDENTITY_REVIEW_VERIFYING_KEY_FILE}" >/dev/null
+python3 - "${fixture}/review/enroll.request.json" <<'PY'
+import json
+import os
+import sys
+
+request = {
+    "schema_version": 1,
+    "verb": "enroll",
+    "trust_domain": "assurance-host",
+    "local_uid": os.getuid(),
+    "subject_class": "human",
+    "ttl_seconds": 600,
+    "reviewer": "synthetic-assurance-review",
+}
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    json.dump(request, handle, separators=(",", ":"))
+PY
+"${repo}/target/debug/janusd-identity-admin" review-sign \
+  --request-file "${fixture}/review/enroll.request.json" \
+  --signing-key-file "${fixture}/review/reviewer.key" \
+  --out "${fixture}/review/enroll.evidence.json" >/dev/null
+"${repo}/target/debug/janusd-identity-admin" enroll \
+  --review-evidence-file "${fixture}/review/enroll.evidence.json" >/dev/null
 
 "${repo}/target/debug/janusd-identityd" >"${fixture}/identity.stdout" 2>"${fixture}/identity.stderr" &
 authority_pid="$!"

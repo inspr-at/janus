@@ -12,6 +12,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+rustix = { version = "1", features = ["fs", "process"] }
 ed25519-dalek = "2"
 fs2 = "0.4"
 hex = "0.4"

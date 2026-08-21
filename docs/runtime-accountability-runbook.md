@@ -68,6 +68,15 @@ cycle. Its state must outlive the sidecar, its socket must not:
   `AF_UNIX` connect as the peer UID that will use the socket; optionally send
   `{"schema_version":1,"scope_ref":"scp_…","surface":"janusd-use"}` and expect
   any value-free reply. `scripts/smoke-janusd-identity.sh` is the reference.
+- The broker holds a shared lifecycle lock beside the registry
+  (`<registry-root>.lifecycle.lock`, owner-only) for its lifetime;
+  `janusd-identity-admin` mutations need the exclusive lock and fail closed
+  with `identity_broker_running` while the broker runs. If the lock cannot be
+  created the broker reports it and still starts; the administrator then
+  refuses. Optionally pin `JANUS_ACCOUNTABILITY_CONFIG_FILE`; when set, the
+  broker requires it to agree with `JANUS_ACCOUNTABILITY_POSTURE`
+  (`runtime_authority_posture_config_mismatch`), and the administrator reads
+  its posture from the same file.
 - On `SIGTERM`/`SIGINT` and on any exit path the broker unlinks its own socket
   (only if the path is still a socket) and exits 0. A lifecycle that stops the
   sidecar with `SIGKILL` should still unlink the path itself; the next start
@@ -109,7 +118,16 @@ vendored JSON), `runtime_authority_surface_mismatch`,
 `runtime_authority_cutover_unexpected`, `enforced_recorded_not_ready`,
 `enforced_recorded_subjects_mismatch`, and `identity_socket_occupied` (the socket
 path holds a live broker, a symlink, a non-socket file, or a socket owned by
-another user; a dead socket left by a previous broker is reclaimed). Warden structured errors expose
+another user; a dead socket left by a previous broker is reclaimed).
+`janusd-identity-admin` (offline enrollment, see
+[`identity-shadow-runbook.md`](identity-shadow-runbook.md#first-host-enrollment-janusd-identity-admin))
+reports `identity_admin_caller_invalid`, `identity_registry_security_invalid`,
+`identity_broker_running`, `identity_posture_unknown`,
+`identity_posture_mutation_forbidden`, `identity_review_invalid`,
+`identity_review_signature_invalid`, `identity_review_context_mismatch`,
+`identity_review_expired`, `identity_review_replayed`,
+`identity_admin_audit_unavailable`, and the registry's own
+`subject_already_enrolled`, `subject_not_enrolled`, `subject_already_revoked`. Warden structured errors expose
 `reason_code` and, when the broker answered, `broker_reason_code`; the CLI
 prints the code inside its error chain. No code is ever accompanied by a secret
 value, a credential path, or free text from the wire.

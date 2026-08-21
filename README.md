@@ -12,10 +12,10 @@ agents - without making raw credentials part of prompts, command arguments,
 logs, or application code.
 
 [![License: AGPL-3.0-only](https://img.shields.io/badge/license-AGPL--3.0--only-1f7a72.svg)](LICENSE)
-[![Rust engine](https://img.shields.io/badge/Rust_engine-v0.1.31-cb7c28.svg)](https://github.com/inspr-at/janus/releases/tag/rust-engine-v0.1.31)
+[![Rust engine](https://img.shields.io/badge/Rust_engine-v0.1.32-cb7c28.svg)](https://github.com/inspr-at/janus/releases/tag/rust-engine-v0.1.32)
 
 [Product site](https://janus.inspr.at) ·
-[Rust engine v0.1.31](https://github.com/inspr-at/janus/releases/tag/rust-engine-v0.1.31) ·
+[Rust engine v0.1.32](https://github.com/inspr-at/janus/releases/tag/rust-engine-v0.1.32) ·
 [INSPR](https://www.inspr.at)
 
 ## What Janus does
@@ -85,7 +85,7 @@ Janus has two layers with different histories:
 
 | Layer | Role | Language | Status |
 |---|---|---|---|
-| **Rust engine** | Secret store contracts, Warden, permits, approved-use execution, rotation, lifecycle, and operator CLI | Rust | Active and released. Current tag: `rust-engine-v0.1.31`. |
+| **Rust engine** | Secret store contracts, Warden, permits, approved-use execution, rotation, lifecycle, and operator CLI | Rust | Active and released. Current tag: `rust-engine-v0.1.32`. |
 | **Go envelope** | Existing governance, audit, evidence, and oversight surface | Go | Shipped, operational, and transitional. New core capability work lands in Rust. |
 
 The Rust engine is no longer a skeleton. Core execution paths ship with unit,
@@ -241,6 +241,7 @@ nix build .#janus-engine
 The package installs `janusd-use`, `janusd-admin`,
 `janusd-web-transactiond`, `janusd-dynamic-custodyd`,
 `janusd-dynamic-deliveryd`, `janusd-dynamic-transportd`, `janusd-identityd`,
+`janusd-identity-admin`,
 `janus-host-executor`, `janus-managed-host-agent`, `janus-warden`, and the
 non-operational `janusd` migration helper for supported Linux systems. The
 private daemons have no CLI operations and accept only their reviewed local
