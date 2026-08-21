@@ -24,9 +24,9 @@ mod transfer;
 pub use audit::{AuditRecovery, JsonlAuditSink};
 pub use authority::{
     authorize_runtime_action_from_env, denied_runtime_authority_reply, load_runtime_verifying_key,
-    provision_runtime_verifying_key, JsonlRuntimeAuthorityAudit, RuntimeAuthorityAudit,
-    RuntimeAuthorityAuditV1, RuntimeAuthorityBroker, RuntimeAuthorityClient,
-    RuntimeAuthorityReplyV1, RuntimeAuthorityRequestV1,
+    provision_runtime_verifying_key, runtime_authority_failure, JsonlRuntimeAuthorityAudit,
+    RuntimeAuthorityAudit, RuntimeAuthorityAuditV1, RuntimeAuthorityBroker, RuntimeAuthorityClient,
+    RuntimeAuthorityFailure, RuntimeAuthorityReplyV1, RuntimeAuthorityRequestV1,
 };
 pub use break_glass::{
     BreakGlassListEntry, BreakGlassRecord, BreakGlassRegistry, BreakGlassStatus,
