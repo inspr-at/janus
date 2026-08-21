@@ -134,7 +134,49 @@ injected["subject_ref"] = "act_22222222222222222222222222222222"
 denied = transact(injected)
 if denied["ok"] or denied["observation"] is not None or denied["value_returned"] is not False:
     raise SystemExit("identity broker accepted caller-supplied identity")
+
+# A runtime-authority request whose scope does not match the broker scope must
+# be answered with its specific value-free reason code (JANUS-450).
+mismatched = transact(
+    {
+        "schema_version": 1,
+        "scope_ref": "scp_" + "1" * 40,
+        "action": "warden.health",
+        "operation": None,
+        "audit_ref": "aud_" + "2" * 24,
+    }
+)
+if mismatched["ok"] or mismatched.get("admission") is not None or mismatched["value_returned"] is not False:
+    raise SystemExit("runtime authority admitted a mismatched scope")
+if mismatched.get("reason_code") != "runtime_authority_request_context_mismatch":
+    raise SystemExit(f"runtime authority denial reason code broadened: {mismatched.get('reason_code')!r}")
 client.close()
+PY
+
+# The broker must leave value-free evidence for that denial.
+python3 - "${JANUS_RUNTIME_AUTHORITY_AUDIT_FILE}" <<'PY'
+import json
+import pathlib
+import sys
+
+lines = [line for line in pathlib.Path(sys.argv[1]).read_text().splitlines() if line.strip()]
+if len(lines) != 1:
+    raise SystemExit(f"expected exactly one runtime authority audit line, found {len(lines)}")
+event = json.loads(lines[0])
+expected = {
+    "outcome": "denied",
+    "reason_code": "runtime_authority_request_context_mismatch",
+    "actor_subject_ref": "unresolved",
+    "action": "warden.health",
+    "posture": "accountability_legacy",
+    "admission_id": None,
+    "value_returned": False,
+}
+for key, value in expected.items():
+    if event.get(key) != value:
+        raise SystemExit(f"runtime authority denial audit field {key!r} is {event.get(key)!r}")
+if "uid" in lines[0] or "pid" in lines[0]:
+    raise SystemExit("runtime authority denial audit leaked peer credentials")
 PY
 
 [[ ! -s "${fixture}/stdout" ]] || {
@@ -142,4 +184,4 @@ PY
   exit 1
 }
 
-echo "ok: identity shadow broker kernel_peer=derived caller_identity=denied authority=none value_returned=false"
+echo "ok: identity shadow broker kernel_peer=derived caller_identity=denied runtime_denial=audited authority=none value_returned=false"

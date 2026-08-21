@@ -47,6 +47,45 @@ reviewed `JANUS_RUNTIME_OPERATION_REFERENCE_FILE`. The caller cannot submit an
 actor, UID, duty, transport, or posture. No-conflict actions reject operation
 authority and still require a healthy verified journal.
 
+## Reason codes and denial evidence
+
+Every broker decision leaves one `RuntimeAuthorityAuditV1` line in
+`JANUS_RUNTIME_AUTHORITY_AUDIT_FILE`: admissions with `outcome` `allowed` or
+`observed_conflict`, denials with `outcome` `denied` and the specific value-free
+`reason_code`. A denial records `actor_subject_ref` as `unresolved` and only the
+request fields the broker could verify (scope, action, surface, transport);
+never a UID, PID, path, or value. A frame that never became a request is audited
+as `runtime_authority_request_invalid`. The first `allowed` line for a freshly
+enrolled subject is the enrollment proof. Do not wait for a denial code before
+enrolling: an empty registry denies every peer by design.
+
+The peer receives the same reason code in its value-free reply, and clients
+separate three failure classes before any broker code is considered:
+
+| Client reason code | Meaning | Typical cause |
+| --- | --- | --- |
+| `runtime_authority_unavailable` | The broker was never reached or the client configuration is incomplete | missing socket/manifest/key variables, broker sidecar not running, stale socket file, connect or read timeout |
+| `runtime_authority_reply_invalid` | The broker answered, but not with a value-free v1 reply | version skew, a foreign process on the socket |
+| `runtime_authority_denied` | The broker answered `ok:false`; `broker_reason_code` carries its code | see broker codes below |
+
+Broker codes (returned and audited): `subject_not_enrolled`,
+`runtime_authority_request_context_mismatch` (scope or audit linkage),
+`runtime_authority_transport_mismatch`, `runtime_authority_operation_missing`,
+`runtime_authority_operation_unexpected`, `runtime_authority_operation_mismatch`,
+`runtime_authority_request_invalid`, and `runtime_authority_request_denied`
+(no runtime authority attached to the socket). Startup codes stop the broker
+before it serves and are printed by `janusd-identityd` as
+`reason_code=<code> value_returned=false`: `runtime_authority_audience_invalid`,
+`runtime_authority_ttl_invalid`, `runtime_authority_release_digest_invalid`,
+`runtime_authority_manifest_fingerprint_mismatch` (the duty-surface manifest
+does not bind the loaded identity-transport manifest, usually a reformatted
+vendored JSON), `runtime_authority_surface_mismatch`,
+`runtime_authority_cutover_unexpected`, `enforced_recorded_not_ready`, and
+`enforced_recorded_subjects_mismatch`. Warden structured errors expose
+`reason_code` and, when the broker answered, `broker_reason_code`; the CLI
+prints the code inside its error chain. No code is ever accompanied by a secret
+value, a credential path, or free text from the wire.
+
 ## Migration and cutover
 
 Before changing from observe to enforced:

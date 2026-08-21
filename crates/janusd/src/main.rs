@@ -251,6 +251,30 @@ pub async fn run_dynamic_transport_service() -> Result<()> {
 
 /// Run the private identity-shadow boundary. It authenticates only the kernel
 /// peer on its connected Unix socket and cannot authorize runtime actions.
+/// Stable value-free reason code for an identity broker startup failure.
+/// Walks the context chain to the first Janus error; configuration gaps that
+/// never reached Janus code report `identity_startup_failed`.
+pub fn startup_failure_reason_code(error: &anyhow::Error) -> &'static str {
+    for cause in error.chain() {
+        if let Some(janus) = cause.downcast_ref::<JanusError>() {
+            return match janus {
+                JanusError::PolicyDenied { reason_code, .. }
+                | JanusError::PermitInvalid { reason_code, .. }
+                | JanusError::ApprovalInvalid { reason_code, .. } => reason_code,
+                JanusError::StoreUnavailable { .. } | JanusError::AuditUnavailable { .. } => {
+                    "identity_startup_unavailable"
+                }
+                JanusError::InvalidIdentifier { .. }
+                | JanusError::InvalidManifest { .. }
+                | JanusError::NotInManifest { .. }
+                | JanusError::NotFound { .. }
+                | JanusError::Unsupported { .. } => "identity_startup_denied",
+            };
+        }
+    }
+    "identity_startup_failed"
+}
+
 pub async fn run_identity_shadow_service() -> Result<()> {
     let socket = env::var("JANUS_IDENTITY_SOCKET").context("JANUS_IDENTITY_SOCKET is required")?;
     let registry_root = env::var("JANUS_IDENTITY_REGISTRY_ROOT")

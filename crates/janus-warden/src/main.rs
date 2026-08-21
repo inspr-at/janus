@@ -23,9 +23,9 @@ use janus_local::{
     authorize_runtime_action_from_env, enforce_migration_ready_from_env,
     enforce_recovery_drill_freshness_from_env, enforce_release_admission_from_env,
     enforce_retention_ready_from_env, enforce_scope_transfer_ready_from_env,
-    load_role_authorization_from_env, DelegationRegistry, FileDelegationRegistry,
-    FilePermitRegistry, JsonlAuditSink, LoadedRoleAuthorization, NoopDelegationRegistry,
-    NoopPermitStore, PermitStore,
+    load_role_authorization_from_env, runtime_authority_failure, DelegationRegistry,
+    FileDelegationRegistry, FilePermitRegistry, JsonlAuditSink, LoadedRoleAuthorization,
+    NoopDelegationRegistry, NoopPermitStore, PermitStore,
 };
 use janus_provider_age::AgeSecretStore;
 use janus_providers::SecretspecStore;
@@ -244,13 +244,21 @@ impl ServerHandler for McpWarden {
         let admission =
             match authorize_runtime_action_from_env(action, &self.principal.scope, now).await {
                 Ok(admission) => admission,
-                Err(_) => {
+                Err(error) => {
+                    // Unreachable broker, malformed reply, and broker denial are
+                    // distinct codes; the broker's own code rides along when it
+                    // answered (JANUS-452). Never a path, value, or free text.
+                    let failure = runtime_authority_failure(&error);
+                    let mut detail = serde_json::json!({
+                        "reason_code": failure.reason_code,
+                        "detail": "runtime authority did not admit Warden tool"
+                    });
+                    if let Some(code) = failure.broker_reason_code {
+                        detail["broker_reason_code"] = serde_json::Value::String(code);
+                    }
                     return Ok(CallToolResult::structured_error(serde_json::json!({
                         "ok": false,
-                        "error": {
-                            "reason_code": "runtime_authority_denied",
-                            "detail": "runtime authority denied Warden tool"
-                        },
+                        "error": detail,
                         "value_returned": false
                     })));
                 }

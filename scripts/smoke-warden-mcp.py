@@ -275,10 +275,17 @@ def run_smoke(smoke: McpSmoke, *, expect_authority_denied: bool = False) -> None
         denied = structured_denial(
             smoke.request("tools/call", {"name": "health", "arguments": {}})
         )
+        # No broker is configured inside the bare container, so the Warden must
+        # report an unreachable authority, never a broker denial (JANUS-452).
         assert_equal(
             denied["error"]["reason_code"],
-            "runtime_authority_denied",
-            "unconfigured container authority denial",
+            "runtime_authority_unavailable",
+            "unconfigured container authority unavailable",
+        )
+        assert_equal(
+            denied["error"].get("broker_reason_code"),
+            None,
+            "no broker reason code without a broker",
         )
         assert_false(denied["value_returned"], "authority denial value_returned")
         return

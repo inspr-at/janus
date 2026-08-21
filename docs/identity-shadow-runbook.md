@@ -72,7 +72,11 @@ Each newline-delimited JSON request is bounded to 16 KiB:
 Unknown fields, malformed frames, unregistered surfaces, unenrolled or
 ambiguous peers, and over-capacity connections return or cause a value-free
 denial. A long-lived channel is registry-resolved again for every request, so
-revocation takes effect without trusting session metadata.
+revocation takes effect without trusting session metadata. Runtime-authority
+requests (frames carrying an `action`) are answered with their specific
+value-free reason code — an unenrolled peer sees `subject_not_enrolled` — and
+every such denial is audited; the code table lives in
+[`runtime-accountability-runbook.md`](runtime-accountability-runbook.md#reason-codes-and-denial-evidence).
 
 ## Closed surface manifest
 

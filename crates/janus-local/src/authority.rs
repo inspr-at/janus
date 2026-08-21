@@ -176,15 +176,31 @@ impl RuntimeAuthorityBroker {
         cutover: Option<&AccountabilityCutoverV1>,
         audit: Box<dyn RuntimeAuthorityAudit>,
     ) -> JanusResult<Self> {
-        if audience.is_empty()
-            || ttl.is_zero()
-            || ttl.as_secs() > MAX_RUNTIME_ADMISSION_TTL_SECS
-            || !valid_sha256(&release_digest)
-            || duty_manifest.identity_manifest_fingerprint() != identity_manifest.fingerprint()
-        {
+        // Each startup precondition has its own value-free reason code so an
+        // operator can tell a reformatted manifest from a bad audience or TTL
+        // without reading the source (JANUS-450).
+        if audience.is_empty() {
             return Err(authority_error(
-                "runtime_authority_config_invalid",
-                "runtime authority configuration is invalid",
+                "runtime_authority_audience_invalid",
+                "runtime authority audience is empty",
+            ));
+        }
+        if ttl.is_zero() || ttl.as_secs() > MAX_RUNTIME_ADMISSION_TTL_SECS {
+            return Err(authority_error(
+                "runtime_authority_ttl_invalid",
+                "runtime admission ttl is zero or exceeds the reviewed maximum",
+            ));
+        }
+        if !valid_sha256(&release_digest) {
+            return Err(authority_error(
+                "runtime_authority_release_digest_invalid",
+                "runtime authority release digest is not a sha256 digest",
+            ));
+        }
+        if duty_manifest.identity_manifest_fingerprint() != identity_manifest.fingerprint() {
+            return Err(authority_error(
+                "runtime_authority_manifest_fingerprint_mismatch",
+                "duty surface manifest does not bind the loaded identity transport manifest",
             ));
         }
         for policy in duty_manifest.policies() {
@@ -262,7 +278,59 @@ impl RuntimeAuthorityBroker {
         self.posture
     }
 
+    /// Authorize one kernel-authenticated peer request. Every outcome is
+    /// audited: admissions on the success path, denials here with their
+    /// specific value-free reason code. The error is returned unchanged so the
+    /// serve loop can answer the peer with the same code (JANUS-450).
     pub(crate) fn authorize_peer(
+        &self,
+        peer: RuntimePeerCredentials,
+        channel_binding_ref: &str,
+        request: RuntimeAuthorityRequestV1,
+        now: SystemTime,
+    ) -> JanusResult<RuntimeAuthorityReplyV1> {
+        let context = DeniedRequestContext::from_request(&self.duty_manifest, &request);
+        match self.authorize_peer_inner(peer, channel_binding_ref, request, now) {
+            Ok(reply) => Ok(reply),
+            Err(error) => {
+                self.record_denied(denial_reason_code(&error), &context)?;
+                Err(error)
+            }
+        }
+    }
+
+    /// Record a value-free denial for a frame that never became a request
+    /// (malformed or unparseable); the broker still leaves evidence.
+    pub(crate) fn record_unparsed_denial(&self, reason_code: &'static str) -> JanusResult<()> {
+        self.record_denied(reason_code, &DeniedRequestContext::unresolved())
+    }
+
+    fn record_denied(&self, reason_code: &str, context: &DeniedRequestContext) -> JanusResult<()> {
+        let event = RuntimeAuthorityAuditV1 {
+            schema_version: 1,
+            outcome: "denied".to_string(),
+            reason_code: reason_code.to_string(),
+            actor_subject_ref: UNRESOLVED.to_string(),
+            scope_ref: context.scope_ref.clone(),
+            action: context.action.clone(),
+            surface: context.surface.clone(),
+            transport: context.transport.clone(),
+            classification: "denied".to_string(),
+            posture: self.posture.as_str().to_string(),
+            admission_id: None,
+            journal_head_hash: self
+                .journal_health()
+                .map(|health| health.journal_head_hash)
+                .unwrap_or_else(|_| UNRESOLVED.to_string()),
+            value_returned: false,
+        };
+        self.audit
+            .lock()
+            .map_err(|_| unavailable("runtime authority audit unavailable"))?
+            .record_runtime_authority(event)
+    }
+
+    fn authorize_peer_inner(
         &self,
         peer: RuntimePeerCredentials,
         channel_binding_ref: &str,
@@ -510,12 +578,15 @@ impl RuntimeAuthorityClient {
         expected_action: RuntimeAction,
         _requested_at: SystemTime,
     ) -> JanusResult<VerifiedRuntimeAdmission> {
+        // Transport failures, malformed replies, and broker denials carry
+        // distinct value-free reason codes so callers never mistake an absent
+        // broker for an enrollment decision (JANUS-452).
         let mut stream = timeout(Duration::from_secs(5), UnixStream::connect(&self.socket))
             .await
-            .map_err(|_| unavailable("runtime authority connection timed out"))?
-            .map_err(|_| unavailable("runtime authority socket unavailable"))?;
+            .map_err(|_| transport_unavailable("runtime authority connection timed out"))?
+            .map_err(|_| transport_unavailable("runtime authority socket unavailable"))?;
         let mut encoded = serde_json::to_vec(&request)
-            .map_err(|_| unavailable("runtime authority request encoding failed"))?;
+            .map_err(|_| transport_unavailable("runtime authority request encoding failed"))?;
         if encoded.len() > MAX_AUTHORITY_FRAME_BYTES {
             return Err(authority_error(
                 "runtime_authority_request_too_large",
@@ -526,23 +597,25 @@ impl RuntimeAuthorityClient {
         stream
             .write_all(&encoded)
             .await
-            .map_err(|_| unavailable("runtime authority request failed"))?;
+            .map_err(|_| transport_unavailable("runtime authority request failed"))?;
         let mut reader = BufReader::new(stream);
         let mut reply = Vec::new();
         timeout(Duration::from_secs(5), reader.read_until(b'\n', &mut reply))
             .await
-            .map_err(|_| unavailable("runtime authority reply timed out"))?
-            .map_err(|_| unavailable("runtime authority reply unavailable"))?;
+            .map_err(|_| transport_unavailable("runtime authority reply timed out"))?
+            .map_err(|_| transport_unavailable("runtime authority reply unavailable"))?;
         if reply.len() > MAX_AUTHORITY_FRAME_BYTES || reply.last() != Some(&b'\n') {
-            return Err(unavailable("runtime authority reply malformed"));
+            return Err(reply_invalid("runtime authority reply malformed"));
         }
         let reply: RuntimeAuthorityReplyV1 = serde_json::from_slice(&reply[..reply.len() - 1])
-            .map_err(|_| unavailable("runtime authority reply malformed"))?;
-        if reply.schema_version != 1 || !reply.ok || reply.value_returned {
-            return Err(authority_error(
-                "runtime_authority_denied",
-                "runtime authority broker denied the action",
+            .map_err(|_| reply_invalid("runtime authority reply malformed"))?;
+        if reply.schema_version != 1 || reply.value_returned {
+            return Err(reply_invalid(
+                "runtime authority reply is not a value-free v1 reply",
             ));
+        }
+        if !reply.ok {
+            return Err(broker_denial(reply.reason_code.as_deref()));
         }
         let admission = reply.admission.ok_or_else(|| {
             authority_error(
@@ -707,6 +780,130 @@ pub fn denied_runtime_authority_reply(reason_code: &str) -> RuntimeAuthorityRepl
         reason_code: Some(reason_code.to_string()),
         value_returned: false,
     }
+}
+
+/// Placeholder for audit fields the broker could not resolve before denying.
+const UNRESOLVED: &str = "unresolved";
+const BROKER_REASON_PREFIX: &str = "broker_reason_code=";
+const BROKER_REASON_UNSPECIFIED: &str = "unspecified";
+
+/// Value-free request fields captured before authorization so a denial can be
+/// audited without trusting anything the peer asserted.
+struct DeniedRequestContext {
+    scope_ref: String,
+    action: String,
+    surface: String,
+    transport: String,
+}
+
+impl DeniedRequestContext {
+    fn unresolved() -> Self {
+        Self {
+            scope_ref: UNRESOLVED.to_string(),
+            action: UNRESOLVED.to_string(),
+            surface: UNRESOLVED.to_string(),
+            transport: UNRESOLVED.to_string(),
+        }
+    }
+
+    fn from_request(manifest: &DutySurfaceManifestV1, request: &RuntimeAuthorityRequestV1) -> Self {
+        let scope_ref = ScopeRef::from_opaque(request.scope_ref.clone())
+            .map(|scope| scope.as_str().to_string())
+            .unwrap_or_else(|_| UNRESOLVED.to_string());
+        let action = RuntimeAction::parse(&request.action).ok();
+        let policy = action.and_then(|action| manifest.policy(action).ok());
+        Self {
+            scope_ref,
+            action: action
+                .map(|action| action.as_str().to_string())
+                .unwrap_or_else(|| UNRESOLVED.to_string()),
+            surface: policy
+                .map(|policy| policy.surface().to_string())
+                .unwrap_or_else(|| UNRESOLVED.to_string()),
+            transport: policy
+                .map(|policy| policy.transport().as_str().to_string())
+                .unwrap_or_else(|| UNRESOLVED.to_string()),
+        }
+    }
+}
+
+/// Stable value-free reason code the broker records and returns for a denial.
+pub(crate) fn denial_reason_code(error: &JanusError) -> &'static str {
+    match error {
+        JanusError::PolicyDenied { reason_code, .. }
+        | JanusError::PermitInvalid { reason_code, .. }
+        | JanusError::ApprovalInvalid { reason_code, .. } => reason_code,
+        JanusError::StoreUnavailable { .. } | JanusError::AuditUnavailable { .. } => {
+            "runtime_authority_unavailable"
+        }
+        JanusError::InvalidIdentifier { .. } | JanusError::InvalidManifest { .. } => {
+            "runtime_authority_request_invalid"
+        }
+        JanusError::NotInManifest { .. }
+        | JanusError::NotFound { .. }
+        | JanusError::Unsupported { .. } => "runtime_authority_request_denied",
+    }
+}
+
+/// Value-free classification of a client-side runtime-authority failure.
+/// `reason_code` distinguishes an unreachable broker, a malformed reply, and a
+/// genuine denial; `broker_reason_code` carries the broker's own code when the
+/// broker answered.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RuntimeAuthorityFailure {
+    pub reason_code: &'static str,
+    pub broker_reason_code: Option<String>,
+}
+
+/// Classify any error from the runtime-authority client path.
+pub fn runtime_authority_failure(error: &JanusError) -> RuntimeAuthorityFailure {
+    let reason_code = match error {
+        JanusError::PolicyDenied { reason_code, .. }
+        | JanusError::PermitInvalid { reason_code, .. }
+        | JanusError::ApprovalInvalid { reason_code, .. } => reason_code,
+        _ => "runtime_authority_unavailable",
+    };
+    let broker_reason_code = match error {
+        JanusError::PolicyDenied {
+            reason_code: "runtime_authority_denied",
+            detail,
+        } => detail
+            .strip_prefix(BROKER_REASON_PREFIX)
+            .filter(|token| valid_reason_token(token))
+            .map(str::to_string),
+        _ => None,
+    };
+    RuntimeAuthorityFailure {
+        reason_code,
+        broker_reason_code,
+    }
+}
+
+fn transport_unavailable(detail: &'static str) -> JanusError {
+    authority_error("runtime_authority_unavailable", detail)
+}
+
+fn reply_invalid(detail: &'static str) -> JanusError {
+    authority_error("runtime_authority_reply_invalid", detail)
+}
+
+/// The broker answered `ok:false`. Its reason code is retained only when it is
+/// a well-formed token, so no free text from the wire reaches callers.
+fn broker_denial(reply_reason_code: Option<&str>) -> JanusError {
+    let token = reply_reason_code
+        .filter(|token| valid_reason_token(token))
+        .unwrap_or(BROKER_REASON_UNSPECIFIED);
+    JanusError::policy_denied(
+        "runtime_authority_denied",
+        format!("{BROKER_REASON_PREFIX}{token}"),
+    )
+}
+
+fn valid_reason_token(value: &str) -> bool {
+    (1..=64).contains(&value.len())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
 }
 
 fn legacy_health() -> DutyJournalHealthV1 {
@@ -1239,6 +1436,476 @@ mod tests {
             .unwrap();
         assert!(admission.authorizes(janus_core::Permission::HealthRead, &scope()));
         server.abort();
+    }
+
+    #[derive(Clone, Default)]
+    struct SharedAudit(std::sync::Arc<std::sync::Mutex<Vec<RuntimeAuthorityAuditV1>>>);
+
+    impl SharedAudit {
+        fn events(&self) -> Vec<RuntimeAuthorityAuditV1> {
+            self.0.lock().unwrap().clone()
+        }
+    }
+
+    impl DutyAuthorizationAuditSink for SharedAudit {
+        fn record_duty_authorization(&mut self, _: DutyAuthorizationAuditV1) -> JanusResult<()> {
+            Ok(())
+        }
+    }
+
+    impl RuntimeAuthorityAudit for SharedAudit {
+        fn record_runtime_authority(&mut self, event: RuntimeAuthorityAuditV1) -> JanusResult<()> {
+            self.0.lock().unwrap().push(event);
+            Ok(())
+        }
+    }
+
+    const DUTY_MANIFEST: &str =
+        include_str!("../../../config/authorization/duty-surface-manifest-v1.json");
+    const IDENTITY_MANIFEST: &str =
+        include_str!("../../../config/identity/transport-manifest-v1.json");
+
+    /// Legacy-posture broker with one enrolled subject and a shared audit sink,
+    /// parameterized so every startup precondition can be violated alone.
+    fn legacy_broker(
+        audit: SharedAudit,
+        enrolled_uid: u32,
+        audience: &str,
+        ttl: Duration,
+        release: &str,
+        duty_manifest_text: &str,
+    ) -> (TempDir, SigningKey, JanusResult<RuntimeAuthorityBroker>) {
+        let directory = tempdir().unwrap();
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let registry = FileSubjectRegistry::new(directory.path().join("subjects"), "fixture-host");
+        registry
+            .enroll_local(
+                enrolled_uid,
+                ActorSubjectClass::System,
+                b"review-one",
+                UNIX_EPOCH,
+            )
+            .unwrap();
+        let identity_manifest = IdentityTransportManifestV1::parse_json(IDENTITY_MANIFEST).unwrap();
+        let duty_manifest = DutySurfaceManifestV1::parse_json(duty_manifest_text).unwrap();
+        let admission_key = SigningKey::from_bytes(&random_bytes::<32>().unwrap());
+        let domain_key = SigningKey::from_bytes(&random_bytes::<32>().unwrap());
+        let verifier = OperationStateVerifier::new(
+            domain_key.verifying_key(),
+            DOMAIN_SERVICE,
+            AUDIENCE,
+            RELEASE,
+        )
+        .unwrap();
+        let broker = RuntimeAuthorityBroker::new(
+            registry,
+            identity_manifest,
+            duty_manifest,
+            admission_key.clone(),
+            verifier,
+            None,
+            AccountabilityPosture::AccountabilityLegacy,
+            scope(),
+            audience,
+            release.to_string(),
+            ttl,
+            None,
+            Box::new(audit),
+        );
+        (directory, admission_key, broker)
+    }
+
+    fn startup_reason(
+        audience: &str,
+        ttl: Duration,
+        release: &str,
+        duty_manifest_text: &str,
+    ) -> Option<&'static str> {
+        let (_directory, _key, broker) = legacy_broker(
+            SharedAudit::default(),
+            501,
+            audience,
+            ttl,
+            release,
+            duty_manifest_text,
+        );
+        broker.err().map(|error| denial_reason_code(&error))
+    }
+
+    #[test]
+    fn startup_preconditions_report_specific_reason_codes() {
+        let valid_ttl = Duration::from_secs(60);
+        assert_eq!(
+            startup_reason(AUDIENCE, valid_ttl, RELEASE, DUTY_MANIFEST),
+            None
+        );
+        assert_eq!(
+            startup_reason("", valid_ttl, RELEASE, DUTY_MANIFEST),
+            Some("runtime_authority_audience_invalid")
+        );
+        assert_eq!(
+            startup_reason(AUDIENCE, Duration::ZERO, RELEASE, DUTY_MANIFEST),
+            Some("runtime_authority_ttl_invalid")
+        );
+        assert_eq!(
+            startup_reason(
+                AUDIENCE,
+                Duration::from_secs(MAX_RUNTIME_ADMISSION_TTL_SECS + 1),
+                RELEASE,
+                DUTY_MANIFEST
+            ),
+            Some("runtime_authority_ttl_invalid")
+        );
+        assert_eq!(
+            startup_reason(AUDIENCE, valid_ttl, "sha256:not-a-digest", DUTY_MANIFEST),
+            Some("runtime_authority_release_digest_invalid")
+        );
+        let reformatted_manifest = {
+            let duty_manifest = DutySurfaceManifestV1::parse_json(DUTY_MANIFEST).unwrap();
+            let actual = duty_manifest.identity_manifest_fingerprint().to_string();
+            assert!(DUTY_MANIFEST.contains(&actual));
+            DUTY_MANIFEST.replace(&actual, &format!("sha256:{}", "b".repeat(64)))
+        };
+        assert_eq!(
+            startup_reason(AUDIENCE, valid_ttl, RELEASE, &reformatted_manifest),
+            Some("runtime_authority_manifest_fingerprint_mismatch")
+        );
+    }
+
+    #[test]
+    fn every_denial_is_audited_with_its_specific_reason_code() {
+        let audit = SharedAudit::default();
+        let (_directory, _key, broker) = legacy_broker(
+            audit.clone(),
+            501,
+            AUDIENCE,
+            Duration::from_secs(60),
+            RELEASE,
+            DUTY_MANIFEST,
+        );
+        let broker = broker.unwrap();
+        let now = SystemTime::now();
+        let unenrolled = RuntimePeerCredentials {
+            uid: 999,
+            gid: 20,
+            pid: Some(4242),
+        };
+
+        let error = broker
+            .authorize_peer(
+                unenrolled,
+                "cbr_unenrolled",
+                request(RuntimeAction::WardenHealth, None),
+                now,
+            )
+            .unwrap_err();
+        assert_eq!(denial_reason_code(&error), "subject_not_enrolled");
+        let events = audit.events();
+        assert_eq!(events.len(), 1);
+        let denied = &events[0];
+        assert_eq!(denied.outcome, "denied");
+        assert_eq!(denied.reason_code, "subject_not_enrolled");
+        assert_eq!(denied.actor_subject_ref, UNRESOLVED);
+        assert_eq!(denied.scope_ref, scope().as_str());
+        assert_eq!(denied.action, RuntimeAction::WardenHealth.as_str());
+        assert_ne!(denied.surface, UNRESOLVED);
+        assert_ne!(denied.transport, UNRESOLVED);
+        assert_eq!(denied.classification, "denied");
+        assert_eq!(denied.posture, "accountability_legacy");
+        assert!(denied.admission_id.is_none());
+        assert!(!denied.value_returned);
+        let rendered = serde_json::to_string(denied).unwrap();
+        assert!(!rendered.contains("999") && !rendered.contains("4242"));
+
+        let other_scope = ScopePathV1::for_repository("fixture-org", "janus", "janus", "stage")
+            .unwrap()
+            .scope_ref();
+        let mut mismatched = request(RuntimeAction::WardenHealth, None);
+        mismatched.scope_ref = other_scope.as_str().to_string();
+        let error = broker
+            .authorize_peer(unenrolled, "cbr_scope", mismatched, now)
+            .unwrap_err();
+        assert_eq!(
+            denial_reason_code(&error),
+            "runtime_authority_request_context_mismatch"
+        );
+        let events = audit.events();
+        assert_eq!(events.len(), 2);
+        assert_eq!(
+            events[1].reason_code,
+            "runtime_authority_request_context_mismatch"
+        );
+        assert_eq!(events[1].scope_ref, other_scope.as_str());
+
+        broker
+            .record_unparsed_denial("runtime_authority_request_invalid")
+            .unwrap();
+        let events = audit.events();
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[2].outcome, "denied");
+        assert_eq!(events[2].reason_code, "runtime_authority_request_invalid");
+        assert_eq!(events[2].action, UNRESOLVED);
+        assert_eq!(events[2].surface, UNRESOLVED);
+
+        let enrolled = RuntimePeerCredentials {
+            uid: 501,
+            gid: 20,
+            pid: Some(1),
+        };
+        broker
+            .authorize_peer(
+                enrolled,
+                "cbr_enrolled",
+                request(RuntimeAction::WardenHealth, None),
+                now,
+            )
+            .unwrap();
+        let events = audit.events();
+        assert_eq!(events.len(), 4);
+        assert_eq!(events[3].outcome, "allowed");
+        assert_eq!(events[3].reason_code, "runtime_admitted");
+        assert!(events[3].admission_id.is_some());
+    }
+
+    #[test]
+    fn client_failures_classify_without_free_text() {
+        let unavailable_transport = runtime_authority_failure(&transport_unavailable("timed out"));
+        assert_eq!(
+            unavailable_transport.reason_code,
+            "runtime_authority_unavailable"
+        );
+        assert!(unavailable_transport.broker_reason_code.is_none());
+
+        let unavailable_env =
+            runtime_authority_failure(&unavailable("JANUS_IDENTITY_SOCKET is required"));
+        assert_eq!(unavailable_env.reason_code, "runtime_authority_unavailable");
+
+        let invalid = runtime_authority_failure(&reply_invalid("malformed"));
+        assert_eq!(invalid.reason_code, "runtime_authority_reply_invalid");
+        assert!(invalid.broker_reason_code.is_none());
+
+        let denied = runtime_authority_failure(&broker_denial(Some("subject_not_enrolled")));
+        assert_eq!(denied.reason_code, "runtime_authority_denied");
+        assert_eq!(
+            denied.broker_reason_code.as_deref(),
+            Some("subject_not_enrolled")
+        );
+        assert!(broker_denial(Some("subject_not_enrolled"))
+            .to_string()
+            .contains("broker_reason_code=subject_not_enrolled"));
+
+        for unsafe_code in [
+            Some("Not A Code"),
+            Some(""),
+            Some("x".repeat(65).as_str()),
+            None,
+        ] {
+            let denied = runtime_authority_failure(&broker_denial(unsafe_code));
+            assert_eq!(denied.reason_code, "runtime_authority_denied");
+            assert_eq!(
+                denied.broker_reason_code.as_deref(),
+                Some(BROKER_REASON_UNSPECIFIED)
+            );
+        }
+
+        let posture = runtime_authority_failure(&authority_error(
+            "runtime_authority_posture_mismatch",
+            "posture",
+        ));
+        assert_eq!(posture.reason_code, "runtime_authority_posture_mismatch");
+        assert!(posture.broker_reason_code.is_none());
+
+        assert_eq!(
+            denial_reason_code(&unavailable("audit")),
+            "runtime_authority_unavailable"
+        );
+        assert_eq!(
+            denial_reason_code(&JanusError::InvalidIdentifier { kind: "scope" }),
+            "runtime_authority_request_invalid"
+        );
+    }
+
+    async fn fake_broker(
+        socket: std::path::PathBuf,
+        reply: &'static [u8],
+    ) -> tokio::task::JoinHandle<()> {
+        let listener = bind_private_identity_socket(&socket).unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (reader, mut writer) = stream.into_split();
+            let mut reader = BufReader::new(reader);
+            let mut frame = Vec::new();
+            reader.read_until(b'\n', &mut frame).await.unwrap();
+            writer.write_all(reply).await.unwrap();
+            writer.flush().await.unwrap();
+        })
+    }
+
+    fn client_for(socket: std::path::PathBuf) -> RuntimeAuthorityClient {
+        let duty_manifest = DutySurfaceManifestV1::parse_json(DUTY_MANIFEST).unwrap();
+        let key = SigningKey::from_bytes(&random_bytes::<32>().unwrap());
+        RuntimeAuthorityClient::new(
+            socket,
+            duty_manifest,
+            key.verifying_key(),
+            AUDIENCE,
+            RELEASE,
+        )
+        .unwrap()
+    }
+
+    async fn client_failure(socket: std::path::PathBuf) -> RuntimeAuthorityFailure {
+        let error = client_for(socket)
+            .authorize(
+                request(RuntimeAction::WardenHealth, None),
+                RuntimeAction::WardenHealth,
+                SystemTime::now(),
+            )
+            .await
+            .unwrap_err();
+        runtime_authority_failure(&error)
+    }
+
+    #[tokio::test]
+    async fn client_distinguishes_absent_broker_malformed_reply_and_denial() {
+        let directory = tempdir().unwrap();
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+
+        let missing = client_failure(directory.path().join("missing.sock")).await;
+        assert_eq!(missing.reason_code, "runtime_authority_unavailable");
+        assert!(missing.broker_reason_code.is_none());
+
+        let dead = directory.path().join("dead.sock");
+        drop(bind_private_identity_socket(&dead).unwrap());
+        assert!(
+            dead.exists(),
+            "socket file must outlive the listener for this case"
+        );
+        let refused = client_failure(dead).await;
+        assert_eq!(refused.reason_code, "runtime_authority_unavailable");
+
+        let malformed = directory.path().join("malformed.sock");
+        let server = fake_broker(malformed.clone(), b"not a reply\n").await;
+        let failure = client_failure(malformed).await;
+        assert_eq!(failure.reason_code, "runtime_authority_reply_invalid");
+        assert!(failure.broker_reason_code.is_none());
+        server.abort();
+
+        let denied = directory.path().join("denied.sock");
+        let server = fake_broker(
+            denied.clone(),
+            b"{\"schema_version\":1,\"ok\":false,\"admission\":null,\"reason_code\":\"subject_not_enrolled\",\"value_returned\":false}\n",
+        )
+        .await;
+        let failure = client_failure(denied).await;
+        assert_eq!(failure.reason_code, "runtime_authority_denied");
+        assert_eq!(
+            failure.broker_reason_code.as_deref(),
+            Some("subject_not_enrolled")
+        );
+        server.abort();
+
+        let unsafe_code = directory.path().join("unsafe.sock");
+        let server = fake_broker(
+            unsafe_code.clone(),
+            b"{\"schema_version\":1,\"ok\":false,\"admission\":null,\"reason_code\":\"free text; not a token\",\"value_returned\":false}\n",
+        )
+        .await;
+        let failure = client_failure(unsafe_code).await;
+        assert_eq!(failure.reason_code, "runtime_authority_denied");
+        assert_eq!(
+            failure.broker_reason_code.as_deref(),
+            Some(BROKER_REASON_UNSPECIFIED)
+        );
+        server.abort();
+
+        let leaked_value = directory.path().join("leaked.sock");
+        let server = fake_broker(
+            leaked_value.clone(),
+            b"{\"schema_version\":1,\"ok\":true,\"admission\":null,\"reason_code\":null,\"value_returned\":true}\n",
+        )
+        .await;
+        let failure = client_failure(leaked_value).await;
+        assert_eq!(failure.reason_code, "runtime_authority_reply_invalid");
+        server.abort();
+    }
+
+    async fn raw_transact(
+        reader: &mut BufReader<tokio::net::unix::OwnedReadHalf>,
+        writer: &mut tokio::net::unix::OwnedWriteHalf,
+        frame: &[u8],
+    ) -> RuntimeAuthorityReplyV1 {
+        writer.write_all(frame).await.unwrap();
+        writer.write_all(b"\n").await.unwrap();
+        let mut line = Vec::new();
+        reader.read_until(b'\n', &mut line).await.unwrap();
+        serde_json::from_slice(&line[..line.len() - 1]).unwrap()
+    }
+
+    #[tokio::test]
+    async fn served_unenrolled_peer_receives_specific_code_and_is_audited() {
+        let audit = SharedAudit::default();
+        let never_this_uid = current_uid().wrapping_add(1);
+        let (directory, admission_key, authority) = legacy_broker(
+            audit.clone(),
+            never_this_uid,
+            AUDIENCE,
+            Duration::from_secs(60),
+            RELEASE,
+            DUTY_MANIFEST,
+        );
+        let identity = IdentityShadowBroker::new(
+            FileSubjectRegistry::new(directory.path().join("subjects"), "fixture-host"),
+            IdentityTransportManifestV1::parse_json(IDENTITY_MANIFEST).unwrap(),
+            admission_key,
+            "identity-shadow",
+            RELEASE.to_string(),
+            Duration::from_secs(60),
+        )
+        .unwrap()
+        .with_runtime_authority(authority.unwrap())
+        .unwrap();
+        let socket = directory.path().join("identity.sock");
+        let listener = bind_private_identity_socket(&socket).unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            identity.serve_connection(stream).await.unwrap();
+        });
+
+        let stream = UnixStream::connect(&socket).await.unwrap();
+        let (reader, mut writer) = stream.into_split();
+        let mut reader = BufReader::new(reader);
+        let reply = raw_transact(
+            &mut reader,
+            &mut writer,
+            &serde_json::to_vec(&request(RuntimeAction::WardenHealth, None)).unwrap(),
+        )
+        .await;
+        assert!(!reply.ok && reply.admission.is_none() && !reply.value_returned);
+        assert_eq!(reply.reason_code.as_deref(), Some("subject_not_enrolled"));
+
+        let reply = raw_transact(
+            &mut reader,
+            &mut writer,
+            b"{\"action\":\"warden.health\",\"unexpected\":true}",
+        )
+        .await;
+        assert!(!reply.ok);
+        assert_eq!(
+            reply.reason_code.as_deref(),
+            Some("runtime_authority_request_invalid")
+        );
+        server.abort();
+
+        let events = audit.events();
+        assert_eq!(events.len(), 2);
+        assert!(events
+            .iter()
+            .all(|event| event.outcome == "denied" && !event.value_returned));
+        assert_eq!(events[0].reason_code, "subject_not_enrolled");
+        assert_eq!(events[1].reason_code, "runtime_authority_request_invalid");
+        let rendered = serde_json::to_string(&events).unwrap();
+        assert!(!rendered.contains(&current_uid().to_string()) || current_uid() < 10);
     }
 
     fn current_uid() -> u32 {

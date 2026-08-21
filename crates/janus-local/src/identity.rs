@@ -573,30 +573,41 @@ impl IdentityShadowBroker {
                 .and_then(|value| value.get("action").cloned())
                 .is_some();
             let encoded = if is_runtime_authority {
-                let reply = self
-                    .runtime_authority
-                    .as_ref()
-                    .and_then(|authority| {
-                        serde_json::from_slice::<RuntimeAuthorityRequestV1>(&frame)
-                            .ok()
-                            .and_then(|request| {
-                                authority
-                                    .authorize_peer(
-                                        crate::authority::RuntimePeerCredentials {
-                                            uid: credentials.uid,
-                                            gid: credentials.gid,
-                                            pid: credentials.pid,
-                                        },
-                                        &channel_binding_ref,
-                                        request,
-                                        SystemTime::now(),
-                                    )
-                                    .ok()
-                            })
-                    })
-                    .unwrap_or_else(|| {
-                        denied_runtime_authority_reply("runtime_authority_request_denied")
-                    });
+                // Every denial answers with the specific value-free reason code
+                // and is audited by the broker; a generic code is reserved for
+                // the cases where no authority is attached or the frame never
+                // became a request (JANUS-450).
+                let reply = match self.runtime_authority.as_ref() {
+                    None => denied_runtime_authority_reply("runtime_authority_request_denied"),
+                    Some(authority) => {
+                        match serde_json::from_slice::<RuntimeAuthorityRequestV1>(&frame) {
+                            Err(_) => {
+                                let reason_code = "runtime_authority_request_invalid";
+                                match authority.record_unparsed_denial(reason_code) {
+                                    Ok(()) => denied_runtime_authority_reply(reason_code),
+                                    Err(_) => denied_runtime_authority_reply(
+                                        "runtime_authority_unavailable",
+                                    ),
+                                }
+                            }
+                            Ok(request) => match authority.authorize_peer(
+                                crate::authority::RuntimePeerCredentials {
+                                    uid: credentials.uid,
+                                    gid: credentials.gid,
+                                    pid: credentials.pid,
+                                },
+                                &channel_binding_ref,
+                                request,
+                                SystemTime::now(),
+                            ) {
+                                Ok(reply) => reply,
+                                Err(error) => denied_runtime_authority_reply(
+                                    crate::authority::denial_reason_code(&error),
+                                ),
+                            },
+                        }
+                    }
+                };
                 serde_json::to_vec(&reply).map_err(io::Error::other)?
             } else {
                 let reply = serde_json::from_slice::<IdentityShadowRequestV1>(&frame)
