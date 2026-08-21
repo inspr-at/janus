@@ -79,18 +79,55 @@ export JANUS_OPERATION_DOMAIN_SERVICE="smoke-domain"
 export JANUS_OPERATION_AUDIENCE="janus-runtime-smoke"
 export JANUS_RUNTIME_AUTHORITY_AUDIT_FILE="${fixture}/state/runtime-authority.jsonl"
 
+# A dead socket left by a previous broker (torn-down sidecar, crash) must not
+# block startup: the broker reclaims it and serves on the same path (JANUS-451).
+python3 - "${JANUS_IDENTITY_SOCKET}" <<'PY'
+import os
+import socket
+import sys
+
+path = sys.argv[1]
+leftover = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+leftover.bind(path)
+leftover.close()
+os.chmod(path, 0o600)
+PY
+[[ -S "${JANUS_IDENTITY_SOCKET}" ]] || {
+  echo "fixture stale socket was not created" >&2
+  exit 1
+}
+
 "${identity_bin}" >"${fixture}/stdout" 2>"${fixture}/stderr" &
 pid="$!"
-for _ in $(seq 1 100); do
-  [[ -S "${JANUS_IDENTITY_SOCKET}" ]] && break
+# Readiness is accept-connect, never file existence: the stale file above would
+# otherwise look ready before the broker listens.
+ready=0
+for _ in $(seq 1 200); do
+  if python3 - "${JANUS_IDENTITY_SOCKET}" <<'PY'
+import socket
+import sys
+
+probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+probe.settimeout(0.2)
+try:
+    probe.connect(sys.argv[1])
+except OSError:
+    raise SystemExit(1)
+probe.close()
+PY
+  then
+    ready=1
+    break
+  fi
   kill -0 "${pid}" >/dev/null 2>&1 || {
-    echo "janusd-identityd exited before creating its socket" >&2
+    echo "janusd-identityd exited before accepting connections" >&2
+    cat "${fixture}/stderr" >&2 || true
     exit 1
   }
   sleep 0.02
 done
-[[ -S "${JANUS_IDENTITY_SOCKET}" ]] || {
-  echo "janusd-identityd socket was not created" >&2
+[[ "${ready}" -eq 1 ]] || {
+  echo "janusd-identityd never accepted a connection" >&2
   exit 1
 }
 
@@ -184,4 +221,22 @@ PY
   exit 1
 }
 
-echo "ok: identity shadow broker kernel_peer=derived caller_identity=denied runtime_denial=audited authority=none value_returned=false"
+# Clean shutdown on SIGTERM exits 0 and unlinks the socket (JANUS-451).
+kill -TERM "${pid}"
+if wait "${pid}"; then
+  status=0
+else
+  status=$?
+fi
+pid=""
+[[ "${status}" -eq 0 ]] || {
+  echo "janusd-identityd did not exit cleanly on SIGTERM (status ${status})" >&2
+  cat "${fixture}/stderr" >&2 || true
+  exit 1
+}
+[[ ! -e "${JANUS_IDENTITY_SOCKET}" ]] || {
+  echo "janusd-identityd left its socket behind on shutdown" >&2
+  exit 1
+}
+
+echo "ok: identity shadow broker kernel_peer=derived caller_identity=denied runtime_denial=audited stale_socket=reclaimed shutdown=unlinked authority=none value_returned=false"

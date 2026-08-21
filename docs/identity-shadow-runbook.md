@@ -61,7 +61,11 @@ The released container installs the manifest at
 at `/run/janus/identity` and `/var/lib/janus/identity`, and exposes no network
 port. A deployment still needs reviewed enrollment through an embedding
 control plane before a peer can receive an observation; an empty registry
-denies every request.
+denies every request. On start the broker reclaims a dead socket left by a
+previous instance and refuses a live or foreign one (`identity_socket_occupied`);
+on `SIGTERM`/`SIGINT` it unlinks its socket and exits 0. Readiness is a
+successful connect, not the socket file's existence — see
+[`runtime-accountability-runbook.md`](runtime-accountability-runbook.md#broker-sidecar-lifecycle).
 
 Each newline-delimited JSON request is bounded to 16 KiB:
 
