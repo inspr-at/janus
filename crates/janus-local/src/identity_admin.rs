@@ -224,7 +224,7 @@ fn open_lifecycle_lock(registry_root: &Path) -> JanusResult<File> {
 /// administrator's exclusive mutation lock fails closed while the broker runs.
 pub fn hold_shared_lifecycle_lock(registry_root: &Path) -> JanusResult<File> {
     let file = open_lifecycle_lock(registry_root)?;
-    file.try_lock_shared().map_err(|_| {
+    FileExt::try_lock_shared(&file).map_err(|_| {
         identity_error(
             "identity_admin_running",
             "an identity administration mutation holds the lifecycle lock",
@@ -361,7 +361,7 @@ impl IdentityAdmin {
         check_caller()?;
         self.check_registry_root()?;
         let lock = open_lifecycle_lock(&self.registry_root)?;
-        lock.try_lock_shared().map_err(|_| {
+        FileExt::try_lock_shared(&lock).map_err(|_| {
             identity_error(
                 "identity_admin_running",
                 "an identity administration mutation is running",
@@ -399,7 +399,7 @@ impl IdentityAdmin {
         check_caller()?;
         self.check_registry_root()?;
         let lock = open_lifecycle_lock(&self.registry_root)?;
-        lock.try_lock_exclusive().map_err(|_| {
+        FileExt::try_lock_exclusive(&lock).map_err(|_| {
             identity_error(
                 "identity_broker_running",
                 "the identity broker or another administrator holds the lifecycle lock",
@@ -542,10 +542,7 @@ impl IdentityAdmin {
     }
 
     fn append_audit(&self, event: &IdentityAdminAuditV1) -> JanusResult<()> {
-        let parent = self
-            .audit_file
-            .parent()
-            .ok_or_else(|| audit_unavailable())?;
+        let parent = self.audit_file.parent().ok_or_else(audit_unavailable)?;
         let parent_metadata = fs::symlink_metadata(parent).map_err(|_| audit_unavailable())?;
         if !parent_metadata.is_dir()
             || parent_metadata.file_type().is_symlink()
