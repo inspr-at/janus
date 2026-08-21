@@ -67,6 +67,56 @@ on `SIGTERM`/`SIGINT` it unlinks its socket and exits 0. Readiness is a
 successful connect, not the socket file's existence — see
 [`runtime-accountability-runbook.md`](runtime-accountability-runbook.md#broker-sidecar-lifecycle).
 
+## First host enrollment (`janusd-identity-admin`)
+
+Enrollment is a reviewed, offline, authority-side operation — never a
+hand-written registry file. `janusd-identity-admin` ships beside
+`janusd-identityd`, runs as the registry owner while the broker is stopped,
+consumes signed operation-bound review evidence, and writes a fail-closed
+write-ahead audit. It is not a runtime-plane action and needs no broker
+admission, which is what makes the first subject possible.
+
+Reviewer side (the person who approves, on their own machine):
+
+1. `janusd-identity-admin review-keys --signing-key-file reviewer.key --verifying-key-file reviewer.pub`
+   creates the reviewer key once and prints its `reviewer_key_ref`. Pin
+   `reviewer.pub` on the host as `JANUS_IDENTITY_REVIEW_VERIFYING_KEY_FILE`
+   through the deployment controller; the private key never leaves the
+   reviewer.
+2. Write the request as a private file — never on argv:
+   `{"schema_version":1,"verb":"enroll","trust_domain":"<exact JANUS_IDENTITY_TRUST_DOMAIN>","local_uid":65532,"subject_class":"system","ttl_seconds":3600,"reviewer":"NIX-377 …"}`
+   (`verb:"revoke"` takes `subject_ref` instead of `local_uid`/`subject_class`).
+3. `janusd-identity-admin review-sign --request-file req.json --signing-key-file reviewer.key --out evidence.json`
+   produces the signed envelope: verb, trust-domain fingerprint, target, a
+   single-use nonce, validity window (at most seven days), and the reviewer
+   key reference. Hand `evidence.json` to the host.
+
+Host side (as the broker's UID, broker stopped):
+
+- Environment: `JANUS_IDENTITY_REGISTRY_ROOT`, `JANUS_IDENTITY_TRUST_DOMAIN`,
+  `JANUS_IDENTITY_REVIEW_VERIFYING_KEY_FILE`, `JANUS_IDENTITY_ADMIN_AUDIT_FILE`,
+  and either the pinned `JANUS_ACCOUNTABILITY_CONFIG_FILE`
+  (`{"schema_version":1,"posture":"accountability_legacy"}`, read-only, owned
+  by root or the broker UID) or `JANUS_ACCOUNTABILITY_POSTURE`.
+- `janusd-identity-admin enroll --review-evidence-file evidence.json` prints a
+  value-free outcome (`subject_ref`, class, status, `review_fingerprint`).
+  `revoke` writes an immutable revocation record; `list` prints opaque refs,
+  class, and status and also works while the broker runs.
+- Guards, all fail closed: real UID must equal effective UID and the registry
+  root's owner; the root must be a pre-owned `0700` directory (never created
+  by the tool); the shared lifecycle lock beside the registry must be free
+  (`identity_broker_running` otherwise); the posture must not be
+  `enforced_recorded` (`identity_posture_mutation_forbidden`); the evidence
+  must be a bounded regular file, signed by the pinned reviewer key, bound to
+  this trust domain and verb, unexpired, and never consumed before
+  (`identity_review_invalid`, `identity_review_signature_invalid`,
+  `identity_review_context_mismatch`, `identity_review_expired`,
+  `identity_review_replayed`); the `authorized` audit line must be durable
+  before the record is written (`identity_admin_audit_unavailable`).
+- Proof: the first `allowed` line in `JANUS_RUNTIME_AUTHORITY_AUDIT_FILE`
+  after the broker restarts. Keep the registry directory free of anything but
+  records and `.registry.lock`; keep backups elsewhere.
+
 Each newline-delimited JSON request is bounded to 16 KiB:
 
 ```json

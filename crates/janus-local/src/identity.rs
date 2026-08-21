@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -125,8 +125,41 @@ impl FileSubjectRegistry {
                 "subject review evidence is invalid",
             ));
         }
+        self.enroll_reviewed(
+            local_uid,
+            subject_class,
+            &fingerprint("janus-subject-review-v1", review),
+            now,
+        )
+    }
+
+    /// Enroll with a precomputed review fingerprint (signed review evidence,
+    /// JANUS-453). Evidence is single-use: a fingerprint already present in
+    /// any enrollment or revocation record is rejected as replayed.
+    pub(crate) fn enroll_reviewed(
+        &self,
+        local_uid: u32,
+        subject_class: ActorSubjectClass,
+        review_fingerprint: &str,
+        now: SystemTime,
+    ) -> JanusResult<ActorSubjectRef> {
+        if !valid_sha256(review_fingerprint) {
+            return Err(identity_error(
+                "subject_review_invalid",
+                "subject review fingerprint is invalid",
+            ));
+        }
         self.ensure_root()?;
         let _lock = self.lock()?;
+        if self
+            .review_fingerprints_unlocked()?
+            .contains(review_fingerprint)
+        {
+            return Err(identity_error(
+                "identity_review_replayed",
+                "review evidence was already consumed",
+            ));
+        }
         if self.records_unlocked()?.into_values().any(|record| {
             record.local_uid == local_uid && record.entry.status == SubjectRegistryStatus::Active
         }) {
@@ -152,7 +185,7 @@ impl FileSubjectRegistry {
             ),
             local_uid,
             enrolled_at_unix_secs: unix_secs(now)?,
-            review_fingerprint: fingerprint("janus-subject-review-v1", review),
+            review_fingerprint: review_fingerprint.to_string(),
         };
         write_new_private_json(
             &self.enrollment_path(&subject_ref),
@@ -175,8 +208,37 @@ impl FileSubjectRegistry {
                 "subject review evidence is invalid",
             ));
         }
+        self.revoke_reviewed(
+            subject_ref,
+            &fingerprint("janus-subject-revocation-review-v1", review),
+            now,
+        )
+    }
+
+    /// Revoke with a precomputed, single-use review fingerprint (JANUS-453).
+    pub(crate) fn revoke_reviewed(
+        &self,
+        subject_ref: &ActorSubjectRef,
+        review_fingerprint: &str,
+        now: SystemTime,
+    ) -> JanusResult<()> {
+        if !valid_sha256(review_fingerprint) {
+            return Err(identity_error(
+                "subject_review_invalid",
+                "subject review fingerprint is invalid",
+            ));
+        }
         self.ensure_root()?;
         let _lock = self.lock()?;
+        if self
+            .review_fingerprints_unlocked()?
+            .contains(review_fingerprint)
+        {
+            return Err(identity_error(
+                "identity_review_replayed",
+                "review evidence was already consumed",
+            ));
+        }
         let record = self
             .records_unlocked()?
             .get(subject_ref.as_str())
@@ -192,7 +254,7 @@ impl FileSubjectRegistry {
             schema_version: SUBJECT_SCHEMA,
             subject_ref: subject_ref.as_str().to_string(),
             revoked_at_unix_secs: unix_secs(now)?,
-            review_fingerprint: fingerprint("janus-subject-revocation-review-v1", review),
+            review_fingerprint: review_fingerprint.to_string(),
         };
         write_new_private_json(
             &self.revocation_path(subject_ref),
@@ -342,14 +404,57 @@ impl FileSubjectRegistry {
         Ok(records)
     }
 
+    /// Every review fingerprint already consumed by an enrollment or a
+    /// revocation. Used to make signed review evidence single-use.
+    fn review_fingerprints_unlocked(&self) -> JanusResult<BTreeSet<String>> {
+        let mut fingerprints = BTreeSet::new();
+        for entry in
+            fs::read_dir(&self.root).map_err(|_| unavailable("subject registry unavailable"))?
+        {
+            let entry = entry.map_err(|_| unavailable("subject registry unavailable"))?;
+            let name = entry
+                .file_name()
+                .into_string()
+                .map_err(|_| unavailable("subject registry entry malformed"))?;
+            if name == ".registry.lock" || !name.ends_with(".json") {
+                continue;
+            }
+            let record: serde_json::Value = read_private_json(&entry.path(), "subject record")?;
+            if let Some(value) = record
+                .get("review_fingerprint")
+                .and_then(serde_json::Value::as_str)
+            {
+                fingerprints.insert(value.to_string());
+            }
+        }
+        Ok(fingerprints)
+    }
+
     fn lock(&self) -> JanusResult<File> {
         let path = self.root.join(".registry.lock");
         let mut options = OpenOptions::new();
-        options.read(true).write(true).create(true).mode(0o600);
+        options
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .custom_flags(crate::identity_admin::private_open_flags());
         let file = options
             .open(&path)
             .map_err(|_| unavailable("subject registry lock unavailable"))?;
-        validate_private_empty_file(&path, "subject registry lock")?;
+        // Validate the opened descriptor, never the path again (TOCTOU).
+        let metadata = file
+            .metadata()
+            .map_err(|_| unavailable("subject registry lock unavailable"))?;
+        if !metadata.is_file()
+            || metadata.len() != 0
+            || metadata.permissions().mode() & 0o077 != 0
+            || metadata.uid() != crate::identity_admin::current_euid()
+            || metadata.nlink() != 1
+        {
+            return Err(unavailable("subject registry lock invalid"));
+        }
         file.lock_exclusive()
             .map_err(|_| unavailable("subject registry lock unavailable"))?;
         Ok(file)
@@ -1022,6 +1127,7 @@ fn validate_private_dir(metadata: &fs::Metadata) -> JanusResult<()> {
     if !metadata.is_dir()
         || metadata.file_type().is_symlink()
         || metadata.permissions().mode() & 0o077 != 0
+        || metadata.uid() != crate::identity_admin::current_euid()
     {
         return Err(unavailable("private identity directory invalid"));
     }
@@ -1054,19 +1160,29 @@ fn read_private_json<T: for<'de> Deserialize<'de>>(
 }
 
 fn read_private_bytes(path: &Path, kind: &'static str, maximum: usize) -> JanusResult<Vec<u8>> {
-    let metadata =
-        fs::symlink_metadata(path).map_err(|_| unavailable(format!("{kind} unavailable")))?;
+    // Open without following symlinks and validate the descriptor (fstat), so
+    // the file that is read is the file that was checked.
+    let mut options = OpenOptions::new();
+    options
+        .read(true)
+        .custom_flags(crate::identity_admin::private_open_flags());
+    let mut file = options
+        .open(path)
+        .map_err(|_| unavailable(format!("{kind} unavailable")))?;
+    let metadata = file
+        .metadata()
+        .map_err(|_| unavailable(format!("{kind} unavailable")))?;
     if !metadata.is_file()
-        || metadata.file_type().is_symlink()
         || metadata.len() == 0
         || metadata.len() > maximum as u64
         || metadata.permissions().mode() & 0o077 != 0
+        || metadata.uid() != crate::identity_admin::current_euid()
+        || metadata.nlink() != 1
     {
         return Err(unavailable(format!("{kind} invalid")));
     }
     let mut bytes = Vec::with_capacity(metadata.len() as usize);
-    File::open(path)
-        .and_then(|mut file| file.read_to_end(&mut bytes))
+    file.read_to_end(&mut bytes)
         .map_err(|_| unavailable(format!("{kind} unavailable")))?;
     Ok(bytes)
 }
@@ -1078,6 +1194,7 @@ fn validate_private_empty_file(path: &Path, kind: &'static str) -> JanusResult<(
         || metadata.file_type().is_symlink()
         || metadata.len() != 0
         || metadata.permissions().mode() & 0o077 != 0
+        || metadata.uid() != crate::identity_admin::current_euid()
     {
         return Err(unavailable(format!("{kind} invalid")));
     }
@@ -1095,13 +1212,24 @@ fn write_new_private_json<T: Serialize>(
 
 fn write_new_private_bytes(path: &Path, bytes: &[u8], kind: &'static str) -> JanusResult<()> {
     let mut options = OpenOptions::new();
-    options.write(true).create_new(true).mode(0o600);
+    options
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(crate::identity_admin::private_open_flags());
     let mut file = options
         .open(path)
         .map_err(|_| unavailable(format!("{kind} already exists or is unavailable")))?;
     file.write_all(bytes)
         .and_then(|_| file.sync_all())
-        .map_err(|_| unavailable(format!("{kind} persistence failed")))
+        .map_err(|_| unavailable(format!("{kind} persistence failed")))?;
+    // The directory entry must be durable too, not only the file contents.
+    let parent = path
+        .parent()
+        .ok_or_else(|| unavailable(format!("{kind} path invalid")))?;
+    File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|_| unavailable(format!("{kind} directory persistence failed")))
 }
 
 pub(crate) fn random_bytes<const N: usize>() -> JanusResult<[u8; N]> {
@@ -1125,7 +1253,7 @@ pub(crate) fn opaque_ref(prefix: &str, domain: &str, bytes: &[u8], length: usize
     format!("{prefix}{}", hex::encode(&digest[..length]))
 }
 
-fn fingerprint(domain: &str, bytes: &[u8]) -> String {
+pub(crate) fn fingerprint(domain: &str, bytes: &[u8]) -> String {
     format!("sha256:{}", hex::encode(digest(domain, bytes)))
 }
 
@@ -1147,7 +1275,7 @@ fn valid_sha256(value: &str) -> bool {
     })
 }
 
-fn unix_secs(time: SystemTime) -> JanusResult<u64> {
+pub(crate) fn unix_secs(time: SystemTime) -> JanusResult<u64> {
     time.duration_since(UNIX_EPOCH)
         .map(|value| value.as_secs())
         .map_err(|_| unavailable("identity time invalid"))

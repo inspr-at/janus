@@ -44,7 +44,7 @@ try:
 finally:
     subprocess.run(["docker", "rm", "-f", container], check=False, capture_output=True)
 
-for binary in ("janusd", "janusd-use", "janusd-admin", "janusd-web-transactiond", "janusd-dynamic-custodyd", "janusd-dynamic-deliveryd", "janusd-dynamic-transportd", "janusd-identityd", "janus-host-executor", "janus-warden"):
+for binary in ("janusd", "janusd-use", "janusd-admin", "janusd-web-transactiond", "janusd-dynamic-custodyd", "janusd-dynamic-deliveryd", "janusd-dynamic-transportd", "janusd-identityd", "janusd-identity-admin", "janus-host-executor", "janus-warden"):
     path = f"/usr/local/bin/{binary}"
     member = members.get(path)
     if member is None or not member.isfile() or member.mode & 0o111 == 0:

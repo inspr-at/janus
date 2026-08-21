@@ -275,6 +275,82 @@ pub fn startup_failure_reason_code(error: &anyhow::Error) -> &'static str {
     "identity_startup_failed"
 }
 
+/// `janusd-identity-admin`: offline, authority-side registry administration
+/// (JANUS-453). Verbs: `enroll|revoke --review-evidence-file FILE`, `list`,
+/// `review-keys --signing-key-file K --verifying-key-file P`, and
+/// `review-sign --request-file R --signing-key-file K --out FILE`.
+pub fn run_identity_admin(args: &[String]) -> Result<()> {
+    let args = args.iter().map(String::as_str).collect::<Vec<_>>();
+    let now = SystemTime::now();
+    let rendered = match args.as_slice() {
+        [verb @ ("enroll" | "revoke"), "--review-evidence-file", evidence] => {
+            let admin = identity_admin_from_env()?;
+            let outcome = if *verb == "enroll" {
+                admin.enroll(Path::new(evidence), now)
+            } else {
+                admin.revoke(Path::new(evidence), now)
+            }?;
+            serde_json::to_string(&outcome)?
+        }
+        ["list"] => serde_json::to_string(&identity_admin_from_env()?.list()?)?,
+        ["review-keys", "--signing-key-file", signing, "--verifying-key-file", verifying] => {
+            let reviewer_key_ref =
+                janus_local::provision_review_keys(Path::new(signing), Path::new(verifying))?;
+            serde_json::json!({
+                "schema_version": 1,
+                "ok": true,
+                "action": "review-keys",
+                "reviewer_key_ref": reviewer_key_ref,
+                "value_returned": false
+            })
+            .to_string()
+        }
+        ["review-sign", "--request-file", request, "--signing-key-file", signing, "--out", out] => {
+            serde_json::to_string(&janus_local::sign_review_request(
+                Path::new(request),
+                Path::new(signing),
+                Path::new(out),
+                now,
+            )?)?
+        }
+        _ => {
+            return Err(anyhow::Error::from(JanusError::policy_denied(
+                "identity_admin_usage_denied",
+                "usage: enroll|revoke --review-evidence-file FILE | list | review-keys --signing-key-file K --verifying-key-file P | review-sign --request-file R --signing-key-file K --out FILE",
+            )));
+        }
+    };
+    println!("{rendered}");
+    Ok(())
+}
+
+fn identity_admin_from_env() -> Result<janus_local::IdentityAdmin> {
+    let registry_root = env::var("JANUS_IDENTITY_REGISTRY_ROOT")
+        .context("JANUS_IDENTITY_REGISTRY_ROOT is required")?;
+    let trust_domain = env::var("JANUS_IDENTITY_TRUST_DOMAIN")
+        .context("JANUS_IDENTITY_TRUST_DOMAIN is required")?;
+    let verifying_key = env::var("JANUS_IDENTITY_REVIEW_VERIFYING_KEY_FILE")
+        .context("JANUS_IDENTITY_REVIEW_VERIFYING_KEY_FILE is required")?;
+    let audit_file = env::var("JANUS_IDENTITY_ADMIN_AUDIT_FILE")
+        .context("JANUS_IDENTITY_ADMIN_AUDIT_FILE is required")?;
+    let posture =
+        match env::var_os("JANUS_ACCOUNTABILITY_CONFIG_FILE").filter(|value| !value.is_empty()) {
+            Some(config) => janus_local::PostureSource::ConfigFile(PathBuf::from(config)),
+            None => janus_local::PostureSource::Explicit(
+                env::var("JANUS_ACCOUNTABILITY_POSTURE").context(
+                    "JANUS_ACCOUNTABILITY_CONFIG_FILE or JANUS_ACCOUNTABILITY_POSTURE is required",
+                )?,
+            ),
+        };
+    Ok(janus_local::IdentityAdmin::new(
+        registry_root,
+        trust_domain,
+        Path::new(&verifying_key),
+        audit_file,
+        posture,
+    )?)
+}
+
 pub async fn run_identity_shadow_service() -> Result<()> {
     let socket = env::var("JANUS_IDENTITY_SOCKET").context("JANUS_IDENTITY_SOCKET is required")?;
     let registry_root = env::var("JANUS_IDENTITY_REGISTRY_ROOT")
@@ -300,6 +376,20 @@ pub async fn run_identity_shadow_service() -> Result<()> {
     let signing_key =
         janus_local::load_or_create_identity_signing_key(Path::new(&signing_key_file))
             .context("identity signing key unavailable")?;
+    // Shared lifecycle lock: while the broker runs, `janusd-identity-admin`
+    // mutations fail closed with identity_broker_running (JANUS-453). A lock
+    // that cannot be created is reported but never stops the broker; the
+    // administrator, not the broker, fails closed in that case.
+    let _lifecycle_lock = match janus_local::hold_shared_lifecycle_lock(Path::new(&registry_root)) {
+        Ok(lock) => Some(lock),
+        Err(error) => {
+            eprintln!(
+                "janusd-identityd lifecycle lock unavailable reason_code={} value_returned=false",
+                startup_failure_reason_code(&anyhow::Error::from(error))
+            );
+            None
+        }
+    };
     let registry = janus_local::FileSubjectRegistry::new(registry_root, trust_domain);
     let duty_manifest_file = env::var("JANUS_DUTY_SURFACE_MANIFEST")
         .context("JANUS_DUTY_SURFACE_MANIFEST is required")?;
@@ -312,6 +402,20 @@ pub async fn run_identity_shadow_service() -> Result<()> {
             .context("JANUS_ACCOUNTABILITY_POSTURE is required")?,
     )
     .context("accountability posture denied")?;
+    if let Some(config_file) =
+        env::var_os("JANUS_ACCOUNTABILITY_CONFIG_FILE").filter(|value| !value.is_empty())
+    {
+        // The pinned configuration and the explicit variable must agree; the
+        // administrator consumes the same file (JANUS-453).
+        let pinned = janus_local::load_accountability_config(Path::new(&config_file))
+            .context("accountability config denied")?;
+        if pinned != posture {
+            return Err(anyhow::Error::from(JanusError::policy_denied(
+                "runtime_authority_posture_config_mismatch",
+                "explicit posture does not match the pinned accountability configuration",
+            )));
+        }
+    }
     let runtime_audience = env::var("JANUS_RUNTIME_AUTHORITY_AUDIENCE")
         .context("JANUS_RUNTIME_AUTHORITY_AUDIENCE is required")?;
     let runtime_verifying_key_file = env::var("JANUS_RUNTIME_AUTHORITY_VERIFYING_KEY_FILE")

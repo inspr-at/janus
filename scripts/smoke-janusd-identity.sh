@@ -23,40 +23,63 @@ trap cleanup EXIT
 mkdir -p "${fixture}/registry" "${fixture}/run" "${fixture}/state"
 chmod 0700 "${fixture}/registry" "${fixture}/run" "${fixture}/state"
 
-python3 - "${fixture}/registry" <<'PY'
-import hashlib
+identity_admin_bin="${JANUSD_IDENTITY_ADMIN_BIN:-${repo}/target/debug/janusd-identity-admin}"
+[[ -x "${identity_admin_bin}" ]] || {
+  echo "janusd-identity-admin binary is not executable" >&2
+  exit 1
+}
+mkdir -p "${fixture}/review"
+chmod 0700 "${fixture}/review"
+
+# Enrollment goes through the reviewed, offline administrator (JANUS-453):
+# reviewer keys, a signed operation-bound request, then `enroll` while the
+# broker is not running. No hand-written registry JSON.
+export JANUS_IDENTITY_REGISTRY_ROOT="${fixture}/registry"
+export JANUS_IDENTITY_TRUST_DOMAIN="smoke-host"
+export JANUS_IDENTITY_REVIEW_VERIFYING_KEY_FILE="${fixture}/review/reviewer.pub"
+export JANUS_IDENTITY_ADMIN_AUDIT_FILE="${fixture}/state/identity-admin.jsonl"
+export JANUS_ACCOUNTABILITY_POSTURE="accountability_legacy"
+"${identity_admin_bin}" review-keys \
+  --signing-key-file "${fixture}/review/reviewer.key" \
+  --verifying-key-file "${JANUS_IDENTITY_REVIEW_VERIFYING_KEY_FILE}" >/dev/null
+python3 - "${fixture}/review/enroll.request.json" <<'PY'
 import json
 import os
-import pathlib
 import sys
-import time
 
-root = pathlib.Path(sys.argv[1])
-subject = "act_11111111111111111111111111111111"
-
-def fingerprint(domain: str, value: bytes) -> str:
-    digest = hashlib.sha256()
-    encoded = domain.encode()
-    digest.update(len(encoded).to_bytes(8, "big"))
-    digest.update(encoded)
-    digest.update(len(value).to_bytes(8, "big"))
-    digest.update(value)
-    return "sha256:" + digest.hexdigest()
-
-record = {
+request = {
     "schema_version": 1,
-    "subject_ref": subject,
-    "subject_class": "human",
-    "trust_adapter": "local_peer",
-    "trust_domain_fingerprint": fingerprint("janus-identity-trust-domain-v1", b"smoke-host"),
+    "verb": "enroll",
+    "trust_domain": "smoke-host",
     "local_uid": os.getuid(),
-    "enrolled_at_unix_secs": int(time.time()),
-    "review_fingerprint": fingerprint("janus-subject-review-v1", b"synthetic-smoke-review"),
+    "subject_class": "human",
+    "ttl_seconds": 600,
+    "reviewer": "synthetic-smoke-review",
 }
-path = root / f"{subject}.json"
-path.write_text(json.dumps(record, separators=(",", ":")), encoding="utf-8")
-path.chmod(0o600)
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    json.dump(request, handle, separators=(",", ":"))
 PY
+"${identity_admin_bin}" review-sign \
+  --request-file "${fixture}/review/enroll.request.json" \
+  --signing-key-file "${fixture}/review/reviewer.key" \
+  --out "${fixture}/review/enroll.evidence.json" >/dev/null
+enrolled="$("${identity_admin_bin}" enroll --review-evidence-file "${fixture}/review/enroll.evidence.json")"
+subject_ref="$(python3 - "${enrolled}" <<'PY'
+import json
+import sys
+
+outcome = json.loads(sys.argv[1])
+if not outcome["ok"] or outcome["status"] != "active" or outcome["value_returned"] is not False:
+    raise SystemExit("identity admin enrollment outcome broadened")
+if "local_uid" in sys.argv[1]:
+    raise SystemExit("identity admin outcome leaked the local uid")
+print(outcome["subject_ref"])
+PY
+)"
+[[ "${subject_ref}" == act_* ]] || {
+  echo "identity admin did not mint an opaque subject ref" >&2
+  exit 1
+}
 
 export JANUS_IDENTITY_SOCKET="${fixture}/run/identity.sock"
 export JANUS_IDENTITY_REGISTRY_ROOT="${fixture}/registry"
@@ -131,7 +154,7 @@ done
   exit 1
 }
 
-python3 - "${JANUS_IDENTITY_SOCKET}" <<'PY'
+python3 - "${JANUS_IDENTITY_SOCKET}" "${subject_ref}" <<'PY'
 import json
 import socket
 import sys
@@ -157,7 +180,7 @@ for reply in (first, second):
     if reply["authority"] != "none" or reply["value_returned"] is not False:
         raise SystemExit("identity broker returned authority or a value")
     observation = reply["observation"]
-    if observation["subject_ref"] != "act_11111111111111111111111111111111":
+    if observation["subject_ref"] != sys.argv[2]:
         raise SystemExit("identity broker did not resolve the kernel-connected peer")
     if observation["posture"] != "identity_shadow_only" or observation["authority"] != "none":
         raise SystemExit("identity observation posture broadened")
@@ -221,6 +244,35 @@ PY
   exit 1
 }
 
+# While the broker runs, `list` works (shared lifecycle lock) and mutations
+# fail closed with identity_broker_running (JANUS-453).
+listed="$("${identity_admin_bin}" list)"
+python3 - "${listed}" "${subject_ref}" <<'PY'
+import json
+import sys
+
+outcome = json.loads(sys.argv[1])
+entries = outcome["entries"]
+if not any(entry["subject_ref"] == sys.argv[2] and entry["status"] == "active" for entry in entries):
+    raise SystemExit("identity admin list did not show the enrolled subject")
+if "local_uid" in sys.argv[1]:
+    raise SystemExit("identity admin list leaked a local uid")
+PY
+"${identity_admin_bin}" review-sign \
+  --request-file "${fixture}/review/enroll.request.json" \
+  --signing-key-file "${fixture}/review/reviewer.key" \
+  --out "${fixture}/review/enroll-2.evidence.json" >/dev/null
+if "${identity_admin_bin}" enroll --review-evidence-file "${fixture}/review/enroll-2.evidence.json" \
+  >/dev/null 2>"${fixture}/review/locked.stderr"; then
+  echo "identity admin mutated the registry while the broker was running" >&2
+  exit 1
+fi
+grep -q 'reason_code=identity_broker_running' "${fixture}/review/locked.stderr" || {
+  echo "identity admin did not report identity_broker_running" >&2
+  cat "${fixture}/review/locked.stderr" >&2 || true
+  exit 1
+}
+
 # Clean shutdown on SIGTERM exits 0 and unlinks the socket (JANUS-451).
 kill -TERM "${pid}"
 if wait "${pid}"; then
@@ -239,4 +291,31 @@ pid=""
   exit 1
 }
 
-echo "ok: identity shadow broker kernel_peer=derived caller_identity=denied runtime_denial=audited stale_socket=reclaimed shutdown=unlinked authority=none value_returned=false"
+# Consumed review evidence is single-use, and the administrator audit is
+# write-ahead, value-free, and complete.
+if "${identity_admin_bin}" enroll --review-evidence-file "${fixture}/review/enroll.evidence.json" \
+  >/dev/null 2>"${fixture}/review/replay.stderr"; then
+  echo "identity admin accepted replayed review evidence" >&2
+  exit 1
+fi
+grep -q 'reason_code=identity_review_replayed' "${fixture}/review/replay.stderr" || {
+  echo "identity admin did not report identity_review_replayed" >&2
+  cat "${fixture}/review/replay.stderr" >&2 || true
+  exit 1
+}
+python3 - "${JANUS_IDENTITY_ADMIN_AUDIT_FILE}" "${subject_ref}" <<'PY'
+import json
+import pathlib
+import sys
+
+lines = [json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines() if line.strip()]
+outcomes = [line["outcome"] for line in lines]
+if outcomes[:2] != ["authorized", "applied"]:
+    raise SystemExit(f"identity admin audit is not write-ahead: {outcomes!r}")
+if lines[1]["target_subject_ref"] != sys.argv[2] or lines[1]["action"] != "enroll":
+    raise SystemExit("identity admin audit does not bind the applied enrollment")
+if any("local_uid" in line or line.get("value_returned") is not False for line in lines):
+    raise SystemExit("identity admin audit broadened")
+PY
+
+echo "ok: identity shadow broker enrollment=janusd-identity-admin kernel_peer=derived caller_identity=denied runtime_denial=audited broker_lock=enforced replay=denied stale_socket=reclaimed shutdown=unlinked authority=none value_returned=false"

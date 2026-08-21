@@ -29,6 +29,7 @@ RUN set -eux; \
     cp target/release/janusd-dynamic-deliveryd /out/rootfs/usr/local/bin/janusd-dynamic-deliveryd; \
     cp target/release/janusd-dynamic-transportd /out/rootfs/usr/local/bin/janusd-dynamic-transportd; \
     cp target/release/janusd-identityd /out/rootfs/usr/local/bin/janusd-identityd; \
+    cp target/release/janusd-identity-admin /out/rootfs/usr/local/bin/janusd-identity-admin; \
     cp target/release/janus-host-executor /out/rootfs/usr/local/bin/janus-host-executor; \
     cp target/release/janus-warden /out/rootfs/usr/local/bin/janus-warden; \
     cp config/release-channels/v1.json /out/rootfs/etc/janus/release-channels-v1.json; \

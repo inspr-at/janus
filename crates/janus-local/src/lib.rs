@@ -14,6 +14,7 @@ mod break_glass;
 mod delegation;
 mod duty;
 mod identity;
+mod identity_admin;
 mod migration;
 mod recovery;
 mod release;
@@ -46,6 +47,12 @@ pub use identity::{
     verify_actor_observation, BrokerAuthenticatedActorV1, FileSubjectRegistry,
     IdentityBindingMigrationPreflightV1, IdentityObservationVerifier, IdentityShadowBroker,
     IdentityShadowReplyV1, IdentityShadowRequestV1, SubjectRegistryEntry, SubjectRegistryStatus,
+};
+pub use identity_admin::{
+    hold_shared_lifecycle_lock, lifecycle_lock_path, load_accountability_config,
+    provision_review_keys, reviewer_key_ref, sign_review_request, AccountabilityConfigV1,
+    IdentityAdmin, IdentityAdminAuditV1, IdentityAdminEntryV1, IdentityAdminOutcomeV1,
+    PostureSource, ReviewEnvelopeV1, ReviewRequestV1, ReviewSignOutcomeV1,
 };
 pub use migration::{enforce_migration_ready_from_env, ApprovalMigrationRunner, MigrationStatus};
 pub use recovery::{
