@@ -21,6 +21,11 @@ name = "janus-managed-host-agent"
 path = "src/bin/janus-managed-host-agent.rs"
 test = false
 
+[[bin]]
+name = "janus-paimos-dependency-reporter"
+path = "src/bin/janus-paimos-dependency-reporter.rs"
+test = false
+
 [dependencies]
 age = { version = "=0.12.1", default-features = false, features = ["ssh"] }
 base64 = "0.21"

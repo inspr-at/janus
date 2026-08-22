@@ -7,6 +7,10 @@ cd "${repo}"
 echo "==> janus engine release assurance: release documentation contract"
 python3 scripts/check-release-docs.py
 
+echo "==> janus engine release assurance: immutable Paimos external-stage v1 pins"
+python3 scripts/check-paimos-external-stage-pins.py --self-test
+python3 scripts/check-paimos-external-stage-pins.py
+
 echo "==> janus engine release assurance: trusted release admission fixtures"
 scripts/test-release-admission.sh
 
@@ -33,7 +37,7 @@ python3 scripts/run-adversarial-scenarios.py --self-test
 python3 scripts/run-adversarial-scenarios.py
 
 echo "==> janus engine release assurance: build smoke binaries"
-cargo build --locked -p janus-warden -p janusd
+cargo build --locked -p janus-host -p janus-warden -p janusd
 
 echo "==> janus engine release assurance: managed-service secret UX"
 python3 scripts/run-managed-service-ux-assurance.py --self-test
