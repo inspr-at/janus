@@ -7,6 +7,10 @@ cd "${repo}"
 echo "==> janus engine release assurance: release documentation contract"
 python3 scripts/check-release-docs.py
 
+echo "==> janus engine release assurance: immutable Paimos external-stage v1 pins"
+python3 scripts/check-paimos-external-stage-pins.py --self-test
+python3 scripts/check-paimos-external-stage-pins.py
+
 echo "==> janus engine release assurance: trusted release admission fixtures"
 scripts/test-release-admission.sh
 
