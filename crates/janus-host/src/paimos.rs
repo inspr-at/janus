@@ -984,9 +984,9 @@ fn absolute_path(value: &str) -> bool {
 mod tests {
     use std::collections::BTreeMap;
     use std::fs;
-    use std::io::{BufRead, BufReader, Read as _, Write as _};
+    use std::io::{BufRead, BufReader, Write as _};
     use std::net::{TcpListener, TcpStream};
-    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+    use std::os::unix::fs::PermissionsExt as _;
     use std::sync::{Arc, Mutex};
     use std::thread;
 
