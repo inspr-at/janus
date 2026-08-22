@@ -37,6 +37,10 @@ logs, or application code.
   caller-supplied `--value` argument.
 - **Lifecycle evidence** - state transitions, stale reports, destroy
   tombstones, finalization, and reconciliation remain value-free.
+- **Paimos dependency evidence** - a one-shot reporter can satisfy one exact
+  external-stage authorization or credential-handoff prerequisite without
+  taking ownership of specification, implementation, QA, deployment, or
+  verification.
 - **Pharos retirement** - a declared host-retirement flow disables approved
   use, quarantines generated outputs, and records durable evidence.
 - **Pharos verifier generations** - every beacon-token render publishes a
@@ -190,6 +194,7 @@ crates/
   janus-local/         local runtime integrations
   janus-warden/        reference-only MCP server
   janus-forge/         generated rotation and reviewed hooks
+  janus-host/          host executor, managed agent, and one-shot dependency reporter
   janus-mock/          in-memory test provider
   janusd/              hard-separated use and administration runtimes
 go-envelope/           shipped transitional Go envelope
@@ -242,7 +247,8 @@ The package installs `janusd-use`, `janusd-admin`,
 `janusd-web-transactiond`, `janusd-dynamic-custodyd`,
 `janusd-dynamic-deliveryd`, `janusd-dynamic-transportd`, `janusd-identityd`,
 `janusd-identity-admin`,
-`janus-host-executor`, `janus-managed-host-agent`, `janus-warden`, and the
+`janus-host-executor`, `janus-managed-host-agent`,
+`janus-paimos-dependency-reporter`, `janus-warden`, and the
 non-operational `janusd` migration helper for supported Linux systems. The
 private daemons have no CLI operations and accept only their reviewed local
 socket protocols; the legacy helper cannot run either plane's commands.
@@ -266,6 +272,8 @@ It exercises:
 - the private kernel-peer identity-shadow broker, caller-identity rejection,
   fresh request nonces, and authority-free output;
 - the approval-to-env-file operator flow;
+- the immutable Paimos v5.11.0 external-stage pins plus the dependency-only
+  reporter's strict binding, custody, and crash-replay contract;
 - create-only dynamic host acceptance, deterministic private aggregate
   materialization, exact pre-approved service reload, fresh health-gated active
   evidence, and interrupted-create recovery;
@@ -430,6 +438,78 @@ ordinary API. See the
 [`managed-service contract`](docs/managed-service-secret-contract.md),
 [`web ingress boundary`](docs/managed-secret-ingress.md), and
 [`typed transaction protocol`](docs/managed-web-transaction.md).
+
+### Paimos dependency evidence
+
+`janus-paimos-dependency-reporter` is a one-shot adapter for the Paimos
+external-stage v1 contract. Invoke it only after an existing reviewed Janus
+transaction has produced one positive, value-free `authorization` or
+`credential_handoff` fact. It accepts no arguments and reads one exact request
+from `/run/janus-paimos-dependency-reporter/config.json`.
+
+The root-owned config uses schema
+`inspr.janus.paimos-dependency-reporter-config.v1` and names only an HTTPS
+Paimos origin, handoff ID, separate API-key and handoff-secret files, a private
+journal directory, the expected dependency/stage/execution/lineage/authority/
+credential binding, and one evidence kind plus observation timestamp. The
+API-key file contains one whitespace-free `paimos_...` value. The handoff file
+contains exactly the 32 raw mint/rotate bytes. Both must be owner-only,
+single-link regular files owned by root and must not share an inode; the
+journal directory must be root-owned mode `0700`.
+
+The strict configuration shape is:
+
+```json
+{
+  "schema": "inspr.janus.paimos-dependency-reporter-config.v1",
+  "schema_version": 1,
+  "paimos_origin": "https://paimos.example",
+  "handoff_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+  "api_key_file": "/run/credentials/paimos-api-key",
+  "handoff_secret_file": "/run/credentials/paimos-handoff.bin",
+  "journal_directory": "/var/lib/janus/paimos-dependency-reporter",
+  "expected": {
+    "dependency_key": "privileged-handoff",
+    "stage_key": "deployment",
+    "execution_number": 1,
+    "plan_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    "predecessor_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+    "authority_epoch": 1,
+    "context_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+    "credential_epoch": 1,
+    "expires_at": "2026-08-22T12:00:00Z"
+  },
+  "evidence": {
+    "kind": "authorization",
+    "observed_at": "2026-08-22T11:55:00Z"
+  }
+}
+```
+
+`credential_handoff` is the only other evidence kind. Unknown fields, false
+evidence, and every nonterminal outcome are deliberately unrepresentable.
+
+The adapter first pulls and validates the complete safe binding, journals the
+exact accept body, sends accept sequence 1, journals the exact terminal body,
+then sends sequence 2 as `succeeded` with `heartbeat=false`. It has no active,
+waiting, heartbeat, owner, command, callback, URL, runtime-path, free-text, or
+secret-bearing report variant. Idempotency is a domain-separated UUID derived
+only from handoff ID, sequence, and the exact request-body SHA-256—not the
+credential epoch. A lost response is recovered from the fsynced mode-`0600`
+journal by replaying the identical bytes and key. Changed config, media,
+fixture/schema pin, reporter class/role, evidence ceiling, execution, lineage,
+authority, credential epoch, expiry, receipt, rotation/revocation, or sequence
+fails closed with a value-free reason code.
+
+This does not provision Paimos registrations, create/mint/rotate handoffs, or
+turn Paimos data into a Janus action. Paimos remains the authority for current
+API-key registration, handoff-secret validity, dependency isolation, and
+canonical delivery state. The immutable adapter tuple is schema major 1,
+Paimos `v5.11.0`, certified commit
+`e5f4c86bc061775c853d5847e8fb8bb7e3a31c34`, and fixture-set digest
+`sha256:0318f4025902c9d5dd790384950cc9daebb16e02e79a4a90ce7dddc673e68bed`;
+the exact released bytes live under `contracts/paimos-external-stage-v1/` and
+are checked by `scripts/check-paimos-external-stage-pins.py`.
 
 ### Service env file
 

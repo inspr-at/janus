@@ -37,7 +37,7 @@ python3 scripts/run-adversarial-scenarios.py --self-test
 python3 scripts/run-adversarial-scenarios.py
 
 echo "==> janus engine release assurance: build smoke binaries"
-cargo build --locked -p janus-warden -p janusd
+cargo build --locked -p janus-host -p janus-warden -p janusd
 
 echo "==> janus engine release assurance: managed-service secret UX"
 python3 scripts/run-managed-service-ux-assurance.py --self-test
