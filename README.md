@@ -190,8 +190,9 @@ membership semantics)**: project identity, profile membership, and
 `required`/`description` metadata. JANUS-448 (PR #94) lands the membership
 parity for that subset — default-profile inheritance with `inherit = false`,
 membership-only `[scopes]` filters, and the `dotenv://` URI form alongside
-the existing `dotenv:` form — together with its own field-by-field
-reference. See [`docs/secretspec-compatibility-boundary.md`](docs/secretspec-compatibility-boundary.md)
+the existing `dotenv:` form — together with its own
+[field-by-field reference](docs/secretspec-allowlist-subset.md). See
+[`docs/secretspec-compatibility-boundary.md`](docs/secretspec-compatibility-boundary.md)
 for the secretspec 0.20 landscape, the full rejected-field list and why each
 field is rejected, and the Janus position relative to upstream secretspec.
 
