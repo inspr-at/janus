@@ -2016,6 +2016,7 @@ AAAEADBJvjZT8X6JRJI8xVq/1aU8nMVgOtVnmdwqWwrSlXG3sKLqeplhpW+uObz5dvMgjz
             required: true,
             trust_level: TrustLevel::L1,
             allowed_uses: vec![ProfileId::new("profile.CANARY").unwrap()],
+            material_lifetime: None,
         }])
         .unwrap()
     }

@@ -8078,6 +8078,7 @@ mod tests {
             required: true,
             trust_level: TrustLevel::L1,
             allowed_uses: vec![profile_id.clone()],
+            material_lifetime: None,
             present: true,
         }];
         let config = ApproveIssueConfig {
@@ -8126,6 +8127,7 @@ mod tests {
             required: true,
             trust_level: TrustLevel::L1,
             allowed_uses: vec![profile_id.clone()],
+            material_lifetime: None,
             present: true,
         }];
         let config = ApproveIssueConfig {
@@ -8479,6 +8481,7 @@ mod tests {
             required: true,
             trust_level: TrustLevel::L1,
             allowed_uses: vec![profile_id],
+            material_lifetime: None,
         }];
         overlay
             .apply_to_entries_with_manifest_names(&mut entries, &manifest_names)
@@ -8788,6 +8791,7 @@ mod tests {
             required: true,
             trust_level: TrustLevel::L1,
             allowed_uses: vec![profile_id],
+            material_lifetime: None,
         }];
         overlay.apply_to_entries(&mut entries).unwrap();
         assert_eq!(entries[0].owner.as_ref().unwrap().as_str(), "security");
@@ -9878,6 +9882,7 @@ mod tests {
                 required: true,
                 trust_level: TrustLevel::L1,
                 allowed_uses: vec![profile_id.clone()],
+                material_lifetime: None,
             }])
             .unwrap();
             let store = MockStore::new(catalog)
@@ -10522,6 +10527,7 @@ mod tests {
             required: true,
             trust_level: TrustLevel::L1,
             allowed_uses: vec![profile_id.clone()],
+            material_lifetime: None,
         }])
         .unwrap();
         MockStore::new(catalog)
@@ -10580,6 +10586,7 @@ mod tests {
             required: true,
             trust_level: TrustLevel::L1,
             allowed_uses: vec![profile_id.clone()],
+            material_lifetime: None,
         }];
         SecretMetadataOverlay::load_toml_file(metadata_file)
             .unwrap()
@@ -10607,6 +10614,7 @@ mod tests {
                     required: true,
                     trust_level: TrustLevel::L1,
                     allowed_uses: vec![profile_id.clone()],
+                    material_lifetime: None,
                 })
                 .collect(),
         )
