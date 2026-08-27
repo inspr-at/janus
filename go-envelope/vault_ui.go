@@ -633,6 +633,7 @@ func (app *App) handleKnowledgePage(w http.ResponseWriter, r *http.Request) {
 	data["ActivePage"] = "knowledge"
 	data["KnowledgeTerms"] = knowledgeTerms()
 	data["KnowledgeFlows"] = knowledgeFlows()
+	data["RuntimeActionCount"] = knowledgeRuntimeActionCount()
 	renderTemplate(w, app.templates, "knowledge_page", data)
 }
 
