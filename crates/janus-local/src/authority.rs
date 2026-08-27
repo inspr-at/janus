@@ -176,6 +176,41 @@ impl RuntimeAuthorityBroker {
         cutover: Option<&AccountabilityCutoverV1>,
         audit: Box<dyn RuntimeAuthorityAudit>,
     ) -> JanusResult<Self> {
+        Self::new_with_subject_reachability(
+            registry,
+            identity_manifest,
+            duty_manifest,
+            signing_key,
+            operation_verifier,
+            journal,
+            posture,
+            scope,
+            audience,
+            release_digest,
+            ttl,
+            cutover,
+            audit,
+            crate::identity::prove_enforced_subject_reachability,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_with_subject_reachability(
+        registry: FileSubjectRegistry,
+        identity_manifest: IdentityTransportManifestV1,
+        duty_manifest: DutySurfaceManifestV1,
+        signing_key: SigningKey,
+        operation_verifier: OperationStateVerifier,
+        journal: Option<FileDutyJournal>,
+        posture: AccountabilityPosture,
+        scope: ScopeRef,
+        audience: &str,
+        release_digest: String,
+        ttl: Duration,
+        cutover: Option<&AccountabilityCutoverV1>,
+        audit: Box<dyn RuntimeAuthorityAudit>,
+        subject_reachability: impl FnOnce(&FileSubjectRegistry) -> JanusResult<bool>,
+    ) -> JanusResult<Self> {
         // Each startup precondition has its own value-free reason code so an
         // operator can tell a reformatted manifest from a bad audience or TTL
         // without reading the source (JANUS-450).
@@ -247,6 +282,12 @@ impl RuntimeAuthorityBroker {
                     return Err(authority_error(
                         "enforced_recorded_subjects_mismatch",
                         "enforced recorded subject registry does not match cutover evidence",
+                    ));
+                }
+                if !subject_reachability(&registry).unwrap_or(false) {
+                    return Err(authority_error(
+                        "enforced_recorded_subject_unreachable",
+                        "an enforced recorded subject cannot reach the identity socket",
                     ));
                 }
             }
@@ -1166,9 +1207,10 @@ mod tests {
 
     fn fixture(
         posture: AccountabilityPosture,
+        subjects_reachable: bool,
     ) -> (
         TempDir,
-        RuntimeAuthorityBroker,
+        JanusResult<RuntimeAuthorityBroker>,
         SigningKey,
         SigningKey,
         DutySurfaceManifestV1,
@@ -1224,7 +1266,7 @@ mod tests {
         })
         .to_string();
         let cutover = AccountabilityCutoverV1::parse_json(&cutover_text).unwrap();
-        let broker = RuntimeAuthorityBroker::new(
+        let broker = RuntimeAuthorityBroker::new_with_subject_reachability(
             registry,
             identity_manifest.clone(),
             duty_manifest.clone(),
@@ -1238,8 +1280,8 @@ mod tests {
             Duration::from_secs(60),
             (posture == AccountabilityPosture::EnforcedRecorded).then_some(&cutover),
             Box::<MemoryAudit>::default(),
-        )
-        .unwrap();
+            move |_registry| Ok(subjects_reachable),
+        );
         (
             directory,
             broker,
@@ -1248,6 +1290,24 @@ mod tests {
             duty_manifest,
             identity_manifest,
         )
+    }
+
+    #[test]
+    fn enforced_readiness_requires_every_counted_subject_to_be_reachable() {
+        let (_directory, unreachable, _, _, _, _) =
+            fixture(AccountabilityPosture::EnforcedRecorded, false);
+        let error = match unreachable {
+            Ok(_) => panic!("unreachable subject must fail enforced readiness"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            denial_reason_code(&error),
+            "enforced_recorded_subject_unreachable"
+        );
+
+        let (_directory, reachable, _, _, _, _) =
+            fixture(AccountabilityPosture::EnforcedRecorded, true);
+        assert!(reachable.is_ok());
     }
 
     #[test]
@@ -1265,7 +1325,8 @@ mod tests {
         let conflicts = SeparationPolicy::default().conflicts();
         for (index, conflict) in conflicts.iter().enumerate() {
             let (_directory, broker, _admission_key, domain_key, _, _) =
-                fixture(AccountabilityPosture::EnforcedRecorded);
+                fixture(AccountabilityPosture::EnforcedRecorded, true);
+            let broker = broker.unwrap();
             let lineage = format!("conflict-{index}");
             let now = UNIX_EPOCH + Duration::from_secs(100 + index as u64);
             let domain = [
@@ -1335,7 +1396,8 @@ mod tests {
     #[test]
     fn observation_records_conflict_without_claiming_enforcement() {
         let (_directory, broker, _, domain_key, _, _) =
-            fixture(AccountabilityPosture::AuthenticatedObserve);
+            fixture(AccountabilityPosture::AuthenticatedObserve, true);
+        let broker = broker.unwrap();
         let peer = RuntimePeerCredentials {
             uid: 501,
             gid: 20,
@@ -1371,7 +1433,9 @@ mod tests {
 
     #[test]
     fn legacy_still_authenticates_every_class_without_recorded_claim() {
-        let (_directory, broker, _, _, _, _) = fixture(AccountabilityPosture::AccountabilityLegacy);
+        let (_directory, broker, _, _, _, _) =
+            fixture(AccountabilityPosture::AccountabilityLegacy, true);
+        let broker = broker.unwrap();
         let peer = RuntimePeerCredentials {
             uid: 501,
             gid: 20,
@@ -1393,7 +1457,8 @@ mod tests {
     #[tokio::test]
     async fn socket_client_verifies_kernel_actor_signature_action_and_replay() {
         let (directory, authority, admission_key, _domain_key, duty_manifest, identity_manifest) =
-            fixture(AccountabilityPosture::EnforcedRecorded);
+            fixture(AccountabilityPosture::EnforcedRecorded, true);
+        let authority = authority.unwrap();
         let current_uid = current_uid();
         if current_uid != 501 {
             // Rebuild the registry fixture for the actual kernel peer used by

@@ -19,10 +19,40 @@ with the runtime and Warden catalogs.
   but do not deny.
 - `enforced_recorded`: the complete journal is verified and all nine conflict
   pairs deny for the same stable subject. Startup also requires exact cutover
-  evidence and at least two independently enrolled active subjects.
+  evidence and at least two independently enrolled, socket-reachable active
+  subjects.
 
 There is no missing-value default and no fallback. Clients check that the
 signed admission posture equals their configured posture.
+
+### Local multi-UID socket policy
+
+The reviewed multi-subject access model is a local Unix owner/group socket.
+`accountability_legacy` always retains the existing owner-only `0600` socket
+and one active system subject at the socket-owner UID. For a multi-UID observe
+or enforced deployment, `JANUS_IDENTITY_SOCKET_GROUP_ID` selects one
+operator-managed local group: the dedicated socket directory must be owned by
+the broker UID and that group with mode `0710`, and the socket is owned by the
+same pair with mode `0660`. There is no world access. Do not put registry,
+signing, audit, or other private files in the socket directory.
+
+The socket owner and members of the reviewed group may connect. Enrollment's
+private `local_uid` is reachable only when that kernel identity is the socket
+owner or the operating-system account database says it belongs to the socket
+group. `resolve_local_uid` still requires exactly one active subject for the
+kernel-observed peer UID; no request field participates. A group member that is
+not enrolled can reach the transport but receives the value-free
+`subject_not_enrolled` denial and gains no authority. Restart subject processes
+after group changes so their kernel supplementary-group set matches the
+reviewed account database before performing the per-subject connection proof.
+
+Group membership is transport reachability, not identity or authorization. An
+extra enrollment outside the group cannot exercise the broker and therefore is
+not independent evidence. Conversely, group membership alone never enrolls a
+subject. `SO_PEERCRED` remains the subject boundary, replies and audits do not
+reveal UID, PID, group, credential, secret, or filesystem path, and reason codes
+remain value-free. This is only local `AF_UNIX` transport; it creates no HTTP,
+remote Warden, forwarding, or reveal surface.
 
 ## Broker configuration
 
@@ -58,6 +88,9 @@ cycle. Its state must outlive the sidecar, its socket must not:
   `.registry.lock`, `<act_ref>.json`, and `<act_ref>.revoked.json`; any other
   entry (a backup, a note) makes the whole registry unavailable and every peer
   is denied. Keep backups elsewhere.
+- Keep a multi-UID socket in its own owner/group `0710` directory. Provision
+  the reviewed group before broker startup; the broker refuses an existing
+  directory or stale socket whose ownership or mode does not match the policy.
 - On start the broker reclaims a **dead** socket left by a previous instance —
   a real socket, owned like its private parent directory, refusing connections
   (probed up to ten times over half a second, so a predecessor that is still
@@ -116,9 +149,11 @@ before it serves and are printed by `janusd-identityd` as
 does not bind the loaded identity-transport manifest, usually a reformatted
 vendored JSON), `runtime_authority_surface_mismatch`,
 `runtime_authority_cutover_unexpected`, `enforced_recorded_not_ready`,
-`enforced_recorded_subjects_mismatch`, and `identity_socket_occupied` (the socket
-path holds a live broker, a symlink, a non-socket file, or a socket owned by
-another user; a dead socket left by a previous broker is reclaimed).
+`enforced_recorded_subjects_mismatch`,
+`enforced_recorded_subject_unreachable`, and `identity_socket_occupied` (the
+socket path holds a live broker, a symlink, a non-socket file, a socket owned by
+another user, or group-access metadata that does not match; a dead matching
+socket left by a previous broker is reclaimed).
 `janusd-identity-admin` (offline enrollment, see
 [`identity-shadow-runbook.md`](identity-shadow-runbook.md#first-host-enrollment-janusd-identity-admin))
 reports `identity_admin_caller_invalid`, `identity_registry_security_invalid`,
@@ -141,7 +176,10 @@ Before changing from observe to enforced:
 2. durably close or cancel every legacy authority operation so
    `active_legacy_operations` is zero—an empty new journal is not evidence;
 3. confirm at least two active enrolled subjects and complete the observation
-   window with no unexplained mapping or duty mismatch;
+   window with no unexplained mapping or duty mismatch. Count alone is not
+   evidence: for every active subject counted by cutover, verify that its exact
+   enrolled `local_uid` is the socket owner or a member of the reviewed socket
+   group, then connect as each subject UID and obtain a value-free broker reply;
 4. back up the subject registry, broker trust material, duty epochs/journal,
    index, and audit linkage as one release/scope-bound set;
 5. complete a restore rehearsal and record its fingerprint; and
@@ -150,7 +188,12 @@ Before changing from observe to enforced:
    trust-root recovery, and supported rollback actor/duty schemas.
 
 The broker independently verifies journal/index integrity, active subject
-count, and every cutover field at startup. Any mismatch blocks readiness.
+count, every cutover field, unique per-UID resolution, and operating-system
+owner/group reachability for every counted active subject at startup. A missing
+account, missing group membership, owner-only socket policy, or count mismatch
+blocks `enforced_recorded` readiness. The per-subject connection check remains
+the deployment proof before observe/enforced cutover; startup proves access
+policy coverage and does not substitute record count for reachability.
 
 ## Recovery and rollback
 
