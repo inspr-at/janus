@@ -1404,6 +1404,8 @@ form.managed-action-form .managed-source-choice {
 .knowledge-node { fill: var(--panel); stroke: currentColor; stroke-width: 2; }
 .knowledge-node-b { color: var(--amber); }
 .knowledge-pulse { fill: var(--teal); opacity: .75; }
+.knowledge-dash { fill: none; stroke: currentColor; stroke-width: 2; stroke-dasharray: 3 5; opacity: .35; }
+.knowledge-mark { fill: currentColor; opacity: .85; }
 .knowledge-values { grid-column: 1 / -1; display: grid; gap: 0; max-height: 330px; overflow: auto; border: 1px solid var(--hairline); border-radius: 8px; background: var(--panel-soft); }
 .knowledge-values div { display: grid; grid-template-columns: minmax(150px, .6fr) minmax(0, 1.4fr); gap: 12px; padding: 8px 10px; border-bottom: 1px solid var(--hairline); }
 .knowledge-values div:last-child { border-bottom: 0; }

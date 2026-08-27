@@ -1125,6 +1125,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "janus-distribute"
+version = "0.1.33"
+dependencies = [
+ "age",
+ "base64 0.21.7",
+ "ed25519-dalek",
+ "janus-core",
+ "janus-host",
+ "rand_core",
+ "serde",
+ "serde_json",
+ "ssh-key",
+ "tempfile",
+ "zeroize",
+]
+
+[[package]]
 name = "janus-executor"
 version = "0.1.33"
 dependencies = [
@@ -2278,9 +2295,11 @@ version = "0.6.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3b86f5297f0f04d08cabaa0f6bff7cb6aec4d9c3b49d87990d63da9d9156a8c3"
 dependencies = [
+ "ed25519-dalek",
  "p256",
  "p384",
  "p521",
+ "rand_core",
  "rsa",
  "sec1",
  "sha2",

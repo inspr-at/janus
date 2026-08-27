@@ -166,8 +166,8 @@ test("knowledge explains every governed workflow accessibly and without layout o
   await page.goto("/knowledge");
   await expect(page.getByRole("heading", { name: "Knowledge", exact: true })).toBeVisible();
   await expect(page.getByText("CODE-INVENTORIED FIELD GUIDE")).toBeVisible();
-  await expect(page.locator(".knowledge-term")).toHaveCount(21);
-  await expect(page.locator(".knowledge-illustration")).toHaveCount(21);
+  await expect(page.locator(".knowledge-term")).toHaveCount(22);
+  await expect(page.locator(".knowledge-illustration")).toHaveCount(22);
   await expect(page.locator(".flow-index-card")).toHaveCount(8);
   await expect(page.getByText("admin.dynamic_transport", { exact: true })).toBeVisible();
 

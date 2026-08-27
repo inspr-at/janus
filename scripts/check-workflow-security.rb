@@ -43,6 +43,18 @@ def active_step!(job, name)
   step
 end
 
+# JANUS-438: a small number of steps are deliberately conditional (the
+# go-only PR bypass for Rust engine assurance and Nix). Pin the exact
+# condition text so the gate cannot be silently loosened or removed while
+# still calling itself "conditional".
+def conditional_step!(job, name, expected_if)
+  step = step!(job, name)
+  require_gate(step["if"] == expected_if, "workflow_step_condition_mismatch:#{name}")
+  require_gate(step["continue-on-error"] != true, "workflow_step_nonblocking:#{name}")
+  require_gate(step["run"].is_a?(String), "workflow_step_has_no_command:#{name}")
+  step
+end
+
 def action!(job, repository)
   prefix = "#{repository}@"
   matches = job.fetch("steps").select do |step|
@@ -110,12 +122,113 @@ def validate(workflows)
   policy = active_step!(rust_fast, "release security policy and negative fixtures")
   command!(policy, "scripts/check-native-release-set.py --self-test")
   command!(policy, "scripts/report-rust-release-timing.py --self-test")
+  command!(policy, "scripts/classify-pr-paths.py --self-test")
+  command!(policy, "scripts/check-engine-assurance-inventory.py --self-test")
+  command!(policy, "scripts/report-pr-critical-path.py --self-test")
   before!(rust_fast, "verify installed dependency scanner versions", "release security policy and negative fixtures")
-  rust_assurance = job!(workflows.fetch(:rust), "check-assurance")
-  active_step!(rust_assurance, "engine release assurance gate")
+
+  # JANUS-438: classify + the go-only bypass on check-nix and the split
+  # engine-assurance jobs. The run/skip conditions are pinned exactly so a
+  # future edit cannot silently widen the bypass or drop a required check.
+  go_only_run_condition = "needs.classify.result != 'success' || needs.classify.outputs.go_only != 'true'"
+  go_only_skip_condition = "needs.classify.result == 'success' && needs.classify.outputs.go_only == 'true'"
+
+  rust_classify = job!(workflows.fetch(:rust), "classify")
+  require_gate(rust_classify["if"] == "github.event_name == 'pull_request'", "rust_classify_trigger_invalid")
+  classify_checkout = action!(rust_classify, "actions/checkout")
+  require_gate(classify_checkout.dig("with", "fetch-depth") == 0, "rust_classify_checkout_depth_invalid")
+  classify_step = active_step!(rust_classify, "classify changed paths")
+  require_gate(
+    command_lines(classify_step) == [
+      'python3 scripts/classify-pr-paths.py --base "${BASE_SHA}" --head "${HEAD_SHA}" --github-output "${GITHUB_OUTPUT}"'
+    ],
+    "rust_classify_command_invalid"
+  )
+  environment!(classify_step, "BASE_SHA", "${{ github.event.pull_request.base.sha }}")
+  environment!(classify_step, "HEAD_SHA", "${{ github.event.pull_request.head.sha }}")
+
   rust_nix = job!(workflows.fetch(:rust), "check-nix")
-  active_step!(rust_nix, "nix package")
+  require_gate(rust_nix["needs"] == "classify", "rust_nix_missing_classify_dependency")
+  require_gate(rust_nix["if"] == "always() && !cancelled()", "rust_nix_job_condition_invalid")
+  nix_step = conditional_step!(rust_nix, "nix package", go_only_run_condition)
+  command!(nix_step, "nix build .#janus-engine")
+  conditional_step!(rust_nix, "nix package not applicable (go-only change)", go_only_skip_condition)
+
+  rust_assurance_tests = job!(workflows.fetch(:rust), "check-assurance-tests")
+  require_gate(rust_assurance_tests["needs"] == "classify", "rust_assurance_tests_missing_classify_dependency")
+  require_gate(
+    rust_assurance_tests["if"] == "always() && !cancelled()",
+    "rust_assurance_tests_job_condition_invalid"
+  )
+  assurance_tests_step =
+    conditional_step!(rust_assurance_tests, "engine release assurance gate (tests)", go_only_run_condition)
+  command!(assurance_tests_step, "scripts/assure-engine-release.sh --phase tests")
+  environment!(assurance_tests_step, "JANUS_ENGINE_SMOKE_IMAGE", "janus-engine:minimization")
+  environment!(assurance_tests_step, "JANUS_ENGINE_SMOKE_SKIP_BUILD", "true")
+  minimization_build = step!(rust_assurance_tests, "build cache-backed minimization candidate")
+  require_gate(minimization_build["if"] == go_only_run_condition, "rust_minimization_build_condition_invalid")
+  require_gate(
+    minimization_build["uses"] ==
+      "docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8",
+    "rust_minimization_build_action_invalid"
+  )
+  require_gate(
+    minimization_build.dig("with", "tags") == "janus-engine:minimization",
+    "rust_minimization_build_tag_invalid"
+  )
+  require_gate(minimization_build.dig("with", "context") == ".", "rust_minimization_context_invalid")
+  require_gate(
+    minimization_build.dig("with", "file") == "Dockerfile.engine",
+    "rust_minimization_dockerfile_invalid"
+  )
+  require_gate(
+    minimization_build.dig("with", "platforms") == "linux/amd64",
+    "rust_minimization_platform_invalid"
+  )
+  require_gate(minimization_build.dig("with", "load") == true, "rust_minimization_load_invalid")
+  require_gate(
+    minimization_build.dig("with", "cache-from") == "type=gha,scope=rust-engine-linux-amd64",
+    "rust_minimization_cache_source_invalid"
+  )
+  conditional_step!(
+    rust_assurance_tests,
+    "engine release assurance gate (tests) not applicable (go-only change)",
+    go_only_skip_condition
+  )
+
+  rust_assurance_smoke = job!(workflows.fetch(:rust), "check-assurance-smoke")
+  require_gate(rust_assurance_smoke["needs"] == "classify", "rust_assurance_smoke_missing_classify_dependency")
+  require_gate(
+    rust_assurance_smoke["if"] == "always() && !cancelled()",
+    "rust_assurance_smoke_job_condition_invalid"
+  )
+  assurance_smoke_step =
+    conditional_step!(rust_assurance_smoke, "engine release assurance gate (smoke)", go_only_run_condition)
+  command!(assurance_smoke_step, "scripts/assure-engine-release.sh --phase smoke")
+  conditional_step!(
+    rust_assurance_smoke,
+    "engine release assurance gate (smoke) not applicable (go-only change)",
+    go_only_skip_condition
+  )
+
+  rust_assurance = job!(workflows.fetch(:rust), "check-assurance")
+  require_gate(rust_assurance["if"] == "always()", "rust_assurance_job_condition_invalid")
+  require_gate(
+    rust_assurance["needs"] == %w[check-assurance-tests check-assurance-smoke],
+    "rust_assurance_fan_in_missing_needs"
+  )
+  fan_in = active_step!(rust_assurance, "require both engine assurance proof families")
+  command!(fan_in, 'test "${TESTS}" = success')
+  command!(fan_in, 'test "${SMOKE}" = success')
+  inventory = active_step!(rust_assurance, "verify engine assurance phase inventory")
+  command!(inventory, "scripts/check-engine-assurance-inventory.py")
+
   rust_aggregate = job!(workflows.fetch(:rust), "check")
+  require_gate(rust_aggregate["if"] == "always()", "rust_aggregate_job_condition_invalid")
+  require_gate(
+    rust_aggregate["needs"] == %w[check-fast check-nix check-assurance image-amd64 image-arm64],
+    "rust_aggregate_missing_needs"
+  )
   active_step!(rust_aggregate, "require every Rust assurance boundary")
 
   rust_amd64 = job!(workflows.fetch(:rust), "image-amd64")
@@ -380,6 +493,50 @@ def self_test(workflows)
     "env"
   ]["JANUS_ENGINE_SMOKE_SKIP_BUILD"] = "false"
   expect_denied(native_rebuild, "rust_native_smoke_rebuilds") {}
+
+  # JANUS-438: the go-only bypass must never be loosened, and the split
+  # engine-assurance fan-in must never drop its completeness check.
+  classify_trigger_widened = deep_copy(workflows)
+  job!(classify_trigger_widened[:rust], "classify")["if"] = "true"
+  expect_denied(classify_trigger_widened, "rust_classify_trigger_invalid") {}
+
+  classify_command_widened = deep_copy(workflows)
+  step!(job!(classify_command_widened[:rust], "classify"), "classify changed paths")["run"] =
+    "python3 scripts/classify-pr-paths.py --files go-envelope/main.go"
+  expect_denied(classify_command_widened, "rust_classify_command_invalid") {}
+
+  classify_base_widened = deep_copy(workflows)
+  step!(job!(classify_base_widened[:rust], "classify"), "classify changed paths").fetch("env")[
+    "BASE_SHA"
+  ] = "${{ github.event.pull_request.head.sha }}"
+  expect_denied(classify_base_widened, "rust_classify_base_invalid") {}
+
+  nix_gate_loosened = deep_copy(workflows)
+  step!(job!(nix_gate_loosened[:rust], "check-nix"), "nix package")["if"] = "true"
+  expect_denied(nix_gate_loosened, "nix_gate_loosened") {}
+
+  nix_gate_removed = deep_copy(workflows)
+  job!(nix_gate_removed[:rust], "check-nix").fetch("steps").delete_if do |step|
+    step["name"] == "nix package not applicable (go-only change)"
+  end
+  expect_denied(nix_gate_removed, "nix_gate_removed") {}
+
+  assurance_smoke_gate_loosened = deep_copy(workflows)
+  step!(
+    job!(assurance_smoke_gate_loosened[:rust], "check-assurance-smoke"),
+    "engine release assurance gate (smoke)"
+  )["if"] = "true"
+  expect_denied(assurance_smoke_gate_loosened, "assurance_smoke_gate_loosened") {}
+
+  assurance_fan_in_missing_inventory = deep_copy(workflows)
+  job!(assurance_fan_in_missing_inventory[:rust], "check-assurance").fetch("steps").delete_if do |step|
+    step["name"] == "verify engine assurance phase inventory"
+  end
+  expect_denied(assurance_fan_in_missing_inventory, "assurance_fan_in_missing_inventory") {}
+
+  assurance_fan_in_missing_family = deep_copy(workflows)
+  job!(assurance_fan_in_missing_family[:rust], "check-assurance")["needs"] = ["check-assurance-tests"]
+  expect_denied(assurance_fan_in_missing_family, "assurance_fan_in_missing_family") {}
 end
 
 workflows = {

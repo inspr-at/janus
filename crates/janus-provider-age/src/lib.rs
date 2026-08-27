@@ -14,8 +14,8 @@ use age::{Decryptor, Encryptor};
 use async_trait::async_trait;
 use fs2::FileExt;
 use janus_core::{
-    load_secretspec_manifest_catalog, AuditAction, AuditEvent, AuditOutcome, AuditSink,
-    HealthStatus, JanusError, JanusResult, ManifestCatalog, PrincipalChain, ProjectId,
+    load_secretspec_manifest_catalog_with_membership_scope, AuditAction, AuditEvent, AuditOutcome,
+    AuditSink, HealthStatus, JanusError, JanusResult, ManifestCatalog, PrincipalChain, ProjectId,
     RotationOutcome, RotationSpec, RotationStrategy, ScopeRef, SecretDescriptor, SecretMeta,
     SecretMetadataOverlay, SecretName, SecretRef, SecretStore, SecretValue, Severity,
     StoreCapabilities,
@@ -564,6 +564,23 @@ pub struct AgeSecretStore {
     catalog: ManifestCatalog,
 }
 
+/// Store construction inputs for the age-backed Secretspec loaders.
+///
+/// Groups the profile/root/identity/recipient parameters that are otherwise
+/// unrelated to *which* manifest and scope are being loaded, so the loader
+/// functions stay under clippy's argument-count lint without dropping any
+/// parameter.
+pub struct AgeStoreTarget {
+    /// Secretspec profile selecting which declared secrets are in scope.
+    pub profile: String,
+    /// Directory holding the encrypted-at-rest age store for this scope.
+    pub root_dir: PathBuf,
+    /// Age identity files used to decrypt existing ciphertext.
+    pub identity_files: Vec<PathBuf>,
+    /// Age recipients used to encrypt new or rotated ciphertext.
+    pub recipients: Vec<String>,
+}
+
 struct StoreLock {
     file: File,
 }
@@ -743,9 +760,41 @@ impl AgeSecretStore {
         scope: ScopeRef,
         metadata: Option<&SecretMetadataOverlay>,
     ) -> JanusResult<Self> {
-        let profile = profile.into();
-        let (project, catalog) =
-            load_secretspec_manifest_catalog(config_path, &profile, &scope, metadata)?;
+        Self::load_from_secretspec_manifest_with_metadata_and_membership_scope(
+            config_path,
+            AgeStoreTarget {
+                profile: profile.into(),
+                root_dir: root_dir.into(),
+                identity_files,
+                recipients,
+            },
+            scope,
+            None,
+            metadata,
+        )
+    }
+
+    /// Load a `secretspec.toml` allowlist with optional metadata and membership filtering.
+    pub fn load_from_secretspec_manifest_with_metadata_and_membership_scope(
+        config_path: impl AsRef<Path>,
+        target: AgeStoreTarget,
+        scope: ScopeRef,
+        membership_scope: Option<&str>,
+        metadata: Option<&SecretMetadataOverlay>,
+    ) -> JanusResult<Self> {
+        let AgeStoreTarget {
+            profile,
+            root_dir,
+            identity_files,
+            recipients,
+        } = target;
+        let (project, catalog) = load_secretspec_manifest_catalog_with_membership_scope(
+            config_path,
+            &profile,
+            membership_scope,
+            &scope,
+            metadata,
+        )?;
 
         Self::from_catalog(
             project,
@@ -2280,6 +2329,7 @@ AAAEADBJvjZT8X6JRJI8xVq/1aU8nMVgOtVnmdwqWwrSlXG3sKLqeplhpW+uObz5dvMgjz
             required: true,
             trust_level: TrustLevel::L1,
             allowed_uses: vec![ProfileId::new("profile.CANARY").unwrap()],
+            material_lifetime: None,
         }])
         .unwrap()
     }

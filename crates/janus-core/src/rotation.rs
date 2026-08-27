@@ -20,6 +20,37 @@ pub enum RotationStrategy {
     Unsupported,
 }
 
+/// Reviewed, value-free renewal path for material Janus cannot regenerate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HumanRenewalProcedure {
+    /// Manual strategy; generated replacement is never offered.
+    pub strategy: RotationStrategy,
+    /// Stable reason code.
+    pub reason_code: &'static str,
+    /// Stable human action hint.
+    pub action: &'static str,
+    /// Review is required before updated material metadata is accepted.
+    pub review_required: bool,
+    /// Secret values are never returned by this procedure.
+    pub value_returned: bool,
+}
+
+impl RotationStrategy {
+    /// Expose a reviewed issuer-renewal procedure only for manual material.
+    pub fn human_renewal_procedure(self) -> Option<HumanRenewalProcedure> {
+        if self != Self::Manual {
+            return None;
+        }
+        Some(HumanRenewalProcedure {
+            strategy: Self::Manual,
+            reason_code: "external_material_requires_manual_renewal",
+            action: "renew_with_issuer_then_review_lifetime_metadata",
+            review_required: true,
+            value_returned: false,
+        })
+    }
+}
+
 /// Rotation lifecycle phase.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RotationPhase {
@@ -320,5 +351,23 @@ mod tests {
         )]));
         let decision = planner.plan_generated(&secret_ref, &capabilities());
         assert!(matches!(decision, RotationDecision::Safe(_)));
+    }
+
+    #[test]
+    fn manual_material_exposes_human_renewal_not_generated_rotation() {
+        let procedure = RotationStrategy::Manual.human_renewal_procedure().unwrap();
+        assert_eq!(procedure.strategy, RotationStrategy::Manual);
+        assert!(procedure.review_required);
+        assert!(!procedure.value_returned);
+        assert_eq!(
+            procedure.action,
+            "renew_with_issuer_then_review_lifetime_metadata"
+        );
+        assert!(RotationStrategy::Generated
+            .human_renewal_procedure()
+            .is_none());
+        assert!(RotationStrategy::Unsupported
+            .human_renewal_procedure()
+            .is_none());
     }
 }

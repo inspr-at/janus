@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "owner": "JANUS-438",
+  "reviewed_on": "2026-08-27",
+  "script_sha256": "b66d92b403d8324e8ff893ab4dee8d3ee696ba56c0ad711d79bdebbb95ea7ed6",
+  "phases": [
+    { "slug": "release-docs", "group": "tests", "label": "release documentation contract", "commands_sha256": "16ee9889bc2577c35c133208c4ef8d6cccfa3501828f2ea2e3ef81ddbbc1d374" },
+    { "slug": "external-stage-pins", "group": "tests", "label": "immutable Paimos external-stage v1 pins", "commands_sha256": "8eb2fe0ac9e7dfb865b0d72184108ab15aa9bc7ddd7fb0de9ffc7739703c372f" },
+    { "slug": "release-admission", "group": "tests", "label": "trusted release admission fixtures", "commands_sha256": "c74ea0512dd91682b086527de70ab0a1e32a6c57dbca78a87ecab40b182eea95" },
+    { "slug": "endpoint-policy", "group": "tests", "label": "closed runtime endpoint policy matrix", "commands_sha256": "db796dba3573e3defdea43cfc8ecf723685ab30ee0c4c7f18f2e293a151f6d77" },
+    { "slug": "duty-journal-boundary", "group": "tests", "label": "durable duty authority boundary", "commands_sha256": "0df26d43dc2b59c3cdf8f46b0a9ebf43abce3caac08b174346801553a476ce78" },
+    { "slug": "security-properties", "group": "tests", "label": "bounded security properties", "commands_sha256": "6b92036988653a9c2bec5ed0561c723225cafa8655bd80fb797c9218aae66d8d" },
+    { "slug": "minimization-self-test", "group": "tests", "label": "minimization proof runner", "commands_sha256": "f9d5746806d4ba480dfb928c2b11cba4df5587703d36dc9a7ab4725592cb3822" },
+    { "slug": "adversarial-scenarios", "group": "tests", "label": "reviewed adversarial recovery corpus", "commands_sha256": "75c9007d756189662cdf0e05317945da8d254c90391962f1a1eea04f298b3962" },
+    { "slug": "cargo-test-all", "group": "tests", "label": "cargo tests", "commands_sha256": "7ba6d4c250a23e19f82c7d69fb88e447a6c92cefa15ead684e30056a5736c825" },
+    { "slug": "minimization-rust", "group": "tests", "label": "cross-surface Rust minimization proof", "commands_sha256": "8c5cf01e6b70733fdc75ae88f0286da1d74c17d70a5b5c6707fc99280d0411e8" },
+    { "slug": "build-smoke-binaries", "group": "smoke", "label": "build smoke binaries", "commands_sha256": "6fa79899b2fe7d2dfbcb34248c5e021a68c924c1d20af2f3cf4161fe110ffb47" },
+    { "slug": "managed-service-ux-rust", "group": "smoke", "label": "managed-service secret UX", "commands_sha256": "ac68624f1c1b68e13bfbb6a984acf2209f436cadf2f0b1beb5ec824b16db5985" },
+    { "slug": "runtime-planes-smoke", "group": "smoke", "label": "runtime process-plane boundary smoke", "commands_sha256": "5a1a0894c012d372eacc750a15b40e98406645a334dfb39d6e1a75e1018edd52" },
+    { "slug": "identity-smoke", "group": "smoke", "label": "authenticated actor identity-shadow smoke", "commands_sha256": "68bfb8c09ba5703be8a6eb61c2d638b0b3684216def2db2032ef49b47beef6ed" },
+    { "slug": "warden-mcp-smoke", "group": "smoke", "label": "local Warden MCP smoke", "commands_sha256": "40d00a9130d17f22347a545269973a41f778fabefa169f0659f31076fd05e001" },
+    { "slug": "env-file-smoke", "group": "smoke", "label": "split-plane env-file smoke", "commands_sha256": "a8e3bfcd29c45a157262c8d519275cd0303a4ce5e3142cbc9379add18002b968" },
+    { "slug": "migration-smoke", "group": "smoke", "label": "local janusd-admin migration smoke", "commands_sha256": "ff8305f8da54c1c9d83ece691c9a114eeb571677c3050aba549b2db051bc5bd9" },
+    { "slug": "scope-transfer-smoke", "group": "smoke", "label": "local janusd-admin scope-transfer smoke", "commands_sha256": "6a594508c6c909a2c1b3bd0f7ca7cb3dbff52c3c1b63b68e505bea7a8f036d43" },
+    { "slug": "recovery-drill-smoke", "group": "smoke", "label": "sealed clean-state recovery-drill smoke", "commands_sha256": "7cf31a17622b757f510299eb4e1f9e444406887e9dd20f987b9be7dc2c0843f9" },
+    { "slug": "retention-smoke", "group": "smoke", "label": "offline retention quarantine and purge smoke", "commands_sha256": "64166f9946454ab5715c945fae2bafd9c70392f8457af998b8776c05ec1da2f5" },
+    { "slug": "lifecycle-entry-smoke", "group": "smoke", "label": "local janusd-admin lifecycle-entry smoke", "commands_sha256": "abb027bf47a4fd35026f974be6b706fe2e3f6953c1f38166c706f05de559229a" },
+    { "slug": "lifecycle-queue-smoke", "group": "smoke", "label": "local janusd-admin lifecycle action queue smoke", "commands_sha256": "c22c93ca445ccb66c4c80139cf30dfa75df27d579c7ffbed785000e0e0e5d842" },
+    { "slug": "pharos-retirement-smoke", "group": "smoke", "label": "local Pharos retirement smoke", "commands_sha256": "2a91f5814884a3afac26bd670ad4846593f03d41bc7ea8d73462fb44074f1d67" }
+  ]
+}
