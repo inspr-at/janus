@@ -16,6 +16,7 @@ pub mod delegation;
 pub mod duty;
 pub mod error;
 pub mod identity;
+pub mod lifetime;
 pub mod managed_service;
 pub mod manifest;
 pub mod metadata;
@@ -81,6 +82,11 @@ pub use identity::{
     ACTOR_OBSERVATION_SCHEMA, IDENTITY_BINDING_MIGRATION_SCHEMA,
     IDENTITY_TRANSPORT_MANIFEST_SCHEMA, MAX_ACTOR_ASSERTION_TTL,
 };
+pub use lifetime::{
+    MaterialExpiryStatus, MaterialLifetime, MaterialLifetimeError, MaterialLifetimePolicy,
+    MaterialLifetimeProvenance, MaterialLifetimeReportRow, MaterialLifetimeReporter,
+    MaterialTimestamp,
+};
 pub use managed_service::{
     managed_contract_version_compatible, parse_managed_dynamic_environment_contract_fixture,
     parse_managed_service_contract_fixture, ManagedConsumerKind, ManagedDeclarationFingerprint,
@@ -103,7 +109,8 @@ pub use managed_service::{
     MAX_MANAGED_RESERVED_ENV_NAMES, MAX_MANAGED_SERVICE_CONTRACT_BYTES, MAX_SETUP_INTENT_TTL_SECS,
 };
 pub use manifest::{
-    load_secretspec_manifest_catalog, load_secretspec_manifest_secret_names, ManifestCatalog,
+    load_secretspec_manifest_catalog, load_secretspec_manifest_catalog_with_membership_scope,
+    load_secretspec_manifest_secret_names, ManifestCatalog,
 };
 pub use metadata::{SecretMetadataOverlay, SecretMetadataPatch};
 pub use migration::{MigrationCompatibility, MigrationManifest, MigrationPhase, MigrationRisk};
@@ -147,8 +154,8 @@ pub use roles::{
     ROLE_BINDING_SNAPSHOT_VERSION, ROLE_POLICY_SNAPSHOT_VERSION,
 };
 pub use rotation::{
-    RollbackPlan, RotationDecision, RotationOutcome, RotationPhase, RotationPlan, RotationPlanner,
-    RotationSpec, RotationStrategy, ValidationProbe,
+    HumanRenewalProcedure, RollbackPlan, RotationDecision, RotationOutcome, RotationPhase,
+    RotationPlan, RotationPlanner, RotationSpec, RotationStrategy, ValidationProbe,
 };
 pub use scope::{
     EnvironmentId, NamespaceId, OrganizationId, RepositoryId, ScopePathV1, ScopeRef, WorkloadId,

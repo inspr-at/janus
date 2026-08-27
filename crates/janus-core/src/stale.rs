@@ -346,6 +346,7 @@ mod tests {
             required: true,
             trust_level: TrustLevel::L1,
             allowed_uses: vec![ProfileId::new("profile.canary").unwrap()],
+            material_lifetime: None,
             present: true,
         }
     }
