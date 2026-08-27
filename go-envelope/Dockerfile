@@ -13,6 +13,8 @@ LABEL org.opencontainers.image.source="https://github.com/inspr-at/janus"
 LABEL org.opencontainers.image.licenses="AGPL-3.0-only"
 LABEL org.opencontainers.image.base.name="docker.io/library/alpine:3.22.5"
 LABEL org.opencontainers.image.base.digest="sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce"
+# CVE-2026-14456: libcrypto3/libssl3 3.5.8-r0
+RUN apk add --no-cache libcrypto3=3.5.8-r0 libssl3=3.5.8-r0
 RUN addgroup -S janus && adduser -S -G janus janus
 WORKDIR /app
 COPY --from=build /out/janus /app/janus

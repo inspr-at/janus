@@ -7,7 +7,8 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    JanusError, JanusResult, OwnerRef, SecretClass, SecretLifecycle, SecretMeta, SecretName,
+    JanusError, JanusResult, MaterialLifetime, MaterialLifetimeProvenance, MaterialTimestamp,
+    OwnerRef, SafeLabel, SecretClass, SecretLifecycle, SecretMeta, SecretName,
 };
 
 const MAX_METADATA_OVERLAY_BYTES: usize = 8 * 1024;
@@ -21,6 +22,8 @@ pub struct SecretMetadataPatch {
     pub classification: Option<SecretClass>,
     /// Lifecycle state.
     pub lifecycle: Option<SecretLifecycle>,
+    /// Reviewed value-free issuer material lifetime.
+    pub material_lifetime: Option<MaterialLifetime>,
 }
 
 impl SecretMetadataPatch {
@@ -34,6 +37,9 @@ impl SecretMetadataPatch {
         if let Some(lifecycle) = self.lifecycle {
             meta.lifecycle = lifecycle;
         }
+        if let Some(material_lifetime) = &self.material_lifetime {
+            meta.material_lifetime = Some(material_lifetime.clone());
+        }
     }
 
     fn to_toml(&self) -> SecretMetadataPatchTomlOut {
@@ -45,6 +51,25 @@ impl SecretMetadataPatch {
             lifecycle: self
                 .lifecycle
                 .map(|lifecycle| lifecycle.as_str().to_string()),
+            issued_at: self
+                .material_lifetime
+                .as_ref()
+                .and_then(|lifetime| lifetime.issued_at)
+                .map(MaterialTimestamp::to_utc_string),
+            not_after: self
+                .material_lifetime
+                .as_ref()
+                .map(|lifetime| lifetime.not_after.to_utc_string()),
+            issuer: self
+                .material_lifetime
+                .as_ref()
+                .and_then(|lifetime| lifetime.issuer.as_ref())
+                .map(|issuer| issuer.as_str().to_string()),
+            lifetime_provenance: self
+                .material_lifetime
+                .as_ref()
+                .and_then(|lifetime| lifetime.provenance)
+                .map(|provenance| provenance.as_str().to_string()),
         }
     }
 }
@@ -82,6 +107,10 @@ impl SecretMetadataOverlay {
                 owner: entry.owner,
                 classification: entry.classification,
                 lifecycle: entry.lifecycle,
+                issued_at: entry.issued_at,
+                not_after: entry.not_after,
+                issuer: entry.issuer,
+                lifetime_provenance: entry.lifetime_provenance,
             })?;
             if secrets.insert(name.clone(), patch).is_some() {
                 return Err(JanusError::InvalidManifest {
@@ -143,6 +172,25 @@ impl SecretMetadataOverlay {
                     lifecycle: patch
                         .lifecycle
                         .map(|lifecycle| lifecycle.as_str().to_string()),
+                    issued_at: patch
+                        .material_lifetime
+                        .as_ref()
+                        .and_then(|lifetime| lifetime.issued_at)
+                        .map(MaterialTimestamp::to_utc_string),
+                    not_after: patch
+                        .material_lifetime
+                        .as_ref()
+                        .map(|lifetime| lifetime.not_after.to_utc_string()),
+                    issuer: patch
+                        .material_lifetime
+                        .as_ref()
+                        .and_then(|lifetime| lifetime.issuer.as_ref())
+                        .map(|issuer| issuer.as_str().to_string()),
+                    lifetime_provenance: patch
+                        .material_lifetime
+                        .as_ref()
+                        .and_then(|lifetime| lifetime.provenance)
+                        .map(|provenance| provenance.as_str().to_string()),
                 })
                 .collect(),
         };
@@ -210,7 +258,59 @@ impl TryFrom<SecretMetadataPatchToml> for SecretMetadataPatch {
                 .as_deref()
                 .map(SecretLifecycle::parse)
                 .transpose()?,
+            material_lifetime: parse_reviewed_lifetime(
+                value.issued_at,
+                value.not_after,
+                value.issuer,
+                value.lifetime_provenance,
+            )?,
         })
+    }
+}
+
+fn parse_reviewed_lifetime(
+    issued_at: Option<String>,
+    not_after: Option<String>,
+    issuer: Option<String>,
+    provenance: Option<String>,
+) -> JanusResult<Option<MaterialLifetime>> {
+    let any_lifetime_field =
+        issued_at.is_some() || not_after.is_some() || issuer.is_some() || provenance.is_some();
+    if !any_lifetime_field {
+        return Ok(None);
+    }
+    let not_after = not_after.ok_or_else(|| JanusError::InvalidManifest {
+        detail: "material lifetime metadata requires not_after".to_string(),
+    })?;
+    let issued_at = issued_at
+        .as_deref()
+        .map(MaterialTimestamp::parse_utc)
+        .transpose()
+        .map_err(lifetime_manifest_error)?;
+    let not_after = MaterialTimestamp::parse_utc(&not_after).map_err(lifetime_manifest_error)?;
+    let issuer = issuer.map(SafeLabel::new).transpose()?;
+    let provenance = provenance
+        .as_deref()
+        .map(MaterialLifetimeProvenance::parse)
+        .transpose()
+        .map_err(lifetime_manifest_error)?
+        .unwrap_or(MaterialLifetimeProvenance::ReviewedManual);
+    if provenance != MaterialLifetimeProvenance::ReviewedManual {
+        return Err(JanusError::InvalidManifest {
+            detail: "manual metadata overlay requires reviewed_manual provenance".to_string(),
+        });
+    }
+    MaterialLifetime::new(issued_at, not_after, issuer, Some(provenance))
+        .map(Some)
+        .map_err(lifetime_manifest_error)
+}
+
+fn lifetime_manifest_error(error: crate::MaterialLifetimeError) -> JanusError {
+    JanusError::InvalidManifest {
+        detail: format!(
+            "material lifetime metadata invalid: {}",
+            error.reason_code()
+        ),
     }
 }
 
@@ -229,6 +329,10 @@ struct SecretMetadataPatchToml {
     owner: Option<String>,
     classification: Option<String>,
     lifecycle: Option<String>,
+    issued_at: Option<String>,
+    not_after: Option<String>,
+    issuer: Option<String>,
+    lifetime_provenance: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -238,6 +342,10 @@ struct SecretMetadataEntryToml {
     owner: Option<String>,
     classification: Option<String>,
     lifecycle: Option<String>,
+    issued_at: Option<String>,
+    not_after: Option<String>,
+    issuer: Option<String>,
+    lifetime_provenance: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -256,11 +364,25 @@ struct SecretMetadataPatchTomlOut {
     classification: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     lifecycle: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    issued_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    not_after: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    issuer: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lifetime_provenance: Option<String>,
 }
 
 impl SecretMetadataPatchTomlOut {
     fn is_empty(&self) -> bool {
-        self.owner.is_none() && self.classification.is_none() && self.lifecycle.is_none()
+        self.owner.is_none()
+            && self.classification.is_none()
+            && self.lifecycle.is_none()
+            && self.issued_at.is_none()
+            && self.not_after.is_none()
+            && self.issuer.is_none()
+            && self.lifetime_provenance.is_none()
     }
 }
 
@@ -273,6 +395,14 @@ struct SecretMetadataEntryTomlOut {
     classification: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     lifecycle: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    issued_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    not_after: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    issuer: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lifetime_provenance: Option<String>,
 }
 
 #[cfg(test)]
@@ -294,6 +424,7 @@ mod tests {
             required: true,
             trust_level: TrustLevel::L1,
             allowed_uses: vec![ProfileId::new("profile.canary").unwrap()],
+            material_lifetime: None,
         }
     }
 
@@ -476,5 +607,54 @@ mod tests {
             active.detach_destroyed_secret(&name),
             Err(JanusError::InvalidManifest { .. })
         ));
+    }
+
+    #[test]
+    fn reviewed_overlay_applies_and_round_trips_material_lifetime() {
+        let overlay = SecretMetadataOverlay::parse_toml(
+            r#"
+            [[secrets]]
+            name = "CANARY"
+            issued_at = "2026-01-01T00:00:00Z"
+            not_after = "2027-01-01T00:00:00Z"
+            issuer = "issuer_fixture"
+            lifetime_provenance = "reviewed_manual"
+            "#,
+        )
+        .unwrap();
+        let encoded = overlay.to_toml_string().unwrap();
+        let round_tripped = SecretMetadataOverlay::parse_toml(&encoded).unwrap();
+        let mut entries = vec![meta("CANARY")];
+
+        round_tripped.apply_to_entries(&mut entries).unwrap();
+
+        let lifetime = entries[0].material_lifetime.as_ref().unwrap();
+        assert_eq!(lifetime.not_after.to_utc_string(), "2027-01-01T00:00:00Z");
+        assert_eq!(
+            lifetime.provenance,
+            Some(MaterialLifetimeProvenance::ReviewedManual)
+        );
+    }
+
+    #[test]
+    fn reviewed_overlay_rejects_missing_and_malformed_dates_value_free() {
+        let missing = SecretMetadataOverlay::parse_toml(
+            r#"
+            [[secrets]]
+            name = "CANARY"
+            issuer = "issuer_fixture"
+            "#,
+        )
+        .unwrap_err();
+        assert!(matches!(missing, JanusError::InvalidManifest { .. }));
+
+        let marker = "malformed_fixture_marker";
+        let malformed = SecretMetadataOverlay::parse_toml(&format!(
+            "[[secrets]]\nname = \"CANARY\"\nnot_after = \"{marker}\"\n"
+        ))
+        .unwrap_err();
+        let rendered = malformed.to_string();
+        assert!(rendered.contains("material_lifetime_date_malformed"));
+        assert!(!rendered.contains(marker));
     }
 }
