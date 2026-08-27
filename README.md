@@ -48,7 +48,8 @@ logs, or application code.
   renders are serialized and retirement publishes host removal before it can
   complete.
 - **Backend portability** - the core contract is provider-neutral; the current
-  self-hosted path uses native age encryption and secretspec allowlists.
+  self-hosted path uses native age encryption and a secretspec-compatible
+  allowlist subset (revision 1.0, membership semantics).
 - **Split process planes** - `janusd-use` can consume permits but cannot
   administer Janus; `janusd-admin` can administer Janus but cannot consume a
   permit or render a secret-bearing output.
@@ -181,6 +182,18 @@ consumer / operator / AI agent
               v
      SecretStore provider
 ```
+
+### Secretspec compatibility
+
+Janus parses a **secretspec-compatible allowlist subset (revision 1.0,
+membership semantics)**: project identity, profile membership, and
+`required`/`description` metadata. JANUS-448 (PR #94) lands the membership
+parity for that subset — default-profile inheritance with `inherit = false`,
+membership-only `[scopes]` filters, and the `dotenv://` URI form alongside
+the existing `dotenv:` form — together with its own field-by-field
+reference. See [`docs/secretspec-compatibility-boundary.md`](docs/secretspec-compatibility-boundary.md)
+for the secretspec 0.20 landscape, the full rejected-field list and why each
+field is rejected, and the Janus position relative to upstream secretspec.
 
 ### Workspace map
 
