@@ -53,6 +53,12 @@ func TestKnowledgeInventoryCoversCodeVocabularies(t *testing.T) {
 	if !strings.Contains(secretspec.Detail, "value boundary") {
 		t.Fatalf("secretspec term must name the value boundary Janus enforces, got: %q", secretspec.Detail)
 	}
+	if !strings.Contains(secretspec.Detail, "profiles with inheritance and required defaults") {
+		t.Fatalf("secretspec term must describe the profile defaults Janus parses, got: %q", secretspec.Detail)
+	}
+	if !strings.Contains(secretspec.Detail, "optional scope membership") {
+		t.Fatalf("secretspec term must describe the scope membership Janus parses, got: %q", secretspec.Detail)
+	}
 }
 
 func TestKnowledgeRolesMatchSharedRoleMatrix(t *testing.T) {
