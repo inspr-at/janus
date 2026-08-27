@@ -1,10 +1,11 @@
 use std::fs;
-use std::io::Cursor;
+use std::io::{Cursor, Read};
 use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use age::secrecy::ExposeSecret;
+use ssh_key::{private::Ed25519Keypair, LineEnding};
 use tempfile::TempDir;
 
 use super::*;
@@ -22,6 +23,7 @@ const ENVIRONMENT_POLICY_FINGERPRINT: &str = "envpf_3f8d9a061c42";
 const DELIVERY_PROFILE_REF: &str = "delivery_2ed71ad75c98";
 const RELOAD_PROFILE_REF: &str = "reload_5e776ec5d9a1";
 const HEALTH_PROFILE_REF: &str = "health_84c12f390b2a";
+const RESEAL_HOST_REF: &str = "host_b4826de03a19";
 
 struct Fixture {
     _temporary: TempDir,
@@ -298,6 +300,85 @@ fn packet(
     .expect("seal packet")
 }
 
+fn reseal_binding() -> HostEnvelopeBindingV1 {
+    HostEnvelopeBindingV1 {
+        schema: PAYLOAD_SCHEMA.to_string(),
+        schema_version: SCHEMA_VERSION,
+        envelope_ref: "env_reseal00000001".to_string(),
+        operation_ref: "op_reseal00000001".to_string(),
+        host_ref: RESEAL_HOST_REF.to_string(),
+        service_ref: SERVICE_REF.to_string(),
+        slot_ref: SLOT_REF.to_string(),
+        secret_ref: SECRET_REF.to_string(),
+        scope_ref: SCOPE_REF.to_string(),
+        declaration_fingerprint: DECLARATION_REF.to_string(),
+        generation: 1,
+        revocation_epoch: 1,
+        issued_at_unix_secs: NOW - 10,
+        expires_at_unix_secs: NOW + 3600,
+    }
+}
+
+struct ResealSshFixture {
+    _temporary: TempDir,
+    identity_path: PathBuf,
+    recipient: String,
+}
+
+impl ResealSshFixture {
+    fn new() -> Self {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let mut seed = [0u8; 32];
+        fs::File::open("/dev/urandom")
+            .and_then(|mut random| random.read_exact(&mut seed))
+            .expect("generate fixture SSH identity seed");
+        let signing_key = SigningKey::from_bytes(&seed);
+        let mut keypair_bytes = [0u8; Ed25519Keypair::BYTE_SIZE];
+        keypair_bytes[..32].copy_from_slice(&seed);
+        keypair_bytes[32..].copy_from_slice(signing_key.verifying_key().as_bytes());
+        seed.zeroize();
+        let keypair =
+            Ed25519Keypair::from_bytes(&keypair_bytes).expect("construct fixture SSH identity");
+        keypair_bytes.zeroize();
+        let identity =
+            ssh_key::PrivateKey::new(keypair.into(), "").expect("generate fixture SSH identity");
+        let recipient = identity
+            .public_key()
+            .to_openssh()
+            .expect("encode fixture SSH recipient");
+        let encoded = identity
+            .to_openssh(LineEnding::LF)
+            .expect("encode fixture SSH identity");
+        let identity_path = temporary.path().join("ssh_host_ed25519_key");
+        fs::write(&identity_path, encoded.as_bytes()).expect("write fixture SSH identity");
+        fs::set_permissions(&identity_path, fs::Permissions::from_mode(0o600))
+            .expect("fixture SSH identity permissions");
+        Self {
+            _temporary: temporary,
+            identity_path,
+            recipient,
+        }
+    }
+}
+
+fn open_reseal_test_value(
+    packet: &[u8],
+    identity_path: &Path,
+    verifying_key: &VerifyingKey,
+) -> SecretValue {
+    let ciphertext = decode_reseal_source_ciphertext(packet, verifying_key)
+        .expect("decode fixture host envelope");
+    let owner_uid = fs::metadata(identity_path)
+        .expect("fixture identity metadata")
+        .uid();
+    let mut plaintext = decrypt_with_identity(&ciphertext, identity_path, owner_uid)
+        .expect("decrypt fixture host envelope");
+    let parsed = parse_plaintext(&plaintext);
+    plaintext.zeroize();
+    let (_, value) = parsed.expect("parse fixture host envelope");
+    value
+}
+
 fn now() -> SystemTime {
     UNIX_EPOCH + Duration::from_secs(NOW)
 }
@@ -330,6 +411,204 @@ fn quarantine_control(generation: u64) -> HostEnvelopeQuarantineControlV1 {
         generation,
         purge_not_before_unix_secs: NOW + 300,
     }
+}
+
+#[test]
+fn reseal_host_envelope_to_ssh_ed25519_recipient_without_reveal() {
+    let source = Fixture::new();
+    let target = ResealSshFixture::new();
+    let value: Vec<u8> = (0..64).map(|index| b'a' + (index % 26) as u8).collect();
+    let original = source.packet(1, &value);
+    let original_snapshot = original.clone();
+    let source_verifying_key = source.signing_key.verifying_key();
+
+    let resealed = reseal_host_envelope(HostEnvelopeResealRequest {
+        source_packet: &original,
+        local_identity_path: &source.identity_path,
+        source_verifying_key: &source_verifying_key,
+        binding: reseal_binding(),
+        host_recipient: &target.recipient,
+        signing_key_id: KEY_REF,
+        signing_key: &source.signing_key,
+    })
+    .expect("reseal fixture host envelope");
+
+    let source_value =
+        open_reseal_test_value(&original, &source.identity_path, &source_verifying_key);
+    let target_value = open_reseal_test_value(
+        &resealed.packet,
+        &target.identity_path,
+        &source_verifying_key,
+    );
+    let original_ciphertext = decode_reseal_source_ciphertext(&original, &source_verifying_key)
+        .expect("decode source fixture host envelope");
+    let target_owner_uid = fs::metadata(&target.identity_path)
+        .expect("fixture identity metadata")
+        .uid();
+    match decrypt_with_identity(
+        &original_ciphertext,
+        &target.identity_path,
+        target_owner_uid,
+    ) {
+        Ok(mut unexpected) => {
+            unexpected.zeroize();
+            panic!("target identity unexpectedly decrypted source packet");
+        }
+        Err(error) => assert_eq!(error.reason_code(), "host_envelope_decrypt_denied"),
+    }
+    assert!(
+        source_value.expose_bytes() == value.as_slice(),
+        "source envelope value bytes differ"
+    );
+    assert!(
+        target_value.expose_bytes() == value.as_slice(),
+        "resealed envelope value bytes differ"
+    );
+    assert!(original == original_snapshot, "source packet was modified");
+    assert!(
+        resealed.packet != original,
+        "reseal did not derive a new packet"
+    );
+    assert_eq!(resealed.outcome.action, "host.envelope.reseal");
+    assert!(resealed.outcome.changed);
+    assert!(!resealed.outcome.value_returned);
+
+    let value_text = std::str::from_utf8(&value).expect("fixture value is UTF-8");
+    let outcome_debug = format!("{:?}", resealed.outcome);
+    let outcome_json = serde_json::to_string(&resealed.outcome).expect("serialize reseal outcome");
+    let packet_json = std::str::from_utf8(&resealed.packet).expect("packet is JSON");
+    assert!(
+        !outcome_debug.contains(value_text)
+            && !outcome_json.contains(value_text)
+            && !packet_json.contains(value_text),
+        "reseal result formatting contained value bytes"
+    );
+}
+
+#[test]
+fn reseal_wrong_identity_fails_without_modifying_source_packet() {
+    let source = Fixture::new();
+    let wrong_identity = Fixture::new();
+    let target = ResealSshFixture::new();
+    let value: Vec<u8> = (0..48).map(|index| b'A' + (index % 26) as u8).collect();
+    let original = source.packet(1, &value);
+    let original_snapshot = original.clone();
+    let source_verifying_key = source.signing_key.verifying_key();
+
+    let result = reseal_host_envelope(HostEnvelopeResealRequest {
+        source_packet: &original,
+        local_identity_path: &wrong_identity.identity_path,
+        source_verifying_key: &source_verifying_key,
+        binding: reseal_binding(),
+        host_recipient: &target.recipient,
+        signing_key_id: KEY_REF,
+        signing_key: &source.signing_key,
+    });
+    let error = match result {
+        Ok(_) => panic!("wrong identity unexpectedly resealed packet"),
+        Err(error) => error,
+    };
+    assert_eq!(error.reason_code(), "host_envelope_decrypt_denied");
+    assert!(original == original_snapshot, "source packet was modified");
+}
+
+#[test]
+fn reseal_invalid_recipient_and_binding_fail_without_modifying_source_packet() {
+    let source = Fixture::new();
+    let value: Vec<u8> = (0..48).map(|index| b'0' + (index % 10) as u8).collect();
+    let original = source.packet(1, &value);
+    let original_snapshot = original.clone();
+    let source_verifying_key = source.signing_key.verifying_key();
+
+    let invalid_recipient = reseal_host_envelope(HostEnvelopeResealRequest {
+        source_packet: &original,
+        local_identity_path: &source.identity_path,
+        source_verifying_key: &source_verifying_key,
+        binding: reseal_binding(),
+        host_recipient: "invalid-recipient",
+        signing_key_id: KEY_REF,
+        signing_key: &source.signing_key,
+    });
+    let error = match invalid_recipient {
+        Ok(_) => panic!("invalid recipient unexpectedly resealed packet"),
+        Err(error) => error,
+    };
+    assert_eq!(error.reason_code(), "host_envelope_recipient_invalid");
+
+    let mut invalid_binding = reseal_binding();
+    invalid_binding.host_ref = "invalid".to_string();
+    let invalid_binding = reseal_host_envelope(HostEnvelopeResealRequest {
+        source_packet: &original,
+        local_identity_path: &source.identity_path,
+        source_verifying_key: &source_verifying_key,
+        binding: invalid_binding,
+        host_recipient: &source.recipient,
+        signing_key_id: KEY_REF,
+        signing_key: &source.signing_key,
+    });
+    let error = match invalid_binding {
+        Ok(_) => panic!("invalid binding unexpectedly resealed packet"),
+        Err(error) => error,
+    };
+    assert_eq!(error.reason_code(), "host_envelope_binding_invalid");
+    assert!(original == original_snapshot, "source packet was modified");
+}
+
+#[test]
+fn reseal_rejects_oversized_packet_and_secret_ref_mismatch() {
+    let source = Fixture::new();
+    let source_verifying_key = source.signing_key.verifying_key();
+    let invalid_result = reseal_host_envelope(HostEnvelopeResealRequest {
+        source_packet: b"{}",
+        local_identity_path: &source.identity_path,
+        source_verifying_key: &source_verifying_key,
+        binding: reseal_binding(),
+        host_recipient: &source.recipient,
+        signing_key_id: KEY_REF,
+        signing_key: &source.signing_key,
+    });
+    let error = match invalid_result {
+        Ok(_) => panic!("invalid packet unexpectedly resealed"),
+        Err(error) => error,
+    };
+    assert_eq!(error.reason_code(), "host_envelope_packet_invalid");
+
+    let oversized = vec![b'x'; maximum_packet_bytes() + 1];
+    let oversized_result = reseal_host_envelope(HostEnvelopeResealRequest {
+        source_packet: &oversized,
+        local_identity_path: &source.identity_path,
+        source_verifying_key: &source_verifying_key,
+        binding: reseal_binding(),
+        host_recipient: &source.recipient,
+        signing_key_id: KEY_REF,
+        signing_key: &source.signing_key,
+    });
+    let error = match oversized_result {
+        Ok(_) => panic!("oversized packet unexpectedly resealed"),
+        Err(error) => error,
+    };
+    assert_eq!(error.reason_code(), "host_envelope_packet_oversized");
+
+    let value: Vec<u8> = (0..32).map(|index| b'a' + (index % 26) as u8).collect();
+    let original = source.packet(1, &value);
+    let original_snapshot = original.clone();
+    let mut mismatched_binding = reseal_binding();
+    mismatched_binding.secret_ref = "sec_mismatch00000001".to_string();
+    let mismatch_result = reseal_host_envelope(HostEnvelopeResealRequest {
+        source_packet: &original,
+        local_identity_path: &source.identity_path,
+        source_verifying_key: &source_verifying_key,
+        binding: mismatched_binding,
+        host_recipient: &source.recipient,
+        signing_key_id: KEY_REF,
+        signing_key: &source.signing_key,
+    });
+    let error = match mismatch_result {
+        Ok(_) => panic!("secret reference mismatch unexpectedly resealed packet"),
+        Err(error) => error,
+    };
+    assert_eq!(error.reason_code(), "host_envelope_secret_ref_mismatch");
+    assert!(original == original_snapshot, "source packet was modified");
 }
 
 #[test]
