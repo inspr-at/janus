@@ -24,6 +24,8 @@ c2b07e44b8b9d3fd3c12d260f3ee02268b5663b8:crates/janus-provider-age/src/lib.rs:pr
 
 # Reviewed JANUS-443 historical test fixture.
 4d3ccb915cf78cc27b69ce6ea8256a00c66c4a72:crates/janus-distribute/src/tests.rs:generic-api-key:289
+# Current tracked-tree position for the same reviewed in-process fixture.
+crates/janus-distribute/src/tests.rs:generic-api-key:289
 
 # Reviewed fixture at the #99 squash-merge history commit (JANUS-448).
 e563bfab667dbfb44aac13916b3a3c9d617d22d2:crates/janus-provider-age/src/lib.rs:private-key:1844
