@@ -59,6 +59,14 @@ REQUIRED_EVIDENCE = (
 # Acceptance is an assurance field, not a label: only the named human owner
 # may accept, and only once every evidence row is verified.
 ACCEPTANCE_AUTHORITY = "Markus Barta"
+# Rows that were open when the decision was proposed. The self-test rebuilds a
+# canonical proposed fixture from these, so the negative fixtures keep working
+# after the documented registry-only acceptance edit flips the live registry.
+CANONICAL_OPEN_EVIDENCE = (
+    "agenix-recipients-disjoint",
+    "zitadel-role-bindings-disjoint",
+    "backup-credentials-per-context",
+)
 DEPLOYMENT_FIELDS = (
     "public_url",
     "host",
@@ -304,24 +312,62 @@ def load(path: Path) -> dict:
     return json.loads(path.read_text())
 
 
+def canonical_proposed_fixture(live: dict) -> dict:
+    """Return the live registry normalised to its proposed lifecycle shape.
+
+    Only lifecycle fields change: status, acceptance fields, and the status of
+    the evidence rows that were open at proposal time. Everything the
+    boundary checks care about is taken from the live registry, so the
+    fixtures still exercise the real declaration.
+    """
+    fixture = json.loads(json.dumps(live))
+    fixture["status"] = "proposed"
+    fixture["accepted_by"] = None
+    fixture["accepted_on"] = None
+    for row in fixture.get("boundary_evidence", []):
+        if isinstance(row, dict) and row.get("id") in CANONICAL_OPEN_EVIDENCE:
+            row["status"] = "open"
+    return fixture
+
+
+def accepted_fixture(proposed: dict) -> dict:
+    """The documented registry-only acceptance edit applied to a fixture."""
+    fixture = json.loads(json.dumps(proposed))
+    for row in fixture["boundary_evidence"]:
+        row["status"] = "verified"
+    fixture["status"] = "accepted"
+    fixture["accepted_by"] = ACCEPTANCE_AUTHORITY
+    fixture["accepted_on"] = "2026-08-28"
+    return fixture
+
+
 def self_test() -> None:
-    baseline = load(REGISTRY)
+    live = load(REGISTRY)
+    live_summary = validate(live)
+    assert live_summary["decision"] == "separate-deployments", live_summary
+    assert live_summary["material_bindings"] == len(REQUIRED_BINDINGS), live_summary
+    assert live_summary["status"] in STATUSES, live_summary
+    if live_summary["status"] == "proposed":
+        assert live_summary["open_evidence"] == len(CANONICAL_OPEN_EVIDENCE), live_summary
+    else:
+        assert live_summary["open_evidence"] == 0 and live["accepted_by"] == ACCEPTANCE_AUTHORITY, live_summary
+
+    # Negative fixtures derive from a canonical proposed shape, never from the
+    # live lifecycle state, so the acceptance edit cannot make them evaporate.
+    baseline = canonical_proposed_fixture(live)
     summary = validate(baseline)
-    assert summary["decision"] == "separate-deployments", summary
-    assert summary["status"] == "proposed", summary
-    assert summary["material_bindings"] == len(REQUIRED_BINDINGS), summary
-    assert summary["open_evidence"] == 3, summary
-    assert summary["contexts"] == ["personal-inspr", "business-augmentoring"], summary
+    assert summary["status"] == "proposed" and summary["open_evidence"] == len(CANONICAL_OPEN_EVIDENCE), summary
+    assert summary["contexts"] == [PERSONAL_CONTEXT, BUSINESS_CONTEXT], summary
     assert "AGM-5" in summary["disambiguated_keys"], summary
 
-    def mutated(apply) -> dict:
-        copy = json.loads(json.dumps(baseline))
+    def mutated(base: dict, apply) -> dict:
+        copy = json.loads(json.dumps(base))
         apply(copy)
         return copy
 
-    def expect_failure(label: str, apply) -> None:
+    def expect_failure(base: dict, label: str, apply) -> None:
         try:
-            validate(mutated(apply))
+            validate(mutated(base, apply))
         except TrustContextError:
             return
         raise AssertionError(f"self-test mutation was not rejected: {label}")
@@ -358,14 +404,15 @@ def self_test() -> None:
     def share_operational_owner(copy: dict) -> None:
         copy["contexts"][1]["operational_owner"] = copy["contexts"][0]["operational_owner"]
 
+    def apple_binding(copy: dict) -> dict:
+        return next(b for b in copy["material_bindings"] if b["material_class"] == "personal-apple-release-signing")
+
     def apple_into_business_binding(copy: dict) -> None:
-        for binding in copy["material_bindings"]:
-            if binding["material_class"] == "personal-apple-release-signing":
-                binding["context"] = "business-augmentoring"
-                binding["must_never_enter"] = ["personal-inspr"]
+        binding = apple_binding(copy)
+        binding["context"] = BUSINESS_CONTEXT
+        binding["must_never_enter"] = [PERSONAL_CONTEXT]
 
     def apple_relabelled_into_business(copy: dict) -> None:
-        # Consistent relabel: move the class list entry AND the binding.
         copy["contexts"][0]["material_classes"].remove("personal-apple-release-signing")
         copy["contexts"][1]["material_classes"].append("personal-apple-release-signing")
         apple_into_business_binding(copy)
@@ -378,10 +425,10 @@ def self_test() -> None:
     def rename_context(copy: dict) -> None:
         copy["contexts"][0]["id"] = "personal-other"
         for binding in copy["material_bindings"]:
-            if binding["context"] == "personal-inspr":
+            if binding["context"] == PERSONAL_CONTEXT:
                 binding["context"] = "personal-other"
             binding["must_never_enter"] = [
-                "personal-other" if x == "personal-inspr" else x for x in binding["must_never_enter"]
+                "personal-other" if x == PERSONAL_CONTEXT else x for x in binding["must_never_enter"]
             ]
 
     def class_in_both(copy: dict) -> None:
@@ -391,7 +438,7 @@ def self_test() -> None:
         copy["contexts"][1]["secret_name_prefixes"].append("csb1-janus-")
 
     def ungated_binding(copy: dict) -> None:
-        copy["material_bindings"][0]["migration_gates"] = []
+        apple_binding(copy)["migration_gates"] = []
 
     def unqualified_key(copy: dict) -> None:
         copy["tracker_key_disambiguation"][0]["qualified"] = "AGM-5"
@@ -415,23 +462,26 @@ def self_test() -> None:
     def missing_record(copy: dict) -> None:
         copy["decision_record"] = "docs/does-not-exist.md"
 
+    def unknown_evidence_status(copy: dict) -> None:
+        copy["boundary_evidence"][0]["status"] = "assumed"
+
     def delete_apple_binding(copy: dict) -> None:
         copy["material_bindings"] = [
             b for b in copy["material_bindings"] if b["material_class"] != "personal-apple-release-signing"
         ]
 
     def duplicate_apple_binding(copy: dict) -> None:
-        copy["material_bindings"].append(json.loads(json.dumps(copy["material_bindings"][0])))
+        copy["material_bindings"].append(json.loads(json.dumps(apple_binding(copy))))
 
     def duplicate_apple_binding_weakened(copy: dict) -> None:
-        weak = json.loads(json.dumps(copy["material_bindings"][0]))
+        weak = json.loads(json.dumps(apple_binding(copy)))
         weak["migration_gates"] = ["none"]
         copy["material_bindings"].insert(0, weak)
 
     def rename_binding_class(copy: dict) -> None:
         copy["contexts"][0]["material_classes"].remove("personal-apple-release-signing")
         copy["contexts"][0]["material_classes"].append("personal-apple-signing")
-        copy["material_bindings"][0]["material_class"] = "personal-apple-signing"
+        apple_binding(copy)["material_class"] = "personal-apple-signing"
 
     def unbound_declared_class(copy: dict) -> None:
         copy["material_bindings"] = [
@@ -444,8 +494,8 @@ def self_test() -> None:
             {
                 "material_class": "augmentoring-extra",
                 "driver": "pma:AGM-4",
-                "context": "business-augmentoring",
-                "must_never_enter": ["personal-inspr"],
+                "context": BUSINESS_CONTEXT,
+                "must_never_enter": [PERSONAL_CONTEXT],
                 "migration_gates": ["some gate"],
                 "canonical_until_gates_pass": "somewhere",
             }
@@ -453,7 +503,7 @@ def self_test() -> None:
 
     def accept_as_authority(copy: dict) -> None:
         copy["status"] = "accepted"
-        copy["accepted_by"] = "Markus Barta"
+        copy["accepted_by"] = ACCEPTANCE_AUTHORITY
         copy["accepted_on"] = "2026-08-28"
 
     def delete_open_evidence_then_accept(copy: dict) -> None:
@@ -471,7 +521,7 @@ def self_test() -> None:
         copy["boundary_evidence"].append(json.loads(json.dumps(copy["boundary_evidence"][0])))
 
     def duplicate_evidence_row_verified_then_accept(copy: dict) -> None:
-        for row in copy["boundary_evidence"]:
+        for row in list(copy["boundary_evidence"]):
             if row["status"] == "open":
                 twin = json.loads(json.dumps(row))
                 twin["status"] = "verified"
@@ -502,10 +552,8 @@ def self_test() -> None:
         copy["accepted_by"] = "someone"
         copy["accepted_on"] = "2026-08-28"
 
-    def unknown_evidence_status(copy: dict) -> None:
-        copy["boundary_evidence"][0]["status"] = "assumed"
-
-    mutations = (
+    # Lifecycle-independent boundary mutations: must fail on both shapes.
+    boundary_mutations = (
         ("shared OIDC issuer", share_issuer),
         ("shared public URL", share_url),
         ("shared host", share_host),
@@ -529,8 +577,6 @@ def self_test() -> None:
         ("unknown decision", unknown_decision),
         ("decision without registry semantics", unimplemented_decision),
         ("missing decision record", missing_record),
-        ("accepted without acceptor", accepted_without_acceptor),
-        ("accepted while boundary evidence is open", accepted_with_open_evidence),
         ("unknown boundary evidence status", unknown_evidence_status),
         ("Apple binding deleted", delete_apple_binding),
         ("Apple binding duplicated", duplicate_apple_binding),
@@ -538,31 +584,67 @@ def self_test() -> None:
         ("binding class renamed away from the pin", rename_binding_class),
         ("declared class left unbound", unbound_declared_class),
         ("unpinned extra class bound", unpinned_extra_class),
-        ("open evidence deleted then accepted", delete_open_evidence_then_accept),
-        ("open evidence renamed then accepted", rename_open_evidence_then_accept),
         ("evidence row duplicated", duplicate_evidence_row),
-        ("open evidence shadowed by a verified twin then accepted", duplicate_evidence_row_verified_then_accept),
-        ("status flipped by the authority while evidence is open", status_flip_with_open_evidence_by_authority),
-        ("unauthorized acceptor with all evidence verified", unauthorized_acceptor_all_verified),
         ("acceptance authority reassigned", wrong_acceptance_authority),
         ("evidence row without id", missing_evidence_id),
     )
-    for label, apply in mutations:
-        expect_failure(label, apply)
+    # Lifecycle mutations: only meaningful from the canonical proposed shape.
+    proposed_mutations = (
+        ("accepted without acceptor", accepted_without_acceptor),
+        ("accepted by a stranger while evidence is open", accepted_with_open_evidence),
+        ("open evidence deleted then accepted", delete_open_evidence_then_accept),
+        ("open evidence renamed then accepted", rename_open_evidence_then_accept),
+        ("open evidence shadowed by a verified twin then accepted", duplicate_evidence_row_verified_then_accept),
+        ("status flipped by the authority while evidence is open", status_flip_with_open_evidence_by_authority),
+        ("unauthorized acceptor with all evidence verified", unauthorized_acceptor_all_verified),
+    )
+    for label, apply in boundary_mutations + proposed_mutations:
+        expect_failure(baseline, f"{label} (proposed baseline)", apply)
 
     def same_context_prefix_refinement(copy: dict) -> None:
         copy["contexts"][0]["secret_name_prefixes"].append("csb1-janus-")
 
-    validate(mutated(same_context_prefix_refinement))
+    validate(mutated(baseline, same_context_prefix_refinement))
 
-    def authority_accepts_after_all_verified(copy: dict) -> None:
-        for row in copy["boundary_evidence"]:
-            row["status"] = "verified"
-        accept_as_authority(copy)
+    # Explicit proof for the documented registry-only acceptance edit: the
+    # accepted shape validates, and every boundary mutation still fails on it.
+    accepted = accepted_fixture(baseline)
+    accepted_summary = validate(accepted)
+    assert accepted_summary["status"] == "accepted" and accepted_summary["open_evidence"] == 0, accepted_summary
 
-    accepted = validate(mutated(authority_accepts_after_all_verified))
-    assert accepted["status"] == "accepted" and accepted["open_evidence"] == 0, accepted
-    assert load(REGISTRY)["status"] == "proposed", "the reviewed baseline must stay proposed"
+    def reopen_evidence_while_accepted(copy: dict) -> None:
+        copy["boundary_evidence"][-1]["status"] = "open"
+
+    def delete_verified_evidence_while_accepted(copy: dict) -> None:
+        copy["boundary_evidence"].pop()
+
+    def rename_verified_evidence_while_accepted(copy: dict) -> None:
+        copy["boundary_evidence"][-1]["id"] = copy["boundary_evidence"][-1]["id"] + "-x"
+
+    def swap_acceptor_while_accepted(copy: dict) -> None:
+        copy["accepted_by"] = "someone"
+
+    def drop_acceptor_while_accepted(copy: dict) -> None:
+        copy["accepted_by"] = None
+
+    def proposed_with_acceptance_fields(copy: dict) -> None:
+        copy["status"] = "proposed"
+
+    accepted_mutations = (
+        ("evidence reopened while accepted", reopen_evidence_while_accepted),
+        ("verified evidence deleted while accepted", delete_verified_evidence_while_accepted),
+        ("verified evidence renamed while accepted", rename_verified_evidence_while_accepted),
+        ("acceptor swapped while accepted", swap_acceptor_while_accepted),
+        ("acceptor dropped while accepted", drop_acceptor_while_accepted),
+        ("proposed while carrying acceptance fields", proposed_with_acceptance_fields),
+    )
+    for label, apply in boundary_mutations + accepted_mutations:
+        expect_failure(accepted, f"{label} (accepted baseline)", apply)
+
+    # The self-test must stay green whichever lifecycle shape the live
+    # registry is in, and normalising the accepted shape must round-trip.
+    assert canonical_proposed_fixture(accepted) == baseline, "canonical fixture does not round-trip"
+    rejected = 2 * len(boundary_mutations) + len(proposed_mutations) + len(accepted_mutations)
 
     with tempfile.TemporaryDirectory() as scratch:
         broken = Path(scratch) / "broken.json"
@@ -573,7 +655,10 @@ def self_test() -> None:
             pass
         else:
             raise AssertionError("malformed registry JSON was accepted")
-    print(f"trust-context self-test passed: {len(mutations)} boundary violations rejected value_returned=false")
+    print(
+        f"trust-context self-test passed: live registry status={live_summary['status']}, "
+        f"{rejected} boundary violations rejected across proposed and accepted shapes value_returned=false"
+    )
 
 
 def main(argv=None) -> int:

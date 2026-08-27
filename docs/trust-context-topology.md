@@ -140,5 +140,9 @@ python3 scripts/check-trust-context.py
 ```
 
 Both commands read public identifiers only and print `value_returned=false`.
+The self-test validates the live registry in whichever lifecycle shape it is
+in, then runs its negative fixtures from a canonical proposed fixture and from
+the accepted shape, so the documented registry-only acceptance edit keeps the
+self-test and CI green while every bypass regression stays in force.
 Live deployment claims still require the nixcfg and agm-nixcfg admission
 evidence; this record fixes the topology, not the runtime state.
