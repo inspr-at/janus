@@ -9,10 +9,10 @@ cd "${repo}"
 
 # JANUS-438: the engine assurance gate used to be one 9m17s serial script.
 # Every phase below is registered with a stable slug, a fan-out group, and
-# the exact human label its "==>" progress line already used. `tests` needs
-# no built daemon binaries (pure checks, cargo test, self-tests); `smoke`
-# builds the daemon binaries once and then runs the with-runtime-authority
-# smoke scripts. The two groups run as independent CI jobs
+# the exact human label its "==>" progress line already used. `tests` runs
+# checks and cargo tests plus one container minimization proof against a
+# cache-backed candidate; `smoke` builds the daemon binaries once and then
+# runs the with-runtime-authority smoke scripts. The two groups run as independent CI jobs
 # (check-assurance-tests, check-assurance-smoke) with a fan-in job
 # (check-assurance) that keeps the original required check name. `--phase
 # all` (the default, used by local devs and docs) still runs every phase.

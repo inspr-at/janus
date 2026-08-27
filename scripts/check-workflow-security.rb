@@ -139,15 +139,37 @@ def validate(workflows)
 
   rust_nix = job!(workflows.fetch(:rust), "check-nix")
   require_gate(rust_nix["needs"] == "classify", "rust_nix_missing_classify_dependency")
+  require_gate(rust_nix["if"] == "always() && !cancelled()", "rust_nix_job_condition_invalid")
   nix_step = conditional_step!(rust_nix, "nix package", go_only_run_condition)
   command!(nix_step, "nix build .#janus-engine")
   conditional_step!(rust_nix, "nix package not applicable (go-only change)", go_only_skip_condition)
 
   rust_assurance_tests = job!(workflows.fetch(:rust), "check-assurance-tests")
   require_gate(rust_assurance_tests["needs"] == "classify", "rust_assurance_tests_missing_classify_dependency")
+  require_gate(
+    rust_assurance_tests["if"] == "always() && !cancelled()",
+    "rust_assurance_tests_job_condition_invalid"
+  )
   assurance_tests_step =
     conditional_step!(rust_assurance_tests, "engine release assurance gate (tests)", go_only_run_condition)
   command!(assurance_tests_step, "scripts/assure-engine-release.sh --phase tests")
+  environment!(assurance_tests_step, "JANUS_ENGINE_SMOKE_IMAGE", "janus-engine:minimization")
+  environment!(assurance_tests_step, "JANUS_ENGINE_SMOKE_SKIP_BUILD", "true")
+  minimization_build = step!(rust_assurance_tests, "build cache-backed minimization candidate")
+  require_gate(minimization_build["if"] == go_only_run_condition, "rust_minimization_build_condition_invalid")
+  require_gate(
+    minimization_build["uses"] ==
+      "docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8",
+    "rust_minimization_build_action_invalid"
+  )
+  require_gate(
+    minimization_build.dig("with", "tags") == "janus-engine:minimization",
+    "rust_minimization_build_tag_invalid"
+  )
+  require_gate(
+    minimization_build.dig("with", "cache-from") == "type=gha,scope=rust-engine-linux-amd64",
+    "rust_minimization_cache_source_invalid"
+  )
   conditional_step!(
     rust_assurance_tests,
     "engine release assurance gate (tests) not applicable (go-only change)",
@@ -156,6 +178,10 @@ def validate(workflows)
 
   rust_assurance_smoke = job!(workflows.fetch(:rust), "check-assurance-smoke")
   require_gate(rust_assurance_smoke["needs"] == "classify", "rust_assurance_smoke_missing_classify_dependency")
+  require_gate(
+    rust_assurance_smoke["if"] == "always() && !cancelled()",
+    "rust_assurance_smoke_job_condition_invalid"
+  )
   assurance_smoke_step =
     conditional_step!(rust_assurance_smoke, "engine release assurance gate (smoke)", go_only_run_condition)
   command!(assurance_smoke_step, "scripts/assure-engine-release.sh --phase smoke")
@@ -166,6 +192,7 @@ def validate(workflows)
   )
 
   rust_assurance = job!(workflows.fetch(:rust), "check-assurance")
+  require_gate(rust_assurance["if"] == "always()", "rust_assurance_job_condition_invalid")
   require_gate(
     rust_assurance["needs"] == %w[check-assurance-tests check-assurance-smoke],
     "rust_assurance_fan_in_missing_needs"
@@ -177,6 +204,11 @@ def validate(workflows)
   command!(inventory, "scripts/check-engine-assurance-inventory.py")
 
   rust_aggregate = job!(workflows.fetch(:rust), "check")
+  require_gate(rust_aggregate["if"] == "always()", "rust_aggregate_job_condition_invalid")
+  require_gate(
+    rust_aggregate["needs"] == %w[check-fast check-nix check-assurance image-amd64 image-arm64],
+    "rust_aggregate_missing_needs"
+  )
   active_step!(rust_aggregate, "require every Rust assurance boundary")
 
   rust_amd64 = job!(workflows.fetch(:rust), "image-amd64")

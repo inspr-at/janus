@@ -14,9 +14,9 @@ pending real CI runs.
 `scripts/classify-pr-paths.py` answers one narrow question for a pull
 request: is every changed path *provably* outside the Rust/Nix surface? It
 is an allowlist (`go-envelope/`, `browser-qa/`, `docs/`, plus a few named
-files such as `package.json` and `.github/workflows/go-envelope.yml`), not a
-denylist. Anything this classifier has never reviewed — including itself,
-`scripts/**`, and every other workflow file — trips every expensive gate. A
+files such as `package.json`), not a denylist. Anything this classifier has
+never reviewed — including itself, `scripts/**`, every workflow file, and
+every GitHub action — trips every expensive gate. A
 false "go-only" verdict could silently drop a security or release-assurance
 gate; a false negative only costs a few CI minutes on a change that did not
 need them. That asymmetry is the whole design.
@@ -44,11 +44,14 @@ not definitively report `go_only=true`.
 ## Engine assurance: split into two proof-family jobs, not shortened
 
 The 9m17s `scripts/assure-engine-release.sh` ran 23 named checks serially.
-Eleven of them (`tests`: the release/security/duty-boundary/minimization/
-adversarial self-tests, `cargo test --all --locked`, and the Rust
-minimization proof) need no built daemon binary. The other twelve (`smoke`)
-build the daemon binaries once and then run the with-runtime-authority smoke
-scripts. Neither group's commands depend on the other's output, so they now
+Ten of them are in `tests`: the release/security/duty-boundary/minimization/
+adversarial checks, `cargo test --all --locked`, and the Rust minimization
+proof. That last proof inspects the hardened container, so CI prepares its
+candidate with the same commit-bound BuildKit cache used by the native amd64
+gate and tells the proof not to rebuild it serially. The other thirteen
+(`smoke`) build the daemon binaries once and then run the
+with-runtime-authority smoke scripts. Neither group's commands depend on the
+other's output, so they now
 run as two independent CI jobs — `check-assurance-tests` and
 `check-assurance-smoke` — with a `check-assurance` fan-in job that keeps the
 original required check name and re-verifies the phase inventory.
@@ -58,9 +61,11 @@ The phase table lives in the script itself
 maintained description of it, so it cannot drift from what actually runs.
 `scripts/check-engine-assurance-inventory.py` compares that live table
 against the reviewed baseline
-(`config/assurance/engine-release-phases-v1.json`) on every assurance run: a
-future edit that silently drops, renames, or regroups one of the 23 gates
-fails this check before it fails anything more expensive. `--phase all`
+(`config/assurance/engine-release-phases-v1.json`) on every assurance run.
+The baseline pins both the dispatch metadata and a SHA-256 of each phase's
+actual `run_*` function body, so deleting or changing a command also fails
+closed. A future edit that silently drops, renames, regroups, or guts one of
+the 23 gates fails this check before it fails anything more expensive. `--phase all`
 (the default, used by local devs and the docs that reference this script by
 name) still runs every phase; only the tests/smoke split order changed
 slightly, since neither group has an ordering dependency on the other.

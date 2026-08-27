@@ -10,8 +10,8 @@ the Rust/Nix surface?
 The policy is an allowlist, not a denylist: only paths under a reviewed
 "go-only" prefix are ever treated as safe to skip. Any path this
 classifier has never seen — including itself, `scripts/**`, and every
-`.github/workflows/**` file other than `go-envelope.yml` — trips every
-expensive gate. That asymmetry is deliberate: a false "go-only" verdict
+`.github/workflows/**` file — trips every expensive gate. That asymmetry is
+deliberate: a false "go-only" verdict
 could silently drop a security or release-assurance gate; a false
 negative only costs CI minutes on a change that didn't need them.
 """
@@ -22,6 +22,7 @@ import argparse
 import json
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -40,7 +41,6 @@ GO_ONLY_FILES = frozenset(
         "package.json",
         "package-lock.json",
         "README.md",
-        ".github/workflows/go-envelope.yml",
     }
 )
 
@@ -64,9 +64,18 @@ def classify(paths: list[str]) -> dict:
     }
 
 
-def changed_paths(base: str, head: str) -> list[str]:
+def changed_paths(base: str, head: str, root: Path = ROOT) -> list[str]:
     output = subprocess.run(
-        ["git", "-C", str(ROOT), "diff", "--name-only", "-z", f"{base}...{head}"],
+        [
+            "git",
+            "-C",
+            str(root),
+            "diff",
+            "--no-renames",
+            "--name-only",
+            "-z",
+            f"{base}...{head}",
+        ],
         check=True,
         capture_output=True,
     ).stdout
@@ -84,12 +93,18 @@ FIXTURES = {
         "README.md",
         "package.json",
         "package-lock.json",
-        ".github/workflows/go-envelope.yml",
     ],
     "rust": ["crates/janus-core/src/lib.rs"],
+    "rust_lock": ["Cargo.lock"],
+    "rust_toolchain": ["rust-toolchain.toml"],
     "nix": ["flake.nix"],
+    "nix_lock": ["flake.lock"],
     "docker": ["Dockerfile.engine"],
+    "docker_ignore": ["Dockerfile.engine.dockerignore"],
     "workflow": [".github/workflows/rust.yml"],
+    "go_workflow": [".github/workflows/go-envelope.yml"],
+    "github_action": [".github/actions/reviewed/action.yml"],
+    "assurance_config": ["config/assurance/engine-release-phases-v1.json"],
     "classifier_self": ["scripts/classify-pr-paths.py"],
     "scripts_shared": ["scripts/assure-engine-release.sh"],
     "mixed": ["go-envelope/main.go", "crates/janus-core/src/lib.rs"],
@@ -102,9 +117,16 @@ def self_test() -> None:
     assert result["go_only"] is True, "the reviewed go-only family failed to classify as go-only"
     for name in (
         "rust",
+        "rust_lock",
+        "rust_toolchain",
         "nix",
+        "nix_lock",
         "docker",
+        "docker_ignore",
         "workflow",
+        "go_workflow",
+        "github_action",
+        "assurance_config",
         "classifier_self",
         "scripts_shared",
         "mixed",
@@ -115,6 +137,30 @@ def self_test() -> None:
     # A change to the classifier itself can never be waved through, even
     # alongside otherwise go-only paths.
     assert classify(["scripts/classify-pr-paths.py", "go-envelope/main.go"])["go_only"] is False
+
+    # Git's rename detection normally reports only the destination. A move
+    # from a protected Rust path into an allowlisted docs path must expose
+    # both sides so the deleted source cannot be classified as Go-only.
+    with tempfile.TemporaryDirectory(prefix="janus-classifier-") as directory:
+        repository = Path(directory)
+        subprocess.run(["git", "init", "-q"], cwd=repository, check=True)
+        subprocess.run(["git", "config", "user.name", "Janus Classifier Fixture"], cwd=repository, check=True)
+        subprocess.run(["git", "config", "user.email", "classifier@example.invalid"], cwd=repository, check=True)
+        source = repository / "crates/janus-core/src/lib.rs"
+        source.parent.mkdir(parents=True)
+        source.write_text("pub fn fixture() {}\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=repository, check=True)
+        subprocess.run(["git", "commit", "-qm", "base"], cwd=repository, check=True)
+        base = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=repository, check=True, capture_output=True, text=True
+        ).stdout.strip()
+        destination = repository / "docs/lib.rs"
+        destination.parent.mkdir()
+        subprocess.run(["git", "mv", str(source), str(destination)], cwd=repository, check=True)
+        subprocess.run(["git", "commit", "-qm", "rename fixture"], cwd=repository, check=True)
+        paths = changed_paths(base, "HEAD", repository)
+        assert paths == ["crates/janus-core/src/lib.rs", "docs/lib.rs"], paths
+        assert classify(paths)["go_only"] is False
 
 
 def main() -> int:

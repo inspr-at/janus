@@ -122,8 +122,8 @@ jobs:
         run: echo "nix_package=not_applicable reason=go_only_change value_returned=false"
 
   # JANUS-438: the 9m17s serial engine assurance gate is split into two
-  # independent proof-family jobs. `tests` needs no built daemon binaries
-  # (pure checks, cargo test, self-tests); `smoke` builds the daemon
+  # independent proof-family jobs. `tests` runs checks and cargo tests plus
+  # one cache-backed minimization image proof; `smoke` builds the daemon
   # binaries once and runs the with-runtime-authority smoke scripts. Both
   # groups, and the exact command each phase runs, are the reviewed table
   # in scripts/assure-engine-release.sh (see --list-phases), checked
@@ -146,8 +146,24 @@ jobs:
         if: needs.classify.result != 'success' || needs.classify.outputs.go_only != 'true'
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         if: needs.classify.result != 'success' || needs.classify.outputs.go_only != 'true'
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+        if: needs.classify.result != 'success' || needs.classify.outputs.go_only != 'true'
+      - name: build cache-backed minimization candidate
+        if: needs.classify.result != 'success' || needs.classify.outputs.go_only != 'true'
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          file: Dockerfile.engine
+          platforms: linux/amd64
+          load: true
+          tags: janus-engine:minimization
+          cache-from: type=gha,scope=rust-engine-linux-amd64
+          cache-to: type=gha,scope=rust-engine-minimization-amd64,mode=max
       - name: engine release assurance gate (tests)
         if: needs.classify.result != 'success' || needs.classify.outputs.go_only != 'true'
+        env:
+          JANUS_ENGINE_SMOKE_IMAGE: janus-engine:minimization
+          JANUS_ENGINE_SMOKE_SKIP_BUILD: 'true'
         run: scripts/assure-engine-release.sh --phase tests
       - name: engine release assurance gate (tests) not applicable (go-only change)
         if: needs.classify.result == 'success' && needs.classify.outputs.go_only == 'true'
