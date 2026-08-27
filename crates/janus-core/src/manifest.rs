@@ -177,6 +177,7 @@ fn parse_secretspec_manifest_catalog(
                 .unwrap_or(true),
             trust_level: TrustLevel::L1,
             allowed_uses: vec![ProfileId::new(format!("profile.{}", name.as_str()))?],
+            material_lifetime: None,
         });
     }
     if let Some(metadata) = metadata {
@@ -357,6 +358,7 @@ mod tests {
             required: true,
             trust_level: TrustLevel::L1,
             allowed_uses: vec![ProfileId::new("profile.canary").unwrap()],
+            material_lifetime: None,
         }
     }
 

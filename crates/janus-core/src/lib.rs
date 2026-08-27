@@ -16,6 +16,7 @@ pub mod delegation;
 pub mod duty;
 pub mod error;
 pub mod identity;
+pub mod lifetime;
 pub mod managed_service;
 pub mod manifest;
 pub mod metadata;
@@ -80,6 +81,11 @@ pub use identity::{
     IdentitySurfaceTransport, IdentityTransportManifestV1, TrustAdapterKind,
     ACTOR_OBSERVATION_SCHEMA, IDENTITY_BINDING_MIGRATION_SCHEMA,
     IDENTITY_TRANSPORT_MANIFEST_SCHEMA, MAX_ACTOR_ASSERTION_TTL,
+};
+pub use lifetime::{
+    MaterialExpiryStatus, MaterialLifetime, MaterialLifetimeError, MaterialLifetimePolicy,
+    MaterialLifetimeProvenance, MaterialLifetimeReportRow, MaterialLifetimeReporter,
+    MaterialTimestamp,
 };
 pub use managed_service::{
     managed_contract_version_compatible, parse_managed_dynamic_environment_contract_fixture,
@@ -148,8 +154,8 @@ pub use roles::{
     ROLE_BINDING_SNAPSHOT_VERSION, ROLE_POLICY_SNAPSHOT_VERSION,
 };
 pub use rotation::{
-    RollbackPlan, RotationDecision, RotationOutcome, RotationPhase, RotationPlan, RotationPlanner,
-    RotationSpec, RotationStrategy, ValidationProbe,
+    HumanRenewalProcedure, RollbackPlan, RotationDecision, RotationOutcome, RotationPhase,
+    RotationPlan, RotationPlanner, RotationSpec, RotationStrategy, ValidationProbe,
 };
 pub use scope::{
     EnvironmentId, NamespaceId, OrganizationId, RepositoryId, ScopePathV1, ScopeRef, WorkloadId,

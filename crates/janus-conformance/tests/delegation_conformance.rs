@@ -35,6 +35,7 @@ fn fixture() -> Fixture {
         required: true,
         trust_level: TrustLevel::L2,
         allowed_uses: vec![profile_id.clone()],
+        material_lifetime: None,
         present: true,
     };
     let profile = UseProfile {

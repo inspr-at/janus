@@ -57,6 +57,7 @@ fn fixture() -> (MockStore, SecretRef, UseProfile) {
         required: true,
         trust_level: TrustLevel::L1,
         allowed_uses: vec![ProfileId::new("profile.canary").unwrap()],
+        material_lifetime: None,
     }])
     .unwrap();
     let store = MockStore::new(catalog)
