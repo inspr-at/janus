@@ -10,8 +10,8 @@ if [[ ! -x "${gitleaks_bin}" ]] && ! command -v "${gitleaks_bin}" >/dev/null 2>&
 fi
 
 ignore_count="$(awk '!/^#/ && NF { count++ } END { print count + 0 }' "${repo}/.gitleaksignore")"
-if [[ "${ignore_count}" != "29" ]]; then
-  echo "expected exactly twenty-nine reviewed Gitleaks fingerprints, got ${ignore_count}" >&2
+if [[ "${ignore_count}" != "30" ]]; then
+  echo "expected exactly thirty reviewed Gitleaks fingerprints, got ${ignore_count}" >&2
   exit 1
 fi
 
