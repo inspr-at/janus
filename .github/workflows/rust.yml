@@ -440,7 +440,7 @@ jobs:
             budget_args=(--budget-seconds 300)
           fi
           python3 scripts/report-pr-critical-path.py --run rust-pr-run.json --jobs rust-pr-jobs.json "${budget_args[@]}" --output rust-pr-timing.json --summary rust-pr-timing.md || true
-          cat rust-pr-timing.md >> "${GITHUB_STEP_SUMMARY}"
+          cat rust-pr-timing.md >> "${GITHUB_STEP_SUMMARY}" 2>/dev/null || true
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         if: always()
         with:

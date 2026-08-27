@@ -135,7 +135,17 @@ def validate(workflows)
 
   rust_classify = job!(workflows.fetch(:rust), "classify")
   require_gate(rust_classify["if"] == "github.event_name == 'pull_request'", "rust_classify_trigger_invalid")
-  active_step!(rust_classify, "classify changed paths")
+  classify_checkout = action!(rust_classify, "actions/checkout")
+  require_gate(classify_checkout.dig("with", "fetch-depth") == 0, "rust_classify_checkout_depth_invalid")
+  classify_step = active_step!(rust_classify, "classify changed paths")
+  require_gate(
+    command_lines(classify_step) == [
+      'python3 scripts/classify-pr-paths.py --base "${BASE_SHA}" --head "${HEAD_SHA}" --github-output "${GITHUB_OUTPUT}"'
+    ],
+    "rust_classify_command_invalid"
+  )
+  environment!(classify_step, "BASE_SHA", "${{ github.event.pull_request.base.sha }}")
+  environment!(classify_step, "HEAD_SHA", "${{ github.event.pull_request.head.sha }}")
 
   rust_nix = job!(workflows.fetch(:rust), "check-nix")
   require_gate(rust_nix["needs"] == "classify", "rust_nix_missing_classify_dependency")
@@ -489,6 +499,17 @@ def self_test(workflows)
   classify_trigger_widened = deep_copy(workflows)
   job!(classify_trigger_widened[:rust], "classify")["if"] = "true"
   expect_denied(classify_trigger_widened, "rust_classify_trigger_invalid") {}
+
+  classify_command_widened = deep_copy(workflows)
+  step!(job!(classify_command_widened[:rust], "classify"), "classify changed paths")["run"] =
+    "python3 scripts/classify-pr-paths.py --files go-envelope/main.go"
+  expect_denied(classify_command_widened, "rust_classify_command_invalid") {}
+
+  classify_base_widened = deep_copy(workflows)
+  step!(job!(classify_base_widened[:rust], "classify"), "classify changed paths").fetch("env")[
+    "BASE_SHA"
+  ] = "${{ github.event.pull_request.head.sha }}"
+  expect_denied(classify_base_widened, "rust_classify_base_invalid") {}
 
   nix_gate_loosened = deep_copy(workflows)
   step!(job!(nix_gate_loosened[:rust], "check-nix"), "nix package")["if"] = "true"

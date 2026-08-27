@@ -157,7 +157,7 @@ jobs:
           budget=480
           [[ "${cache_hit}" == "true" ]] && budget=300
           python3 scripts/report-pr-critical-path.py --run go-pr-run.json --jobs go-pr-jobs.json --cache-hit "playwright=${cache_hit}" --budget-seconds "${budget}" --output go-pr-timing.json --summary go-pr-timing.md || true
-          cat go-pr-timing.md >> "${GITHUB_STEP_SUMMARY}"
+          cat go-pr-timing.md >> "${GITHUB_STEP_SUMMARY}" 2>/dev/null || true
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         if: always()
         with:

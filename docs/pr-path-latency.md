@@ -47,8 +47,9 @@ The 9m17s `scripts/assure-engine-release.sh` ran 23 named checks serially.
 Ten of them are in `tests`: the release/security/duty-boundary/minimization/
 adversarial checks, `cargo test --all --locked`, and the Rust minimization
 proof. That last proof inspects the hardened container, so CI prepares its
-candidate with the same commit-bound BuildKit cache used by the native amd64
-gate and tells the proof not to rebuild it serially. The other thirteen
+candidate with the BuildKit layer cache maintained by the native amd64 gate
+(typically the base branch's latest); on a cache miss the tests job builds the
+candidate itself. The other thirteen
 (`smoke`) build the daemon binaries once and then run the
 with-runtime-authority smoke scripts. Neither group's commands depend on the
 other's output, so they now
