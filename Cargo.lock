@@ -1204,6 +1204,7 @@ dependencies = [
  "fs2",
  "janus-conformance",
  "janus-core",
+ "rustix",
  "ssh-key",
  "tempfile",
  "tokio",

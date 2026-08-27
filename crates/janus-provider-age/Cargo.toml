@@ -11,11 +11,17 @@ license.workspace = true
 [lints]
 workspace = true
 
+[[bin]]
+name = "janus-agenix-import"
+path = "src/bin/janus-agenix-import.rs"
+test = false
+
 [dependencies]
 age = { version = "=0.12.1", default-features = false, features = ["ssh"] }
 async-trait = "0.1"
 fs2 = "0.4"
 janus-core = { path = "../janus-core" }
+rustix = { version = "1", features = ["fs"] }
 ssh-key = { version = "=0.6.7", default-features = false, features = ["std"] }
 tokio = { version = "1", features = ["rt"] }
 zeroize = "1"

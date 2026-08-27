@@ -22,6 +22,270 @@ use janus_core::{
 };
 use zeroize::Zeroize;
 
+const MAX_AGENIX_MATERIAL_BYTES: usize = 64 * 1024;
+
+/// Import one host-materialized agenix secret into Janus custody.
+///
+/// The source path is derived exclusively from the reviewed absolute material
+/// root and the manifest-declared secret name. Existing Janus ciphertext is an
+/// idempotent no-op and is never opened or replaced.
+pub async fn import_agenix_material_if_absent(
+    material_root: impl AsRef<Path>,
+    name: &SecretName,
+    store: &mut AgeSecretStore,
+) -> JanusResult<AgeAdminOutcome> {
+    let material_root = material_root.as_ref();
+    if !normalized_absolute_path(material_root) {
+        return Err(agenix_import_denied(
+            "agenix_material_root_invalid",
+            "agenix material root must be a normalized absolute path",
+        ));
+    }
+
+    let components = safe_name_path(name)?;
+    store.ensure_manifest(name)?;
+    let target = store.path_for(name)?;
+    match fs::symlink_metadata(&target) {
+        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+            return Ok(agenix_import_outcome(false, store.recipient_count()));
+        }
+        Ok(_) => {
+            return Err(JanusError::policy_denied(
+                "entry_target_present",
+                "entry transaction cannot overwrite existing encrypted material",
+            ));
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(map_store_io(err)),
+    }
+
+    let value = read_agenix_material(material_root, &components)?;
+    match store.create_if_absent(name, SecretValue::new(value)).await {
+        Ok(outcome) => Ok(agenix_import_outcome(true, outcome.recipient_count)),
+        Err(JanusError::PolicyDenied {
+            reason_code: "entry_target_present",
+            ..
+        }) if fs::symlink_metadata(&target)
+            .map(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
+            .unwrap_or(false) =>
+        {
+            Ok(agenix_import_outcome(false, store.recipient_count()))
+        }
+        Err(err) => Err(err),
+    }
+}
+
+fn agenix_import_outcome(changed: bool, recipient_count: usize) -> AgeAdminOutcome {
+    AgeAdminOutcome {
+        action: "agenix.import",
+        changed,
+        present_secrets: 1,
+        recipient_count,
+        value_returned: false,
+    }
+}
+
+#[cfg(not(unix))]
+fn validate_agenix_source_path(material_root: &Path, components: &[&str]) -> JanusResult<PathBuf> {
+    let root_metadata = fs::symlink_metadata(material_root).map_err(|err| {
+        if err.kind() == std::io::ErrorKind::NotFound {
+            agenix_import_denied(
+                "agenix_material_missing",
+                "agenix material source is not present",
+            )
+        } else {
+            agenix_import_denied(
+                "agenix_material_unreadable",
+                "agenix material source could not be inspected",
+            )
+        }
+    })?;
+    if !root_metadata.is_dir() || root_metadata.file_type().is_symlink() {
+        return Err(agenix_import_denied(
+            "agenix_material_root_invalid",
+            "agenix material root must be a non-symlink directory",
+        ));
+    }
+
+    let mut source = material_root.to_path_buf();
+    for (index, component) in components.iter().enumerate() {
+        source.push(component);
+        if index + 1 == components.len() {
+            break;
+        }
+        let metadata = fs::symlink_metadata(&source).map_err(|err| {
+            if err.kind() == std::io::ErrorKind::NotFound {
+                agenix_import_denied(
+                    "agenix_material_missing",
+                    "agenix material source is not present",
+                )
+            } else {
+                agenix_import_denied(
+                    "agenix_material_unreadable",
+                    "agenix material source could not be inspected",
+                )
+            }
+        })?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err(agenix_import_denied(
+                "agenix_material_invalid",
+                "agenix material source path is invalid",
+            ));
+        }
+    }
+    let metadata = fs::symlink_metadata(&source).map_err(|err| {
+        if err.kind() == std::io::ErrorKind::NotFound {
+            agenix_import_denied(
+                "agenix_material_missing",
+                "agenix material source is not present",
+            )
+        } else {
+            agenix_import_denied(
+                "agenix_material_unreadable",
+                "agenix material source could not be inspected",
+            )
+        }
+    })?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err(agenix_import_denied(
+            "agenix_material_invalid",
+            "agenix material source must be a non-symlink regular file",
+        ));
+    }
+    Ok(source)
+}
+
+#[cfg(unix)]
+fn open_agenix_material(material_root: &Path, components: &[&str]) -> JanusResult<File> {
+    use rustix::fs::{open, openat, Mode, OFlags};
+
+    let directory_flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let mut directory = open(material_root, directory_flags, Mode::empty())
+        .map_err(|err| map_agenix_root_open_error(err.into()))?;
+    for component in &components[..components.len() - 1] {
+        directory = openat(&directory, *component, directory_flags, Mode::empty())
+            .map_err(|err| map_agenix_source_open_error(err.into()))?;
+    }
+    let source = openat(
+        &directory,
+        components[components.len() - 1],
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|err| map_agenix_source_open_error(err.into()))?;
+    Ok(File::from(source))
+}
+
+#[cfg(unix)]
+fn map_agenix_root_open_error(err: std::io::Error) -> JanusError {
+    if err.kind() == std::io::ErrorKind::NotFound {
+        agenix_import_denied(
+            "agenix_material_missing",
+            "agenix material source is not present",
+        )
+    } else {
+        agenix_import_denied(
+            "agenix_material_root_invalid",
+            "agenix material root must be a non-symlink directory",
+        )
+    }
+}
+
+#[cfg(unix)]
+fn map_agenix_source_open_error(err: std::io::Error) -> JanusError {
+    match err.kind() {
+        std::io::ErrorKind::NotFound => agenix_import_denied(
+            "agenix_material_missing",
+            "agenix material source is not present",
+        ),
+        std::io::ErrorKind::PermissionDenied => agenix_import_denied(
+            "agenix_material_unreadable",
+            "agenix material source could not be opened",
+        ),
+        _ => agenix_import_denied(
+            "agenix_material_invalid",
+            "agenix material source path is invalid",
+        ),
+    }
+}
+
+fn read_agenix_material(material_root: &Path, components: &[&str]) -> JanusResult<Vec<u8>> {
+    #[cfg(unix)]
+    let file = open_agenix_material(material_root, components)?;
+    #[cfg(not(unix))]
+    let file = {
+        let source = validate_agenix_source_path(material_root, components)?;
+        OpenOptions::new().read(true).open(source).map_err(|err| {
+            if err.kind() == std::io::ErrorKind::NotFound {
+                agenix_import_denied(
+                    "agenix_material_missing",
+                    "agenix material source is not present",
+                )
+            } else {
+                agenix_import_denied(
+                    "agenix_material_unreadable",
+                    "agenix material source could not be opened",
+                )
+            }
+        })?
+    };
+    let metadata = file.metadata().map_err(|_| {
+        agenix_import_denied(
+            "agenix_material_unreadable",
+            "agenix material source could not be inspected",
+        )
+    })?;
+    if !metadata.is_file() {
+        return Err(agenix_import_denied(
+            "agenix_material_invalid",
+            "agenix material source must be a regular file",
+        ));
+    }
+    if metadata.len() == 0 {
+        return Err(agenix_import_denied(
+            "agenix_material_empty",
+            "agenix material source must not be empty",
+        ));
+    }
+    if metadata.len() > MAX_AGENIX_MATERIAL_BYTES as u64 {
+        return Err(agenix_import_denied(
+            "agenix_material_oversized",
+            "agenix material source exceeds the size limit",
+        ));
+    }
+
+    let mut value = Vec::with_capacity(metadata.len() as usize);
+    let read_result = file
+        .take(MAX_AGENIX_MATERIAL_BYTES as u64 + 1)
+        .read_to_end(&mut value);
+    if read_result.is_err() {
+        value.zeroize();
+        return Err(agenix_import_denied(
+            "agenix_material_unreadable",
+            "agenix material source could not be read",
+        ));
+    }
+    if value.is_empty() {
+        value.zeroize();
+        return Err(agenix_import_denied(
+            "agenix_material_empty",
+            "agenix material source must not be empty",
+        ));
+    }
+    if value.len() > MAX_AGENIX_MATERIAL_BYTES {
+        value.zeroize();
+        return Err(agenix_import_denied(
+            "agenix_material_oversized",
+            "agenix material source exceeds the size limit",
+        ));
+    }
+    Ok(value)
+}
+
+fn agenix_import_denied(reason_code: &'static str, detail: &'static str) -> JanusError {
+    JanusError::policy_denied(reason_code, detail)
+}
+
 /// Encrypt one dynamically approved value into a caller-selected opaque
 /// custody reference without admitting a filesystem path from the caller.
 ///
@@ -2057,6 +2321,174 @@ AAAEADBJvjZT8X6JRJI8xVq/1aU8nMVgOtVnmdwqWwrSlXG3sKLqeplhpW+uObz5dvMgjz
             fixture.recipients.clone(),
         )
         .unwrap()
+    }
+
+    fn assert_agenix_import_policy_reason(error: JanusError, expected: &'static str) {
+        match error {
+            JanusError::PolicyDenied { reason_code, .. } => assert_eq!(reason_code, expected),
+            _ => panic!("agenix import returned the wrong error category"),
+        }
+    }
+
+    #[tokio::test]
+    async fn agenix_import_seals_catalog_material_and_is_idempotent() {
+        let fixture = fixture();
+        let material_root = fixture._tmp.path().join("agenix-material");
+        fs::create_dir(&material_root).unwrap();
+        let source = material_root.join(fixture.canary.as_str());
+        let mut material = vec![b'Q'; 37];
+        let mut material_text = String::from_utf8(material.clone()).unwrap();
+        fs::write(&source, &material).unwrap();
+        let mut store = store(&fixture, fixture.identity_file.clone());
+
+        let outcome = import_agenix_material_if_absent(&material_root, &fixture.canary, &mut store)
+            .await
+            .unwrap();
+        assert_eq!(outcome.action, "agenix.import");
+        assert!(outcome.changed);
+        assert!(!outcome.value_returned);
+        assert!(
+            !format!("{outcome:?}").contains(&material_text),
+            "agenix import outcome included material"
+        );
+        let recovered = store.get(&fixture.canary).await.unwrap();
+        assert!(
+            recovered.expose_bytes() == material.as_slice(),
+            "agenix import recovered different fixture bytes"
+        );
+        let listed = store.list().await.unwrap();
+        assert!(listed.len() == 1 && listed[0].present);
+
+        let target = store.path_for(&fixture.canary).unwrap();
+        let ciphertext = fs::read(&target).unwrap();
+        fs::remove_file(&source).unwrap();
+        let replay = import_agenix_material_if_absent(&material_root, &fixture.canary, &mut store)
+            .await
+            .unwrap();
+        assert_eq!(replay.action, "agenix.import");
+        assert!(!replay.changed);
+        assert!(!replay.value_returned);
+        assert!(
+            fs::read(&target).unwrap() == ciphertext,
+            "agenix import replay changed ciphertext"
+        );
+        material.zeroize();
+        material_text.zeroize();
+    }
+
+    #[tokio::test]
+    async fn agenix_import_rejects_missing_source_when_store_is_empty() {
+        let fixture = fixture();
+        let material_root = fixture._tmp.path().join("agenix-material");
+        fs::create_dir(&material_root).unwrap();
+        let mut store = store(&fixture, fixture.identity_file.clone());
+
+        let error = import_agenix_material_if_absent(&material_root, &fixture.canary, &mut store)
+            .await
+            .unwrap_err();
+        assert_agenix_import_policy_reason(error, "agenix_material_missing");
+    }
+
+    #[tokio::test]
+    async fn agenix_import_rejects_relative_material_root() {
+        let fixture = fixture();
+        let mut store = store(&fixture, fixture.identity_file.clone());
+
+        let error = import_agenix_material_if_absent(
+            Path::new("relative-agenix-material"),
+            &fixture.canary,
+            &mut store,
+        )
+        .await
+        .unwrap_err();
+        assert_agenix_import_policy_reason(error, "agenix_material_root_invalid");
+    }
+
+    #[tokio::test]
+    async fn agenix_import_rejects_invalid_name_path() {
+        let fixture = fixture();
+        let invalid = SecretName::new("../escape").unwrap();
+        let mut store = store(&fixture, fixture.identity_file.clone());
+
+        let error = import_agenix_material_if_absent(fixture._tmp.path(), &invalid, &mut store)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, JanusError::InvalidIdentifier { .. }));
+    }
+
+    #[tokio::test]
+    async fn agenix_import_rejects_name_outside_catalog() {
+        let fixture = fixture();
+        let outside = SecretName::new("OUTSIDE").unwrap();
+        let mut store = store(&fixture, fixture.identity_file.clone());
+
+        let error = import_agenix_material_if_absent(fixture._tmp.path(), &outside, &mut store)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, JanusError::NotInManifest { .. }));
+    }
+
+    #[tokio::test]
+    async fn agenix_import_rejects_empty_source() {
+        let fixture = fixture();
+        let material_root = fixture._tmp.path().join("agenix-material");
+        fs::create_dir(&material_root).unwrap();
+        fs::write(material_root.join(fixture.canary.as_str()), []).unwrap();
+        let mut store = store(&fixture, fixture.identity_file.clone());
+
+        let error = import_agenix_material_if_absent(&material_root, &fixture.canary, &mut store)
+            .await
+            .unwrap_err();
+        assert_agenix_import_policy_reason(error, "agenix_material_empty");
+    }
+
+    #[tokio::test]
+    async fn agenix_import_rejects_oversized_source() {
+        let fixture = fixture();
+        let material_root = fixture._tmp.path().join("agenix-material");
+        fs::create_dir(&material_root).unwrap();
+        let mut material = vec![0_u8; MAX_AGENIX_MATERIAL_BYTES + 1];
+        fs::write(material_root.join(fixture.canary.as_str()), &material).unwrap();
+        let mut store = store(&fixture, fixture.identity_file.clone());
+
+        let error = import_agenix_material_if_absent(&material_root, &fixture.canary, &mut store)
+            .await
+            .unwrap_err();
+        assert_agenix_import_policy_reason(error, "agenix_material_oversized");
+        material.zeroize();
+    }
+
+    #[tokio::test]
+    async fn agenix_import_rejects_non_regular_source() {
+        let fixture = fixture();
+        let material_root = fixture._tmp.path().join("agenix-material");
+        fs::create_dir(&material_root).unwrap();
+        fs::create_dir(material_root.join(fixture.canary.as_str())).unwrap();
+        let mut store = store(&fixture, fixture.identity_file.clone());
+
+        let error = import_agenix_material_if_absent(&material_root, &fixture.canary, &mut store)
+            .await
+            .unwrap_err();
+        assert_agenix_import_policy_reason(error, "agenix_material_invalid");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn agenix_import_rejects_symlink_source() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = fixture();
+        let material_root = fixture._tmp.path().join("agenix-material");
+        fs::create_dir(&material_root).unwrap();
+        let outside = fixture._tmp.path().join("outside-material");
+        fs::write(&outside, [b'X']).unwrap();
+        symlink(&outside, material_root.join(fixture.canary.as_str())).unwrap();
+        let mut store = store(&fixture, fixture.identity_file.clone());
+
+        let error = import_agenix_material_if_absent(&material_root, &fixture.canary, &mut store)
+            .await
+            .unwrap_err();
+        assert_agenix_import_policy_reason(error, "agenix_material_invalid");
     }
 
     fn metadata_overlay() -> SecretMetadataOverlay {
