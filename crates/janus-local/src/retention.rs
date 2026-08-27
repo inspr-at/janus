@@ -1926,6 +1926,7 @@ mod tests {
                 required: true,
                 trust_level: TrustLevel::L2,
                 allowed_uses: vec![profile_id.clone()],
+                material_lifetime: None,
                 present: true,
             };
             let descriptor_destroyed = SecretDescriptor {
@@ -1939,6 +1940,7 @@ mod tests {
                 required: false,
                 trust_level: TrustLevel::L2,
                 allowed_uses: vec![],
+                material_lifetime: None,
                 present: false,
             };
 

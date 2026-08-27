@@ -2368,6 +2368,7 @@ mod tests {
             required: true,
             trust_level: TrustLevel::L2,
             allowed_uses: vec![profile_id.clone()],
+            material_lifetime: None,
             present: true,
         };
         let profile = UseProfile {
@@ -2574,6 +2575,7 @@ mod tests {
             required: true,
             trust_level: TrustLevel::L1,
             allowed_uses: vec![profile_id],
+            material_lifetime: None,
             present: false,
         };
         let principal = PrincipalChain::new(
