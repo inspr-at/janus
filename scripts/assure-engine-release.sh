@@ -42,10 +42,10 @@ phase duty-journal-boundary   tests "durable duty authority boundary"
 phase security-properties     tests "bounded security properties"
 phase minimization-self-test  tests "minimization proof runner"
 phase adversarial-scenarios   tests "reviewed adversarial recovery corpus"
-phase managed-service-ux-rust tests "managed-service secret UX"
 phase cargo-test-all          tests "cargo tests"
 phase minimization-rust       tests "cross-surface Rust minimization proof"
 phase build-smoke-binaries    smoke "build smoke binaries"
+phase managed-service-ux-rust smoke "managed-service secret UX"
 phase runtime-planes-smoke    smoke "runtime process-plane boundary smoke"
 phase identity-smoke          smoke "authenticated actor identity-shadow smoke"
 phase warden-mcp-smoke        smoke "local Warden MCP smoke"
@@ -139,11 +139,6 @@ python3 scripts/run-adversarial-scenarios.py --self-test
 python3 scripts/run-adversarial-scenarios.py
 }
 
-run_managed_service_ux_rust() {
-python3 scripts/run-managed-service-ux-assurance.py --self-test
-python3 scripts/run-managed-service-ux-assurance.py --stack rust
-}
-
 run_cargo_test_all() {
 cargo test --all --locked
 }
@@ -154,6 +149,11 @@ python3 scripts/run-minimization-proof.py --stack rust
 
 run_build_smoke_binaries() {
 cargo build --locked -p janus-host -p janus-warden -p janusd
+}
+
+run_managed_service_ux_rust() {
+python3 scripts/run-managed-service-ux-assurance.py --self-test
+python3 scripts/run-managed-service-ux-assurance.py --stack rust
 }
 
 run_runtime_planes_smoke() {
