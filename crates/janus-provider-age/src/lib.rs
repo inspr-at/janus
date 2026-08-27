@@ -335,6 +335,50 @@ pub async fn create_dynamic_custody_if_absent(
     })
 }
 
+/// Encrypt an existing in-process value into a Janus-owned agenix export.
+///
+/// The validated secret name is the only input used to derive the filename.
+/// The export root must be an absolute normalized path, recipients must be
+/// valid public keys, and existing ciphertext is never replaced. This path
+/// does not return or reveal the value.
+pub async fn write_existing_agenix_value_if_absent(
+    export_root: impl Into<PathBuf>,
+    name: SecretName,
+    recipients: Vec<String>,
+    value: SecretValue,
+) -> JanusResult<AgeAdminOutcome> {
+    let export_root = export_root.into();
+    if !normalized_absolute_path(&export_root) {
+        return Err(JanusError::StoreUnavailable {
+            detail: "agenix export root must be an absolute normalized path".to_string(),
+        });
+    }
+    safe_name_path(&name)?;
+    let recipients = normalize_recipient_strings(recipients)?;
+    let recipient_count = recipients.len();
+    let path = export_root.join(format!("{}.age", name.as_str()));
+    let mut plaintext = Zeroizing::new(value.expose_bytes().to_vec());
+    tokio::task::spawn_blocking(move || {
+        let result = (|| {
+            let _lock = try_lock_store_exclusive(&export_root)?;
+            encrypt_to_new_file(&path, &export_root, &recipients, &plaintext)
+        })();
+        plaintext.zeroize();
+        result
+    })
+    .await
+    .map_err(|err| JanusError::StoreUnavailable {
+        detail: format!("existing-value agenix write task failed: {err}"),
+    })??;
+    Ok(AgeAdminOutcome {
+        action: "agenix.write.existing",
+        changed: true,
+        present_secrets: 1,
+        recipient_count,
+        value_returned: false,
+    })
+}
+
 /// Open one opaque dynamic custody object for a reviewed internal consumer.
 ///
 /// The caller supplies only the validated managed secret reference. The final
@@ -2250,6 +2294,168 @@ AAAEADBJvjZT8X6JRJI8xVq/1aU8nMVgOtVnmdwqWwrSlXG3sKLqeplhpW+uObz5dvMgjz
         assert_eq!(
             decrypt_file(&ciphertext, &[identity_file]).unwrap(),
             b"first-value"
+        );
+    }
+
+    fn decrypt_existing_agenix_fixture(path: &Path, identity: &age::x25519::Identity) -> Vec<u8> {
+        let encrypted = fs::read(path).unwrap();
+        let decryptor = Decryptor::new_buffered(&encrypted[..]).unwrap();
+        let identity_ref = identity as &dyn age::Identity;
+        let mut reader = decryptor.decrypt(std::iter::once(identity_ref)).unwrap();
+        let mut plaintext = Vec::new();
+        reader.read_to_end(&mut plaintext).unwrap();
+        plaintext
+    }
+
+    #[tokio::test]
+    async fn existing_agenix_write_encrypts_for_every_recipient_without_returning_value() {
+        let temporary = TempDir::new().unwrap();
+        let identities = (0..3)
+            .map(|_| age::x25519::Identity::generate())
+            .collect::<Vec<_>>();
+        let recipients = identities
+            .iter()
+            .map(|identity| identity.to_public().to_string())
+            .collect::<Vec<_>>();
+        let expected = b"existing-agenix-fixture-value";
+        let name = SecretName::new("fixture-service-env").unwrap();
+        let export_root = temporary.path().join("agenix-export");
+
+        let outcome = write_existing_agenix_value_if_absent(
+            export_root.clone(),
+            name,
+            recipients,
+            SecretValue::new(expected.to_vec()),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome.action, "agenix.write.existing");
+        assert!(outcome.changed);
+        assert_eq!(outcome.present_secrets, 1);
+        assert_eq!(outcome.recipient_count, identities.len());
+        assert!(!outcome.value_returned);
+        let outcome_debug = format!("{outcome:?}");
+        assert!(
+            !outcome_debug.contains(std::str::from_utf8(expected).unwrap()),
+            "existing-value write outcome debug must remain value-free"
+        );
+
+        let ciphertext = export_root.join("fixture-service-env.age");
+        for identity in &identities {
+            let mut recovered = decrypt_existing_agenix_fixture(&ciphertext, identity);
+            assert!(
+                recovered.as_slice() == expected,
+                "fixture recipient could not recover the expected bytes"
+            );
+            recovered.zeroize();
+        }
+    }
+
+    #[tokio::test]
+    async fn existing_agenix_write_rejects_empty_recipients() {
+        let temporary = TempDir::new().unwrap();
+        let export_root = temporary.path().join("agenix-export");
+        let result = write_existing_agenix_value_if_absent(
+            export_root.clone(),
+            SecretName::new("fixture-service-env").unwrap(),
+            Vec::new(),
+            SecretValue::new(b"fixture-value".to_vec()),
+        )
+        .await;
+
+        assert!(result.is_err(), "empty recipients must fail closed");
+        assert!(
+            !export_root.join("fixture-service-env.age").exists(),
+            "recipient validation failure must not create ciphertext"
+        );
+    }
+
+    #[tokio::test]
+    async fn existing_agenix_write_never_overwrites_existing_ciphertext() {
+        let temporary = TempDir::new().unwrap();
+        let identity = age::x25519::Identity::generate();
+        let recipient = identity.to_public().to_string();
+        let export_root = temporary.path().join("agenix-export");
+        let name = SecretName::new("fixture-service-env").unwrap();
+        write_existing_agenix_value_if_absent(
+            export_root.clone(),
+            name.clone(),
+            vec![recipient.clone()],
+            SecretValue::new(b"fixture-original".to_vec()),
+        )
+        .await
+        .unwrap();
+        let path = export_root.join("fixture-service-env.age");
+        let original_ciphertext = fs::read(&path).unwrap();
+
+        let result = write_existing_agenix_value_if_absent(
+            export_root,
+            name,
+            vec![recipient],
+            SecretValue::new(b"fixture-replacement".to_vec()),
+        )
+        .await;
+
+        assert!(
+            matches!(
+                result,
+                Err(JanusError::PolicyDenied {
+                    reason_code: "entry_target_present",
+                    ..
+                })
+            ),
+            "existing ciphertext must fail with the value-free presence reason"
+        );
+        let current_ciphertext = fs::read(path).unwrap();
+        assert!(
+            current_ciphertext == original_ciphertext,
+            "rejected write must leave existing ciphertext unchanged"
+        );
+    }
+
+    #[tokio::test]
+    async fn existing_agenix_write_rejects_relative_export_root() {
+        let identity = age::x25519::Identity::generate();
+        let result = write_existing_agenix_value_if_absent(
+            PathBuf::from("relative-agenix-export"),
+            SecretName::new("fixture-service-env").unwrap(),
+            vec![identity.to_public().to_string()],
+            SecretValue::new(b"fixture-value".to_vec()),
+        )
+        .await;
+
+        assert!(result.is_err(), "relative export roots must fail closed");
+    }
+
+    #[tokio::test]
+    async fn existing_agenix_write_rejects_invalid_recipient_and_name() {
+        let temporary = TempDir::new().unwrap();
+        let export_root = temporary.path().join("agenix-export");
+        let invalid_recipient = write_existing_agenix_value_if_absent(
+            export_root.clone(),
+            SecretName::new("fixture-service-env").unwrap(),
+            vec!["invalid-fixture-recipient".to_string()],
+            SecretValue::new(b"fixture-value".to_vec()),
+        )
+        .await;
+        assert!(
+            invalid_recipient.is_err(),
+            "invalid recipients must fail closed"
+        );
+
+        let identity = age::x25519::Identity::generate();
+        let invalid_name = write_existing_agenix_value_if_absent(
+            export_root,
+            SecretName::new("../fixture-escape").unwrap(),
+            vec![identity.to_public().to_string()],
+            SecretValue::new(b"fixture-value".to_vec()),
+        )
+        .await;
+        assert!(invalid_name.is_err(), "unsafe names must fail closed");
+        assert!(
+            !temporary.path().join("fixture-escape.age").exists(),
+            "unsafe names must not escape the export root"
         );
     }
 

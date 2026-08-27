@@ -52,6 +52,9 @@ crates/janus-provider-age/src/lib.rs:private-key:1893
 # JANUS-445 adds production code above the same reviewed in-process fixture.
 # Keep this commit-independent so squash-merging cannot invalidate the scan.
 crates/janus-provider-age/src/lib.rs:private-key:2162
+# JANUS-447 adds the existing-value write primitive above the same reviewed
+# in-process fixture. Commit-independent so squash-merging cannot invalidate it.
+crates/janus-provider-age/src/lib.rs:private-key:2206
 go-envelope/main_test.go:generic-api-key:743
 contracts/managed-service-secret-contract-v1.json:generic-api-key:56
 faecb360b704e7ad7222f7dc3b640afb5a4dcb74:crates/janus-provider-age/src/lib.rs:private-key:1690
