@@ -7,10 +7,11 @@ cargo test, and a cache-backed container minimization proof) and `smoke`
 (build the daemon binaries once, then the with-runtime-authority smoke scripts) — with a
 fan-in job that keeps the original `check-assurance` required check name.
 
-`scripts/assure-engine-release.sh --list-phases` prints the exact table the
-script dispatches from: not a separately maintained description of it. This
-combines that live table with SHA-256 hashes of the dispatched `run_*`
-function bodies, then compares it against a reviewed baseline
+The phase table is parsed from the same source the script dispatches from,
+not a separately maintained description. This combines that table with
+SHA-256 hashes of the dispatched `run_*` function bodies and a hash of the
+whole script (including dispatch and environment setup), then compares it
+against a reviewed baseline
 (`config/assurance/engine-release-phases-v1.json`) so a future edit cannot
 silently drop a gate, rename it out from under `report-rust-release-timing.py`,
 or move it into the wrong fan-out group.
@@ -52,6 +53,10 @@ def command_hashes(script: Path) -> dict[str, str]:
     return hashes
 
 
+def script_hash(script: Path) -> str:
+    return hashlib.sha256(script.read_bytes()).hexdigest()
+
+
 def list_phases(script: Path) -> list[dict]:
     source = script.read_text(encoding="utf-8")
     commands = command_hashes(script)
@@ -89,9 +94,18 @@ def validate(phases: list[dict]) -> None:
             raise InventoryError(f"phase {phase['slug']} has no reviewed command hash")
 
 
-def compare(actual: list[dict], baseline: list[dict]) -> None:
+def compare(
+    actual: list[dict],
+    baseline: list[dict],
+    actual_script_hash: str,
+    baseline_script_hash: str,
+) -> None:
     if actual != baseline:
         raise InventoryError("phase inventory diverged from the reviewed baseline")
+    if not re.fullmatch(r"[0-9a-f]{64}", baseline_script_hash):
+        raise InventoryError("baseline has no reviewed script hash")
+    if actual_script_hash != baseline_script_hash:
+        raise InventoryError("assurance script diverged from the reviewed baseline")
 
 
 def self_test() -> None:
@@ -100,7 +114,7 @@ def self_test() -> None:
         {"slug": "b", "group": "smoke", "label": "B", "commands_sha256": "b" * 64},
     ]
     validate(good)
-    compare(good, good)
+    compare(good, good, "c" * 64, "c" * 64)
 
     negative_fixtures = {
         "no phases declared": [],
@@ -128,18 +142,30 @@ def self_test() -> None:
         raise AssertionError(f"negative phase fixture was accepted: {expected}")
 
     try:
-        compare(good, [good[0]])
+        compare(good, [good[0]], "c" * 64, "c" * 64)
     except InventoryError:
         pass
     else:
         raise AssertionError("negative baseline fixture was accepted")
 
     try:
-        compare(good, [good[1], good[0]])
+        compare(good, [good[1], good[0]], "c" * 64, "c" * 64)
     except InventoryError:
         pass
     else:
         raise AssertionError("reordered baseline fixture was accepted")
+
+    for actual_hash, baseline_hash, expected in (
+        ("d" * 64, "c" * 64, "assurance script diverged from the reviewed baseline"),
+        ("c" * 64, "invalid", "baseline has no reviewed script hash"),
+    ):
+        try:
+            compare(good, good, actual_hash, baseline_hash)
+        except InventoryError as caught:
+            if str(caught) != expected:
+                raise AssertionError(f"unexpected script-hash error: {caught}")
+            continue
+        raise AssertionError(f"negative script-hash fixture was accepted: {expected}")
 
     with tempfile.TemporaryDirectory(prefix="janus-assurance-inventory-") as directory:
         fixture = Path(directory) / "assure.sh"
@@ -157,11 +183,23 @@ def self_test() -> None:
         if first[0]["commands_sha256"] == second[0]["commands_sha256"]:
             raise AssertionError("changed phase commands retained the reviewed hash")
         try:
-            compare(second, first)
+            compare(second, first, script_hash(fixture), script_hash(fixture))
         except InventoryError:
             pass
         else:
             raise AssertionError("changed phase commands matched the reviewed baseline")
+
+        reviewed_script_hash = script_hash(fixture)
+        fixture.write_text(
+            fixture.read_text(encoding="utf-8") + '\nprintf "dispatch changed\\n"\n',
+            encoding="utf-8",
+        )
+        try:
+            compare(second, second, script_hash(fixture), reviewed_script_hash)
+        except InventoryError:
+            pass
+        else:
+            raise AssertionError("changed assurance dispatch matched the reviewed script hash")
 
 
 def main() -> int:
@@ -175,10 +213,11 @@ def main() -> int:
             return 0
         baseline_document = json.loads(BASELINE.read_text())
         baseline = baseline_document["phases"]
+        baseline_script_hash = baseline_document["script_sha256"]
         validate(baseline)
         actual = list_phases(SCRIPT)
         validate(actual)
-        compare(actual, baseline)
+        compare(actual, baseline, script_hash(SCRIPT), baseline_script_hash)
     except (
         InventoryError,
         OSError,

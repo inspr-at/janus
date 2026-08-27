@@ -49,7 +49,9 @@ def report(
     for job in timed_jobs:
         if job.get("conclusion") not in ("success", "skipped"):
             raise ValueError(f"job did not succeed or skip cleanly: {job.get('name')}")
-    started = min(timestamp(job["started_at"]) for job in timed_jobs)
+    # Include runner queue time: a developer experiences the run from its
+    # creation, not merely from the first job receiving a runner.
+    started = timestamp(run["created_at"])
     completed = max(timestamp(job["completed_at"]) for job in timed_jobs)
     critical_path = round((completed - started).total_seconds())
     document: dict[str, object] = {
@@ -90,7 +92,7 @@ def self_test() -> None:
         {"name": "a", "conclusion": "success", "started_at": stamp(0), "completed_at": stamp(30)},
         {"name": "b", "conclusion": "skipped", "started_at": stamp(5), "completed_at": stamp(65)},
     ]
-    run = {"id": 7, "head_sha": "b" * 40}
+    run = {"id": 7, "head_sha": "b" * 40, "created_at": stamp(0)}
     cache = {"playwright": True, "rust-cache": False}
 
     document = report(run, jobs, cache, 90)

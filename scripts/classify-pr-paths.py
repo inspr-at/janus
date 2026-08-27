@@ -35,6 +35,16 @@ GO_ONLY_PREFIXES = (
     "browser-qa/",
     "docs/",
 )
+# These documents are executable assurance inputs: the duty-journal boundary
+# phase validates required recovery/rollback markers in them. Keep the broader
+# docs family cheap while failing closed for the two files that can break a
+# skipped Rust assurance phase.
+GO_ONLY_EXCLUDED_FILES = frozenset(
+    {
+        "docs/durable-duty-journal.md",
+        "docs/runtime-accountability-runbook.md",
+    }
+)
 # Individual files outside those prefixes that are also proven go-only.
 GO_ONLY_FILES = frozenset(
     {
@@ -46,6 +56,8 @@ GO_ONLY_FILES = frozenset(
 
 
 def is_go_only_path(path: str) -> bool:
+    if path in GO_ONLY_EXCLUDED_FILES:
+        return False
     if path in GO_ONLY_FILES:
         return True
     return any(path.startswith(prefix) for prefix in GO_ONLY_PREFIXES)
@@ -94,6 +106,10 @@ FIXTURES = {
         "package.json",
         "package-lock.json",
     ],
+    "assurance_docs": [
+        "docs/durable-duty-journal.md",
+        "docs/runtime-accountability-runbook.md",
+    ],
     "rust": ["crates/janus-core/src/lib.rs"],
     "rust_lock": ["Cargo.lock"],
     "rust_toolchain": ["rust-toolchain.toml"],
@@ -117,6 +133,7 @@ def self_test() -> None:
     assert result["go_only"] is True, "the reviewed go-only family failed to classify as go-only"
     for name in (
         "rust",
+        "assurance_docs",
         "rust_lock",
         "rust_toolchain",
         "nix",

@@ -56,18 +56,18 @@ run as two independent CI jobs — `check-assurance-tests` and
 `check-assurance-smoke` — with a `check-assurance` fan-in job that keeps the
 original required check name and re-verifies the phase inventory.
 
-The phase table lives in the script itself
-(`scripts/assure-engine-release.sh --list-phases`), not in a separately
-maintained description of it, so it cannot drift from what actually runs.
-`scripts/check-engine-assurance-inventory.py` compares that live table
-against the reviewed baseline
+The phase table lives in the script itself, not in a separately maintained
+description, so it cannot drift from what actually runs.
+`scripts/check-engine-assurance-inventory.py` parses that source table and
+compares it against the reviewed baseline
 (`config/assurance/engine-release-phases-v1.json`) on every assurance run.
 The baseline pins both the dispatch metadata and a SHA-256 of each phase's
-actual `run_*` function body, so deleting or changing a command also fails
-closed. A future edit that silently drops, renames, regroups, or guts one of
-the 23 gates fails this check before it fails anything more expensive. `--phase all`
-(the default, used by local devs and the docs that reference this script by
-name) still runs every phase; only the tests/smoke split order changed
+actual `run_*` function body, plus a SHA-256 of the complete assurance script
+covering dispatch and environment setup. Deleting or changing a command also
+fails closed. A future edit that silently drops, renames, regroups, or guts one
+of the 23 gates fails this check before it fails anything more expensive.
+`--phase all` (the default, used by local devs and the docs that reference this
+script by name) still runs every phase; only the tests/smoke split order changed
 slightly, since neither group has an ordering dependency on the other.
 
 The reviewed target is a warm critical path (the slower of the two proof

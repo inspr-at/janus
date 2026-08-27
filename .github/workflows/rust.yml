@@ -158,7 +158,6 @@ jobs:
           load: true
           tags: janus-engine:minimization
           cache-from: type=gha,scope=rust-engine-linux-amd64
-          cache-to: type=gha,scope=rust-engine-minimization-amd64,mode=max
       - name: engine release assurance gate (tests)
         if: needs.classify.result != 'success' || needs.classify.outputs.go_only != 'true'
         env:
@@ -418,6 +417,7 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       actions: read
+      contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: measure PR-path critical path

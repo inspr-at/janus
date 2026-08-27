@@ -2,6 +2,7 @@
   "schema_version": 1,
   "owner": "JANUS-438",
   "reviewed_on": "2026-08-27",
+  "script_sha256": "b66d92b403d8324e8ff893ab4dee8d3ee696ba56c0ad711d79bdebbb95ea7ed6",
   "phases": [
     { "slug": "release-docs", "group": "tests", "label": "release documentation contract", "commands_sha256": "16ee9889bc2577c35c133208c4ef8d6cccfa3501828f2ea2e3ef81ddbbc1d374" },
     { "slug": "external-stage-pins", "group": "tests", "label": "immutable Paimos external-stage v1 pins", "commands_sha256": "8eb2fe0ac9e7dfb865b0d72184108ab15aa9bc7ddd7fb0de9ffc7739703c372f" },

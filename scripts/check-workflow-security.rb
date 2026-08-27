@@ -166,6 +166,16 @@ def validate(workflows)
     minimization_build.dig("with", "tags") == "janus-engine:minimization",
     "rust_minimization_build_tag_invalid"
   )
+  require_gate(minimization_build.dig("with", "context") == ".", "rust_minimization_context_invalid")
+  require_gate(
+    minimization_build.dig("with", "file") == "Dockerfile.engine",
+    "rust_minimization_dockerfile_invalid"
+  )
+  require_gate(
+    minimization_build.dig("with", "platforms") == "linux/amd64",
+    "rust_minimization_platform_invalid"
+  )
+  require_gate(minimization_build.dig("with", "load") == true, "rust_minimization_load_invalid")
   require_gate(
     minimization_build.dig("with", "cache-from") == "type=gha,scope=rust-engine-linux-amd64",
     "rust_minimization_cache_source_invalid"
