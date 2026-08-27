@@ -5,15 +5,16 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use fs2::FileExt;
 use janus_core::{
-    ActorObservationV1, ActorSubjectClass, ActorSubjectRef, IdentityBindingMigrationManifestV1,
-    IdentityTransportManifestV1, JanusError, JanusResult, ScopeRef, TrustAdapterKind,
-    ACTOR_OBSERVATION_SCHEMA, MAX_ACTOR_ASSERTION_TTL,
+    AccountabilityPosture, ActorObservationV1, ActorSubjectClass, ActorSubjectRef,
+    IdentityBindingMigrationManifestV1, IdentityTransportManifestV1, JanusError, JanusResult,
+    ScopeRef, TrustAdapterKind, ACTOR_OBSERVATION_SCHEMA, MAX_ACTOR_ASSERTION_TTL,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -31,6 +32,7 @@ const MAX_SUBJECT_RECORDS: usize = 4_096;
 const MAX_REQUEST_BYTES: usize = 16 * 1024;
 const STALE_SOCKET_PROBES: u32 = 10;
 const STALE_SOCKET_PROBE_PAUSE: Duration = Duration::from_millis(50);
+const IDENTITY_SOCKET_GROUP_ENV: &str = "JANUS_IDENTITY_SOCKET_GROUP_ID";
 
 /// Private durable enrollment. The local UID never appears in public output.
 #[derive(Clone, Deserialize, Serialize)]
@@ -276,6 +278,16 @@ impl FileSubjectRegistry {
             .records()?
             .into_values()
             .map(|record| record.entry)
+            .collect())
+    }
+
+    /// Private reachability inventory. Local UIDs never leave broker startup.
+    pub(crate) fn active_local_uids(&self) -> JanusResult<Vec<u32>> {
+        Ok(self
+            .records()?
+            .into_values()
+            .filter(|record| record.entry.status == SubjectRegistryStatus::Active)
+            .map(|record| record.local_uid)
             .collect())
     }
 
@@ -946,31 +958,255 @@ pub fn load_or_create_identity_signing_key(path: &Path) -> JanusResult<SigningKe
     }
 }
 
-/// Bind one new private identity socket; occupied paths fail closed.
-/// Bind the private identity socket. An absent path binds directly. A socket
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IdentitySocketAccess {
+    OwnerOnly { owner_uid: u32 },
+    ReviewedGroup { owner_uid: u32, group_gid: u32 },
+}
+
+impl IdentitySocketAccess {
+    fn owner_only() -> Self {
+        Self::OwnerOnly {
+            owner_uid: crate::identity_admin::current_euid(),
+        }
+    }
+
+    fn for_posture(posture: AccountabilityPosture) -> JanusResult<Self> {
+        if posture == AccountabilityPosture::AccountabilityLegacy {
+            return Ok(Self::owner_only());
+        }
+        match std::env::var(IDENTITY_SOCKET_GROUP_ENV) {
+            Ok(value) => {
+                let group_gid = value.parse::<u32>().ok().filter(|gid| *gid != u32::MAX);
+                group_gid
+                    .map(|group_gid| Self::ReviewedGroup {
+                        owner_uid: crate::identity_admin::current_euid(),
+                        group_gid,
+                    })
+                    .ok_or_else(|| unavailable("identity socket access policy invalid"))
+            }
+            Err(std::env::VarError::NotPresent) => Ok(Self::owner_only()),
+            Err(std::env::VarError::NotUnicode(_)) => {
+                Err(unavailable("identity socket access policy invalid"))
+            }
+        }
+    }
+
+    fn permits_uid_with(self, uid: u32, group_member: &mut impl FnMut(u32, u32) -> bool) -> bool {
+        match self {
+            Self::OwnerOnly { owner_uid } => uid == owner_uid,
+            Self::ReviewedGroup {
+                owner_uid,
+                group_gid,
+            } => uid == owner_uid || group_member(uid, group_gid),
+        }
+    }
+}
+
+/// Prove that every active enrollment is uniquely resolvable and covered by
+/// the exact owner/group policy that the socket bind will apply. Account lookup
+/// output is consumed locally and is never logged, audited, or returned.
+pub(crate) fn prove_enforced_subject_reachability(
+    registry: &FileSubjectRegistry,
+) -> JanusResult<bool> {
+    let access = IdentitySocketAccess::for_posture(AccountabilityPosture::EnforcedRecorded)?;
+    prove_subject_reachability_with(registry, access, system_group_membership)
+}
+
+fn prove_subject_reachability_with(
+    registry: &FileSubjectRegistry,
+    access: IdentitySocketAccess,
+    mut group_member: impl FnMut(u32, u32) -> bool,
+) -> JanusResult<bool> {
+    let active_uids = registry.active_local_uids()?;
+    for uid in active_uids {
+        if registry.resolve_local_uid(uid).is_err()
+            || !access.permits_uid_with(uid, &mut group_member)
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn system_group_membership(uid: u32, group_gid: u32) -> bool {
+    let Some(id_command) = trusted_id_command() else {
+        return false;
+    };
+    let uid_argument = uid.to_string();
+    let Ok(resolved_uid) = Command::new(&id_command)
+        .arg("-u")
+        .arg(&uid_argument)
+        .output()
+    else {
+        return false;
+    };
+    if !resolved_uid.status.success()
+        || std::str::from_utf8(&resolved_uid.stdout)
+            .map(str::trim)
+            .ok()
+            != Some(uid_argument.as_str())
+    {
+        return false;
+    }
+    let Ok(output) = Command::new(id_command)
+        .arg("-G")
+        .arg(uid_argument)
+        .output()
+    else {
+        return false;
+    };
+    output.status.success()
+        && std::str::from_utf8(&output.stdout).is_ok_and(|groups| {
+            groups
+                .split_ascii_whitespace()
+                .any(|group| group.parse::<u32>() == Ok(group_gid))
+        })
+}
+
+/// Resolve only an immutable, root-owned account lookup program. This keeps a
+/// caller-controlled PATH from manufacturing reachability evidence while also
+/// supporting immutable package-store installations.
+fn trusted_id_command() -> Option<PathBuf> {
+    let mut candidates = vec![PathBuf::from("/usr/bin/id"), PathBuf::from("/bin/id")];
+    if let Some(path) = std::env::var_os("PATH") {
+        candidates.extend(std::env::split_paths(&path).map(|directory| directory.join("id")));
+    }
+    candidates.into_iter().find_map(|candidate| {
+        let resolved = fs::canonicalize(candidate).ok()?;
+        let metadata = fs::symlink_metadata(&resolved).ok()?;
+        if !metadata.is_file()
+            || metadata.uid() != 0
+            || metadata.permissions().mode() & 0o022 != 0
+            || !trusted_executable_parents(resolved.parent()?)
+        {
+            return None;
+        }
+        Some(resolved)
+    })
+}
+
+fn trusted_executable_parents(mut directory: &Path) -> bool {
+    loop {
+        let Ok(metadata) = fs::symlink_metadata(directory) else {
+            return false;
+        };
+        if !metadata.is_dir()
+            || metadata.file_type().is_symlink()
+            || metadata.uid() != 0
+            || metadata.permissions().mode() & 0o022 != 0
+        {
+            return false;
+        }
+        let Some(parent) = directory.parent() else {
+            return true;
+        };
+        if parent == directory {
+            return true;
+        }
+        directory = parent;
+    }
+}
+
+/// Bind one identity socket under the posture-selected owner/group policy.
+/// An absent path binds directly. A socket
 /// file left behind by a previous broker (sidecar torn down, host crash) is
 /// reclaimed only when it is a real socket, owned like its private parent, and
 /// refuses connections. A live broker, symlink, non-socket entry, or foreign
 /// owner fails closed with `identity_socket_occupied` (JANUS-451).
 pub fn bind_private_identity_socket(path: &Path) -> JanusResult<UnixListener> {
+    let access = std::env::var("JANUS_ACCOUNTABILITY_POSTURE")
+        .ok()
+        .and_then(|value| AccountabilityPosture::parse(&value).ok())
+        .map(IdentitySocketAccess::for_posture)
+        .transpose()?
+        .unwrap_or_else(IdentitySocketAccess::owner_only);
+    bind_identity_socket_with_access(path, access)
+}
+
+fn bind_identity_socket_with_access(
+    path: &Path,
+    access: IdentitySocketAccess,
+) -> JanusResult<UnixListener> {
     let parent = path
         .parent()
         .ok_or_else(|| unavailable("identity socket path invalid"))?;
-    ensure_private_directory(parent)?;
+    ensure_identity_socket_directory(parent, access)?;
     if let Ok(existing) = fs::symlink_metadata(path) {
-        reclaim_dead_identity_socket(path, parent, &existing)?;
+        reclaim_dead_identity_socket(path, parent, &existing, access)?;
     }
     let listener =
         UnixListener::bind(path).map_err(|_| unavailable("identity socket bind failed"))?;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-        .map_err(|_| unavailable("identity socket permissions failed"))?;
+    let configured: io::Result<()> = match access {
+        IdentitySocketAccess::OwnerOnly { .. } => {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+        }
+        IdentitySocketAccess::ReviewedGroup { group_gid, .. } => {
+            rustix::fs::chown(path, None, Some(rustix::process::Gid::from_raw(group_gid)))
+                .map_err(io::Error::from)
+                .and_then(|()| fs::set_permissions(path, fs::Permissions::from_mode(0o660)))
+        }
+    };
+    if configured.is_err() {
+        drop(listener);
+        let _ = fs::remove_file(path);
+        return Err(unavailable("identity socket permissions failed"));
+    }
     Ok(listener)
+}
+
+fn ensure_identity_socket_directory(path: &Path, access: IdentitySocketAccess) -> JanusResult<()> {
+    if matches!(access, IdentitySocketAccess::OwnerOnly { .. }) {
+        return ensure_private_directory(path);
+    }
+    let IdentitySocketAccess::ReviewedGroup {
+        owner_uid,
+        group_gid,
+    } = access
+    else {
+        unreachable!();
+    };
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => validate_group_socket_dir(&metadata, owner_uid, group_gid),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            fs::create_dir_all(path)
+                .map_err(|_| unavailable("identity socket directory unavailable"))?;
+            rustix::fs::chown(path, None, Some(rustix::process::Gid::from_raw(group_gid)))
+                .map_err(|_| unavailable("identity socket directory group unavailable"))?;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o710))
+                .map_err(|_| unavailable("identity socket directory permissions unavailable"))?;
+            validate_group_socket_dir(
+                &fs::symlink_metadata(path)
+                    .map_err(|_| unavailable("identity socket directory unavailable"))?,
+                owner_uid,
+                group_gid,
+            )
+        }
+        Err(_) => Err(unavailable("identity socket directory unavailable")),
+    }
+}
+
+fn validate_group_socket_dir(
+    metadata: &fs::Metadata,
+    owner_uid: u32,
+    group_gid: u32,
+) -> JanusResult<()> {
+    if !metadata.is_dir()
+        || metadata.file_type().is_symlink()
+        || metadata.permissions().mode() & 0o777 != 0o710
+        || metadata.uid() != owner_uid
+        || metadata.gid() != group_gid
+    {
+        return Err(unavailable("identity socket directory access invalid"));
+    }
+    Ok(())
 }
 
 fn reclaim_dead_identity_socket(
     path: &Path,
     parent: &Path,
     existing: &fs::Metadata,
+    access: IdentitySocketAccess,
 ) -> JanusResult<()> {
     use std::os::unix::fs::{FileTypeExt, MetadataExt};
     let occupied = |detail: &'static str| identity_error("identity_socket_occupied", detail);
@@ -983,6 +1219,11 @@ fn reclaim_dead_identity_socket(
         .map_err(|_| unavailable("private identity directory unavailable"))?;
     if existing.uid() != parent_metadata.uid() {
         return Err(occupied("identity socket path is owned by another user"));
+    }
+    if let IdentitySocketAccess::ReviewedGroup { group_gid, .. } = access {
+        if existing.gid() != group_gid || existing.permissions().mode() & 0o777 != 0o660 {
+            return Err(occupied("identity socket access policy does not match"));
+        }
     }
     // A broker that just exited can leave a socket the kernel still reports as
     // connectable for a moment; a live broker stays connectable. Probe a few
@@ -1357,20 +1598,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bind_takes_over_only_dead_sockets_and_fails_closed_otherwise() {
+    async fn legacy_owner_only_bind_reclaims_dead_sockets_and_stays_0600() {
         let directory = private_tempdir();
         let socket = directory.path().join("identity.sock");
+        let access = IdentitySocketAccess::owner_only();
 
         // A fresh path binds; a dead leftover from a previous broker is reclaimed.
-        drop(bind_private_identity_socket(&socket).unwrap());
+        drop(bind_identity_socket_with_access(&socket, access).unwrap());
+        assert_eq!(
+            fs::symlink_metadata(&socket).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
         assert!(
             socket.exists(),
             "socket file must outlive the listener here"
         );
-        let reclaimed = bind_private_identity_socket(&socket).unwrap();
+        let reclaimed = bind_identity_socket_with_access(&socket, access).unwrap();
+        assert_eq!(
+            fs::symlink_metadata(&socket).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
 
         // A live broker is never displaced.
-        let occupied = bind_private_identity_socket(&socket).unwrap_err();
+        let occupied = bind_identity_socket_with_access(&socket, access).unwrap_err();
         assert_eq!(reason_of(occupied), "identity_socket_occupied");
         assert!(socket.exists());
         drop(reclaimed);
@@ -1379,7 +1629,7 @@ mod tests {
         let regular = directory.path().join("regular.sock");
         fs::write(&regular, b"not a socket").unwrap();
         assert_eq!(
-            reason_of(bind_private_identity_socket(&regular).unwrap_err()),
+            reason_of(bind_identity_socket_with_access(&regular, access).unwrap_err()),
             "identity_socket_occupied"
         );
         assert!(regular.exists());
@@ -1389,7 +1639,7 @@ mod tests {
         let link = directory.path().join("link.sock");
         std::os::unix::fs::symlink(&target, &link).unwrap();
         assert_eq!(
-            reason_of(bind_private_identity_socket(&link).unwrap_err()),
+            reason_of(bind_identity_socket_with_access(&link, access).unwrap_err()),
             "identity_socket_occupied"
         );
         assert!(link.exists() && target.exists());
@@ -1399,6 +1649,60 @@ mod tests {
         assert!(!socket.exists());
         unlink_identity_socket(&regular);
         assert!(regular.exists());
+    }
+
+    #[tokio::test]
+    async fn reviewed_group_bind_is_0660_and_reclaims_only_matching_socket() {
+        let directory = private_tempdir();
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o710)).unwrap();
+        let metadata = fs::symlink_metadata(directory.path()).unwrap();
+        let access = IdentitySocketAccess::ReviewedGroup {
+            owner_uid: metadata.uid(),
+            group_gid: metadata.gid(),
+        };
+        let socket = directory.path().join("identity.sock");
+
+        drop(bind_identity_socket_with_access(&socket, access).unwrap());
+        let bound = fs::symlink_metadata(&socket).unwrap();
+        assert_eq!(bound.permissions().mode() & 0o777, 0o660);
+        assert_eq!(bound.gid(), metadata.gid());
+
+        let reclaimed = bind_identity_socket_with_access(&socket, access).unwrap();
+        assert_eq!(
+            fs::symlink_metadata(&socket).unwrap().permissions().mode() & 0o777,
+            0o660
+        );
+        drop(reclaimed);
+    }
+
+    #[test]
+    fn reachability_requires_every_unique_active_uid_to_match_owner_or_group() {
+        let directory = private_tempdir();
+        let registry = FileSubjectRegistry::new(directory.path().join("subjects"), "fixture-host");
+        registry
+            .enroll_local(501, ActorSubjectClass::Human, b"review-one", UNIX_EPOCH)
+            .unwrap();
+        registry
+            .enroll_local(502, ActorSubjectClass::Human, b"review-two", UNIX_EPOCH)
+            .unwrap();
+        let access = IdentitySocketAccess::ReviewedGroup {
+            owner_uid: 501,
+            group_gid: 42,
+        };
+
+        assert!(
+            prove_subject_reachability_with(&registry, access, |uid, gid| {
+                uid == 502 && gid == 42
+            })
+            .unwrap()
+        );
+        assert!(!prove_subject_reachability_with(&registry, access, |_uid, _gid| false).unwrap());
+        assert!(!prove_subject_reachability_with(
+            &registry,
+            IdentitySocketAccess::OwnerOnly { owner_uid: 501 },
+            |_uid, _gid| true,
+        )
+        .unwrap());
     }
 
     fn scope() -> ScopeRef {
