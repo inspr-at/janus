@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "owner": "JANUS-438",
+  "reviewed_on": "2026-08-27",
+  "phases": [
+    { "slug": "release-docs", "group": "tests", "label": "release documentation contract" },
+    { "slug": "external-stage-pins", "group": "tests", "label": "immutable Paimos external-stage v1 pins" },
+    { "slug": "release-admission", "group": "tests", "label": "trusted release admission fixtures" },
+    { "slug": "endpoint-policy", "group": "tests", "label": "closed runtime endpoint policy matrix" },
+    { "slug": "duty-journal-boundary", "group": "tests", "label": "durable duty authority boundary" },
+    { "slug": "security-properties", "group": "tests", "label": "bounded security properties" },
+    { "slug": "minimization-self-test", "group": "tests", "label": "minimization proof runner" },
+    { "slug": "adversarial-scenarios", "group": "tests", "label": "reviewed adversarial recovery corpus" },
+    { "slug": "managed-service-ux-rust", "group": "tests", "label": "managed-service secret UX" },
+    { "slug": "cargo-test-all", "group": "tests", "label": "cargo tests" },
+    { "slug": "minimization-rust", "group": "tests", "label": "cross-surface Rust minimization proof" },
+    { "slug": "build-smoke-binaries", "group": "smoke", "label": "build smoke binaries" },
+    { "slug": "runtime-planes-smoke", "group": "smoke", "label": "runtime process-plane boundary smoke" },
+    { "slug": "identity-smoke", "group": "smoke", "label": "authenticated actor identity-shadow smoke" },
+    { "slug": "warden-mcp-smoke", "group": "smoke", "label": "local Warden MCP smoke" },
+    { "slug": "env-file-smoke", "group": "smoke", "label": "split-plane env-file smoke" },
+    { "slug": "migration-smoke", "group": "smoke", "label": "local janusd-admin migration smoke" },
+    { "slug": "scope-transfer-smoke", "group": "smoke", "label": "local janusd-admin scope-transfer smoke" },
+    { "slug": "recovery-drill-smoke", "group": "smoke", "label": "sealed clean-state recovery-drill smoke" },
+    { "slug": "retention-smoke", "group": "smoke", "label": "offline retention quarantine and purge smoke" },
+    { "slug": "lifecycle-entry-smoke", "group": "smoke", "label": "local janusd-admin lifecycle-entry smoke" },
+    { "slug": "lifecycle-queue-smoke", "group": "smoke", "label": "local janusd-admin lifecycle action queue smoke" },
+    { "slug": "pharos-retirement-smoke", "group": "smoke", "label": "local Pharos retirement smoke" }
+  ]
+}

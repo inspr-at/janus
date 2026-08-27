@@ -32,6 +32,28 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # JANUS-438: classify the PR's changed paths so a proven Go-only change
+  # (UI/docs/browser-QA) can skip the expensive Rust engine assurance and
+  # Nix jobs below, without those required check names ever going missing.
+  # Push and release events never classify as go-only (the job simply does
+  # not run for them); every downstream job below fails open to running its
+  # real work whenever classify did not report a definitive go_only=true.
+  classify:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    outputs:
+      go_only: ${{ steps.classify.outputs.go_only }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: classify changed paths
+        id: classify
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python3 scripts/classify-pr-paths.py --base "${BASE_SHA}" --head "${HEAD_SHA}" --github-output "${GITHUB_OUTPUT}"
+
   check-fast:
     runs-on: ubuntu-24.04
     steps:
@@ -68,6 +90,11 @@ jobs:
           python3 scripts/check-release-mode-receipts.py --self-test
           python3 scripts/check-native-release-set.py --self-test
           python3 scripts/report-rust-release-timing.py --self-test
+          python3 scripts/classify-pr-paths.py --self-test
+          bash scripts/assure-engine-release.sh --self-test
+          python3 scripts/check-engine-assurance-inventory.py --self-test
+          python3 scripts/check-engine-assurance-inventory.py
+          python3 scripts/report-pr-critical-path.py --self-test
           scripts/check-source-release.py --self-test --verify-grandfathered
           python3 scripts/check-release-main-ancestry.py --self-test
           scripts/check-rust-audit.py --self-test
@@ -80,27 +107,51 @@ jobs:
         run: cargo build --all-targets --locked
 
   check-nix:
+    needs: classify
+    if: always() && !cancelled()
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31.11.0
+        if: needs.classify.result != 'success' || needs.classify.outputs.go_only != 'true'
       - name: nix package
+        if: needs.classify.result != 'success' || needs.classify.outputs.go_only != 'true'
         run: nix build .#janus-engine
+      - name: nix package not applicable (go-only change)
+        if: needs.classify.result == 'success' && needs.classify.outputs.go_only == 'true'
+        run: echo "nix_package=not_applicable reason=go_only_change value_returned=false"
 
-  check-assurance:
+  # JANUS-438: the 9m17s serial engine assurance gate is split into two
+  # independent proof-family jobs. `tests` needs no built daemon binaries
+  # (pure checks, cargo test, self-tests); `smoke` builds the daemon
+  # binaries once and runs the with-runtime-authority smoke scripts. Both
+  # groups, and the exact command each phase runs, are the reviewed table
+  # in scripts/assure-engine-release.sh (see --list-phases), checked
+  # against config/assurance/engine-release-phases-v1.json by
+  # scripts/check-engine-assurance-inventory.py so a future edit cannot
+  # silently drop or regroup a gate. The check-assurance fan-in job below
+  # keeps the original required check name.
+  check-assurance-tests:
+    needs: classify
+    if: always() && !cancelled()
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        if: needs.classify.result != 'success' || needs.classify.outputs.go_only != 'true'
         with:
           go-version: '1.26.6'
           cache: false
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        if: needs.classify.result != 'success' || needs.classify.outputs.go_only != 'true'
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-      - name: install smoke dependencies
-        run: sudo apt-get update && sudo apt-get install -y age
-      - name: engine release assurance gate
-        run: scripts/assure-engine-release.sh
+        if: needs.classify.result != 'success' || needs.classify.outputs.go_only != 'true'
+      - name: engine release assurance gate (tests)
+        if: needs.classify.result != 'success' || needs.classify.outputs.go_only != 'true'
+        run: scripts/assure-engine-release.sh --phase tests
+      - name: engine release assurance gate (tests) not applicable (go-only change)
+        if: needs.classify.result == 'success' && needs.classify.outputs.go_only == 'true'
+        run: echo "engine_assurance_tests=not_applicable reason=go_only_change value_returned=false"
       - name: preserve value-free property replay receipt
         if: failure()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
@@ -110,6 +161,47 @@ jobs:
           if-no-files-found: ignore
           include-hidden-files: true
           retention-days: 7
+
+  check-assurance-smoke:
+    needs: classify
+    if: always() && !cancelled()
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        if: needs.classify.result != 'success' || needs.classify.outputs.go_only != 'true'
+        with:
+          go-version: '1.26.6'
+          cache: false
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        if: needs.classify.result != 'success' || needs.classify.outputs.go_only != 'true'
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        if: needs.classify.result != 'success' || needs.classify.outputs.go_only != 'true'
+      - name: install smoke dependencies
+        if: needs.classify.result != 'success' || needs.classify.outputs.go_only != 'true'
+        run: sudo apt-get update && sudo apt-get install -y age
+      - name: engine release assurance gate (smoke)
+        if: needs.classify.result != 'success' || needs.classify.outputs.go_only != 'true'
+        run: scripts/assure-engine-release.sh --phase smoke
+      - name: engine release assurance gate (smoke) not applicable (go-only change)
+        if: needs.classify.result == 'success' && needs.classify.outputs.go_only == 'true'
+        run: echo "engine_assurance_smoke=not_applicable reason=go_only_change value_returned=false"
+
+  check-assurance:
+    if: always()
+    needs: [check-assurance-tests, check-assurance-smoke]
+    runs-on: ubuntu-24.04
+    env:
+      TESTS: ${{ needs.check-assurance-tests.result }}
+      SMOKE: ${{ needs.check-assurance-smoke.result }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: require both engine assurance proof families
+        run: |
+          test "${TESTS}" = success
+          test "${SMOKE}" = success
+      - name: verify engine assurance phase inventory
+        run: python3 scripts/check-engine-assurance-inventory.py
 
   image-amd64:
     if: github.event_name != 'release' || startsWith(github.event.release.tag_name, 'rust-engine-v')
@@ -298,6 +390,47 @@ jobs:
             test "${AMD64}" = success
             test "${ARM64}" = success
           fi
+
+  # JANUS-438 acceptance criteria 4 and 7: a value-free critical-path timing
+  # summary for the PR-path pipeline itself. Informational only (the step
+  # never fails the job) while real evidence accumulates across PRs; a
+  # numeric budget only applies once the change is classified go-only, so
+  # it never fabricates a target for the full-assurance path.
+  pr-path-timing:
+    if: github.event_name == 'pull_request'
+    needs: [classify, check]
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: measure PR-path critical path
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GO_ONLY: ${{ needs.classify.outputs.go_only }}
+        run: |
+          gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" > rust-pr-run.json
+          check_conclusion=""
+          for attempt in {1..6}; do
+            gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/jobs?per_page=100" \
+              | jq '{jobs: [.jobs[] | select(.name != "pr-path-timing")]}' > rust-pr-jobs.json
+            check_conclusion="$(jq -r '.jobs[] | select(.name == "check") | .conclusion' rust-pr-jobs.json)"
+            [[ "${check_conclusion}" = success ]] && break
+            sleep 5
+          done
+          test "${check_conclusion}" = success
+          budget_args=()
+          if [[ "${GO_ONLY}" == "true" ]]; then
+            budget_args=(--budget-seconds 300)
+          fi
+          python3 scripts/report-pr-critical-path.py --run rust-pr-run.json --jobs rust-pr-jobs.json "${budget_args[@]}" --output rust-pr-timing.json --summary rust-pr-timing.md || true
+          cat rust-pr-timing.md >> "${GITHUB_STEP_SUMMARY}"
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        if: always()
+        with:
+          name: rust-pr-path-timing
+          path: rust-pr-timing.json
+          if-no-files-found: ignore
 
   image:
     if: github.event_name == 'release' && startsWith(github.event.release.tag_name, 'rust-engine-v')
