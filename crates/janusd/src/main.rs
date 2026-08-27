@@ -74,7 +74,7 @@ use janus_local::{
     PermitRegistry as SharedPermitRegistry, PermitStore as SharedPermitStore,
     TombstoneRegistry as SharedTombstoneRegistry,
 };
-use janus_provider_age::AgeSecretStore;
+use janus_provider_age::{AgeSecretStore, AgeStoreTarget};
 use pharos_retirement::{
     execute_retirement, expected_profile_id, prepare_binding, reconcile,
     FilePharosRetirementRegistry, PharosCredentialEvidence, PharosReconcileOutcome,
@@ -5666,10 +5666,12 @@ fn load_age_store_from_env_with_metadata_path(
     let membership_scope = env_first(&["JANUS_AGE_SCOPE"]);
     AgeSecretStore::load_from_secretspec_manifest_with_metadata_and_membership_scope(
         manifest,
-        profile,
-        store_dir,
-        identity_files,
-        recipients,
+        AgeStoreTarget {
+            profile,
+            root_dir: store_dir.into(),
+            identity_files,
+            recipients,
+        },
         runtime_scope_from_env()?,
         membership_scope.as_deref(),
         metadata.as_ref(),

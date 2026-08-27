@@ -17,7 +17,9 @@ use janus_core::{
 };
 use janus_forge::{ConsumerRotationHooks, GeneratedAlphabet, GeneratedValuePolicy};
 use janus_local::{FileTombstoneRegistry, JsonlAuditSink, TombstoneRegistry};
-use janus_provider_age::{AgeQuarantineMaterial, AgeRollbackMaterial, AgeSecretStore};
+use janus_provider_age::{
+    AgeQuarantineMaterial, AgeRollbackMaterial, AgeSecretStore, AgeStoreTarget,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -1558,10 +1560,12 @@ impl EntryTransaction {
         let store =
             AgeSecretStore::load_from_secretspec_manifest_with_metadata_and_membership_scope(
                 &self.plan.file.secretspec_manifest,
-                self.plan.file.secretspec_profile.clone(),
-                &self.plan.file.age_store_dir,
-                identities,
-                recipients,
+                AgeStoreTarget {
+                    profile: self.plan.file.secretspec_profile.clone(),
+                    root_dir: self.plan.file.age_store_dir.clone(),
+                    identity_files: identities,
+                    recipients,
+                },
                 self.principal.scope.clone(),
                 membership_scope.as_deref(),
                 Some(&metadata),

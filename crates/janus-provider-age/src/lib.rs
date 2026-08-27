@@ -300,6 +300,23 @@ pub struct AgeSecretStore {
     catalog: ManifestCatalog,
 }
 
+/// Store construction inputs for the age-backed Secretspec loaders.
+///
+/// Groups the profile/root/identity/recipient parameters that are otherwise
+/// unrelated to *which* manifest and scope are being loaded, so the loader
+/// functions stay under clippy's argument-count lint without dropping any
+/// parameter.
+pub struct AgeStoreTarget {
+    /// Secretspec profile selecting which declared secrets are in scope.
+    pub profile: String,
+    /// Directory holding the encrypted-at-rest age store for this scope.
+    pub root_dir: PathBuf,
+    /// Age identity files used to decrypt existing ciphertext.
+    pub identity_files: Vec<PathBuf>,
+    /// Age recipients used to encrypt new or rotated ciphertext.
+    pub recipients: Vec<String>,
+}
+
 struct StoreLock {
     file: File,
 }
@@ -481,10 +498,12 @@ impl AgeSecretStore {
     ) -> JanusResult<Self> {
         Self::load_from_secretspec_manifest_with_metadata_and_membership_scope(
             config_path,
-            profile,
-            root_dir,
-            identity_files,
-            recipients,
+            AgeStoreTarget {
+                profile: profile.into(),
+                root_dir: root_dir.into(),
+                identity_files,
+                recipients,
+            },
             scope,
             None,
             metadata,
@@ -494,15 +513,17 @@ impl AgeSecretStore {
     /// Load a `secretspec.toml` allowlist with optional metadata and membership filtering.
     pub fn load_from_secretspec_manifest_with_metadata_and_membership_scope(
         config_path: impl AsRef<Path>,
-        profile: impl Into<String>,
-        root_dir: impl Into<PathBuf>,
-        identity_files: Vec<PathBuf>,
-        recipients: Vec<String>,
+        target: AgeStoreTarget,
         scope: ScopeRef,
         membership_scope: Option<&str>,
         metadata: Option<&SecretMetadataOverlay>,
     ) -> JanusResult<Self> {
-        let profile = profile.into();
+        let AgeStoreTarget {
+            profile,
+            root_dir,
+            identity_files,
+            recipients,
+        } = target;
         let (project, catalog) = load_secretspec_manifest_catalog_with_membership_scope(
             config_path,
             &profile,

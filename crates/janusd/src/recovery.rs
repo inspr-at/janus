@@ -10,7 +10,7 @@ use janus_core::{
 use janus_local::{
     enforce_retention_ready_from_env, JsonlAuditSink, RecoveryDrillRunner, RecoveryDrillStatus,
 };
-use janus_provider_age::AgeSecretStore;
+use janus_provider_age::{AgeSecretStore, AgeStoreTarget};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RecoveryOperation {
@@ -104,10 +104,12 @@ async fn verify_provider_recoverability(
     let identity_files = recovery_identity_files_from_env()?;
     let store = AgeSecretStore::load_from_secretspec_manifest_with_metadata_and_membership_scope(
         &manifest,
-        profile,
-        target.age_root(),
-        identity_files.clone(),
-        recovery_recipients_from_env()?,
+        AgeStoreTarget {
+            profile,
+            root_dir: target.age_root().into(),
+            identity_files: identity_files.clone(),
+            recipients: recovery_recipients_from_env()?,
+        },
         runner.manifest().scope_ref(),
         membership_scope.as_deref(),
         Some(&metadata),
