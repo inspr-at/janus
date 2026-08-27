@@ -6,6 +6,7 @@
   "proposed_by": "JANUS-421 builder (Claude family), for acceptance by Markus Barta",
   "accepted_by": null,
   "accepted_on": null,
+  "acceptance_authority": "Markus Barta",
   "decision": "separate-deployments",
   "decision_record": "docs/trust-context-topology.md",
   "contexts": [
@@ -97,6 +98,18 @@
       "canonical_until_gates_pass": "maintainer vault plus the Paimos release-workflow certificate-expiry check"
     },
     {
+      "material_class": "inspr-platform",
+      "driver": "JANUS catalog (csb1-* and traefik-* entries)",
+      "context": "personal-inspr",
+      "must_never_enter": [
+        "business-augmentoring"
+      ],
+      "migration_gates": [
+        "personal-deployment off-host backup and restore evidence recorded"
+      ],
+      "canonical_until_gates_pass": "csb1 agenix custody"
+    },
+    {
       "material_class": "augmentoring-platform",
       "driver": "pma:AGM-4",
       "context": "business-augmentoring",
@@ -107,40 +120,60 @@
         "legacy ppm:AGM-18 backup and restore gate passed"
       ],
       "canonical_until_gates_pass": "agm1 agenix custody"
+    },
+    {
+      "material_class": "augmentoring-service",
+      "driver": "pma:AGM-4",
+      "context": "business-augmentoring",
+      "must_never_enter": [
+        "personal-inspr"
+      ],
+      "migration_gates": [
+        "legacy ppm:AGM-18 backup and restore gate passed",
+        "per-entry eligibility decided under pma:AGM-4"
+      ],
+      "canonical_until_gates_pass": "agm1 agenix custody and service-local env files"
     }
   ],
   "boundary_evidence": [
     {
+      "id": "oidc-issuer-distinct",
       "property": "distinct OIDC issuer per deployment",
       "status": "verified",
       "evidence": "nixcfg hosts/csb1/docker/compose-spec.nix OIDC_ISSUER; agm-nixcfg modules/agm-janus.nix oidcIssuer"
     },
     {
+      "id": "host-volume-distinct",
       "property": "distinct host and data volume per deployment",
       "status": "verified",
       "evidence": "csb1 janus_data vs agm1 janus_data; separate NixOS hosts and config repositories"
     },
     {
+      "id": "catalog-prefixes-disjoint",
       "property": "distinct catalog with non-overlapping secret-name prefixes",
       "status": "verified",
       "evidence": "csb1 catalog: csb1-* and traefik-* entries; agm1 catalog: agm1-* entries"
     },
     {
+      "id": "tracker-recovery-distinct",
       "property": "distinct tracker instance and recovery ownership reference",
       "status": "verified",
       "evidence": "ppm pm.barta.cm vs pma paimos.agm.ng; paimos docs/CONTINUITY.md section 2.3 vs legacy ppm:AGM-18"
     },
     {
+      "id": "agenix-recipients-disjoint",
       "property": "agenix recipient sets and age identities are disjoint across contexts",
       "status": "open",
       "evidence": "requires a value-free recipient fingerprint comparison of nixcfg secrets.nix and agm-nixcfg secrets.nix; a maintainer key present in both is a crossing"
     },
     {
+      "id": "zitadel-role-bindings-disjoint",
       "property": "Zitadel role bindings are disjoint across issuers",
       "status": "open",
       "evidence": "requires a value-free listing of janus:* grants per Zitadel project"
     },
     {
+      "id": "backup-credentials-per-context",
       "property": "backup destinations and credentials are per context",
       "status": "open",
       "evidence": "csb1 restic covers every csb1 docker volume under a personal-catalog credential, which includes Augmentoring workload volumes co-hosted on csb1; the personal backup gate must show a janus_data@csb1 restore, and legacy ppm:AGM-18 must use a destination credential outside the personal catalog"

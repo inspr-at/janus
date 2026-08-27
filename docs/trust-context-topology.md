@@ -2,11 +2,12 @@
 
 _Decision record for JANUS-421. Status: **proposed** on 2026-08-27 by the
 JANUS-421 builder, for acceptance by Markus Barta. Acceptance is recorded by
-setting `status`, `accepted_by`, and `accepted_on` in
-[`config/trust-context/deployments-v1.json`](../config/trust-context/deployments-v1.json),
-which `scripts/check-trust-context.py` validates in the fast check job. Until
-then the decision is recorded but not complete, and no credential migration
-may start._
+setting `status` to `accepted` with `accepted_by` and `accepted_on` in
+[`config/trust-context/deployments-v1.json`](../config/trust-context/deployments-v1.json);
+`scripts/check-trust-context.py` accepts that flip only from the named
+acceptance authority (Markus Barta) and only once every boundary-evidence row
+is verified. Until then the decision is recorded but not complete, and no
+credential migration may start._
 
 ## Decision
 
@@ -68,18 +69,23 @@ registry, and an `accepted` registry may not carry open evidence.
 `scripts/check-trust-context.py` validates the registry's self-consistency,
 not runtime state: it rejects shared issuers, URLs, hosts, config
 declarations, volumes, catalogs, trackers, owners, and backup gates; pins the
-Apple release-signing class to the personal context and the Augmentoring
-platform class to the business context so a registry edit cannot relabel
-them; requires every binding to forbid the other context and to carry
-migration gates; and refuses an `accepted` status while any boundary evidence
-is open.
+Apple release-signing class to the personal context and both Augmentoring
+classes to the business context so a registry edit cannot relabel them;
+requires each pinned class to be declared and bound exactly once, so a
+binding cannot be deleted or duplicated to shed its `must_never_enter` and
+migration gates; requires each of the seven reviewed boundary-evidence rows by
+id exactly once, so a row cannot be deleted, renamed, or shadowed to clear the
+path to acceptance; and refuses an `accepted` status while any row is open or
+when `accepted_by` is anyone but the acceptance authority.
 
 ## Material bindings
 
 | Material | Driver | Context | Canonical until gates pass | Gates before any migration |
 | --- | --- | --- | --- | --- |
 | Personal Apple release-signing credentials | PAI-752 | personal / INSPR (`vault.barta.cm`) | maintainer vault plus the Paimos release-workflow certificate-expiry check | JANUS-420 issuer not-after tracking complete; personal-deployment off-host backup and restore evidence recorded; JANUS-422 retrieval drill passed on `vault.barta.cm` with a genuinely distinct recovery contact |
-| Augmentoring platform and service secrets | `pma:AGM-4` | Augmentoring business (`janus.agm.ng`) | agm1 agenix custody | legacy `ppm:AGM-18` backup and restore gate passed |
+| INSPR platform secrets (csb1 `csb1-*` and `traefik-*` catalog entries) | JANUS catalog | personal / INSPR (`vault.barta.cm`) | csb1 agenix custody | personal-deployment off-host backup and restore evidence recorded |
+| Augmentoring platform secrets (agm1 `platform` catalog entries) | `pma:AGM-4` | Augmentoring business (`janus.agm.ng`) | agm1 agenix custody | legacy `ppm:AGM-18` backup and restore gate passed |
+| Augmentoring service secrets (per-service credentials consumed through the envelope) | `pma:AGM-4` | Augmentoring business (`janus.agm.ng`) | agm1 agenix custody and service-local env files | legacy `ppm:AGM-18` backup and restore gate passed; per-entry eligibility decided under `pma:AGM-4` |
 
 The Apple material must never enter `janus.agm.ng`, even though it gates a
 public software release. No credential migration starts because of this

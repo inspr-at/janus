@@ -36,9 +36,29 @@ PERSONAL_DEPLOYMENT = "https://vault.barta.cm"
 BUSINESS_DEPLOYMENT = "https://janus.agm.ng"
 PINNED_CLASSES = {
     "personal-apple-release-signing": PERSONAL_CONTEXT,
+    "inspr-platform": PERSONAL_CONTEXT,
     "augmentoring-platform": BUSINESS_CONTEXT,
+    "augmentoring-service": BUSINESS_CONTEXT,
 }
+# Every pinned class must be bound exactly once; a registry that drops or
+# duplicates a binding silently loses its must_never_enter and migration gates.
+REQUIRED_BINDINGS = tuple(PINNED_CLASSES)
 EVIDENCE_STATUSES = ("verified", "open")
+# The boundary-evidence rows are part of the reviewed decision, not free-form
+# registry content: each id must appear exactly once so a row cannot be
+# deleted or renamed to clear the path to acceptance.
+REQUIRED_EVIDENCE = (
+    "oidc-issuer-distinct",
+    "host-volume-distinct",
+    "catalog-prefixes-disjoint",
+    "tracker-recovery-distinct",
+    "agenix-recipients-disjoint",
+    "zitadel-role-bindings-disjoint",
+    "backup-credentials-per-context",
+)
+# Acceptance is an assurance field, not a label: only the named human owner
+# may accept, and only once every evidence row is verified.
+ACCEPTANCE_AUTHORITY = "Markus Barta"
 DEPLOYMENT_FIELDS = (
     "public_url",
     "host",
@@ -98,8 +118,16 @@ def validate(registry: dict) -> dict:
     )
     _require(registry.get("status") in STATUSES, f"status must be one of {', '.join(STATUSES)}")
     _require_fields(registry, ("proposed_on", "proposed_by"), "registry")
+    _require(
+        registry.get("acceptance_authority") == ACCEPTANCE_AUTHORITY,
+        f"acceptance_authority must be exactly {ACCEPTANCE_AUTHORITY}",
+    )
     if registry["status"] == "accepted":
         _require_fields(registry, ("accepted_by", "accepted_on"), "accepted registry")
+        _require(
+            registry["accepted_by"] == ACCEPTANCE_AUTHORITY,
+            f"only {ACCEPTANCE_AUTHORITY} may accept this decision",
+        )
     else:
         _require(
             registry.get("accepted_by") is None and registry.get("accepted_on") is None,
@@ -185,8 +213,21 @@ def validate(registry: dict) -> dict:
             class_owner.get(pinned_class) == pinned_context,
             f"material class {pinned_class} must belong to {pinned_context}; relabeling it is not allowed",
         )
+    _require(
+        set(class_owner) == set(PINNED_CLASSES),
+        "declared material classes must be exactly the pinned set; add a pin before declaring a class",
+    )
     bindings = registry.get("material_bindings")
     _require(isinstance(bindings, list) and bindings, "material_bindings must be a non-empty list")
+    bound = [binding.get("material_class") for binding in bindings if isinstance(binding, dict)]
+    for required in REQUIRED_BINDINGS:
+        count = bound.count(required)
+        _require(
+            count == 1,
+            f"material class {required} must be bound exactly once (found {count}); "
+            "a missing or duplicate binding loses its must_never_enter and migration gates",
+        )
+    _require(len(bindings) == len(REQUIRED_BINDINGS), "material_bindings must contain only the pinned classes")
     for binding in bindings:
         _require_fields(
             binding,
@@ -214,9 +255,18 @@ def validate(registry: dict) -> dict:
 
     evidence = registry.get("boundary_evidence")
     _require(isinstance(evidence, list) and evidence, "boundary_evidence must be a non-empty list")
+    evidence_ids = [item.get("id") for item in evidence if isinstance(item, dict)]
+    for required in REQUIRED_EVIDENCE:
+        count = evidence_ids.count(required)
+        _require(
+            count == 1,
+            f"boundary evidence {required} must appear exactly once (found {count}); "
+            "deleting or renaming a row cannot clear the path to acceptance",
+        )
+    _require(len(evidence) == len(REQUIRED_EVIDENCE), "boundary_evidence must contain only the reviewed rows")
     open_properties = []
     for item in evidence:
-        _require_fields(item, ("property", "status", "evidence"), "boundary evidence entry")
+        _require_fields(item, ("id", "property", "status", "evidence"), "boundary evidence entry")
         _require(item["status"] in EVIDENCE_STATUSES, f"boundary evidence {item['property']} has an unknown status")
         if item["status"] == "open":
             open_properties.append(item["property"])
@@ -259,6 +309,8 @@ def self_test() -> None:
     summary = validate(baseline)
     assert summary["decision"] == "separate-deployments", summary
     assert summary["status"] == "proposed", summary
+    assert summary["material_bindings"] == len(REQUIRED_BINDINGS), summary
+    assert summary["open_evidence"] == 3, summary
     assert summary["contexts"] == ["personal-inspr", "business-augmentoring"], summary
     assert "AGM-5" in summary["disambiguated_keys"], summary
 
@@ -363,6 +415,85 @@ def self_test() -> None:
     def missing_record(copy: dict) -> None:
         copy["decision_record"] = "docs/does-not-exist.md"
 
+    def delete_apple_binding(copy: dict) -> None:
+        copy["material_bindings"] = [
+            b for b in copy["material_bindings"] if b["material_class"] != "personal-apple-release-signing"
+        ]
+
+    def duplicate_apple_binding(copy: dict) -> None:
+        copy["material_bindings"].append(json.loads(json.dumps(copy["material_bindings"][0])))
+
+    def duplicate_apple_binding_weakened(copy: dict) -> None:
+        weak = json.loads(json.dumps(copy["material_bindings"][0]))
+        weak["migration_gates"] = ["none"]
+        copy["material_bindings"].insert(0, weak)
+
+    def rename_binding_class(copy: dict) -> None:
+        copy["contexts"][0]["material_classes"].remove("personal-apple-release-signing")
+        copy["contexts"][0]["material_classes"].append("personal-apple-signing")
+        copy["material_bindings"][0]["material_class"] = "personal-apple-signing"
+
+    def unbound_declared_class(copy: dict) -> None:
+        copy["material_bindings"] = [
+            b for b in copy["material_bindings"] if b["material_class"] != "augmentoring-service"
+        ]
+
+    def unpinned_extra_class(copy: dict) -> None:
+        copy["contexts"][1]["material_classes"].append("augmentoring-extra")
+        copy["material_bindings"].append(
+            {
+                "material_class": "augmentoring-extra",
+                "driver": "pma:AGM-4",
+                "context": "business-augmentoring",
+                "must_never_enter": ["personal-inspr"],
+                "migration_gates": ["some gate"],
+                "canonical_until_gates_pass": "somewhere",
+            }
+        )
+
+    def accept_as_authority(copy: dict) -> None:
+        copy["status"] = "accepted"
+        copy["accepted_by"] = "Markus Barta"
+        copy["accepted_on"] = "2026-08-28"
+
+    def delete_open_evidence_then_accept(copy: dict) -> None:
+        copy["boundary_evidence"] = [r for r in copy["boundary_evidence"] if r["status"] == "verified"]
+        accept_as_authority(copy)
+
+    def rename_open_evidence_then_accept(copy: dict) -> None:
+        for row in copy["boundary_evidence"]:
+            if row["status"] == "open":
+                row["id"] = row["id"] + "-x"
+                row["status"] = "verified"
+        accept_as_authority(copy)
+
+    def duplicate_evidence_row(copy: dict) -> None:
+        copy["boundary_evidence"].append(json.loads(json.dumps(copy["boundary_evidence"][0])))
+
+    def duplicate_evidence_row_verified_then_accept(copy: dict) -> None:
+        for row in copy["boundary_evidence"]:
+            if row["status"] == "open":
+                twin = json.loads(json.dumps(row))
+                twin["status"] = "verified"
+                copy["boundary_evidence"].append(twin)
+        accept_as_authority(copy)
+
+    def status_flip_with_open_evidence_by_authority(copy: dict) -> None:
+        accept_as_authority(copy)
+
+    def unauthorized_acceptor_all_verified(copy: dict) -> None:
+        for row in copy["boundary_evidence"]:
+            row["status"] = "verified"
+        copy["status"] = "accepted"
+        copy["accepted_by"] = "someone"
+        copy["accepted_on"] = "2026-08-28"
+
+    def wrong_acceptance_authority(copy: dict) -> None:
+        copy["acceptance_authority"] = "someone"
+
+    def missing_evidence_id(copy: dict) -> None:
+        del copy["boundary_evidence"][0]["id"]
+
     def accepted_without_acceptor(copy: dict) -> None:
         copy["status"] = "accepted"
 
@@ -401,6 +532,20 @@ def self_test() -> None:
         ("accepted without acceptor", accepted_without_acceptor),
         ("accepted while boundary evidence is open", accepted_with_open_evidence),
         ("unknown boundary evidence status", unknown_evidence_status),
+        ("Apple binding deleted", delete_apple_binding),
+        ("Apple binding duplicated", duplicate_apple_binding),
+        ("Apple binding duplicated with weakened gates first", duplicate_apple_binding_weakened),
+        ("binding class renamed away from the pin", rename_binding_class),
+        ("declared class left unbound", unbound_declared_class),
+        ("unpinned extra class bound", unpinned_extra_class),
+        ("open evidence deleted then accepted", delete_open_evidence_then_accept),
+        ("open evidence renamed then accepted", rename_open_evidence_then_accept),
+        ("evidence row duplicated", duplicate_evidence_row),
+        ("open evidence shadowed by a verified twin then accepted", duplicate_evidence_row_verified_then_accept),
+        ("status flipped by the authority while evidence is open", status_flip_with_open_evidence_by_authority),
+        ("unauthorized acceptor with all evidence verified", unauthorized_acceptor_all_verified),
+        ("acceptance authority reassigned", wrong_acceptance_authority),
+        ("evidence row without id", missing_evidence_id),
     )
     for label, apply in mutations:
         expect_failure(label, apply)
@@ -409,6 +554,15 @@ def self_test() -> None:
         copy["contexts"][0]["secret_name_prefixes"].append("csb1-janus-")
 
     validate(mutated(same_context_prefix_refinement))
+
+    def authority_accepts_after_all_verified(copy: dict) -> None:
+        for row in copy["boundary_evidence"]:
+            row["status"] = "verified"
+        accept_as_authority(copy)
+
+    accepted = validate(mutated(authority_accepts_after_all_verified))
+    assert accepted["status"] == "accepted" and accepted["open_evidence"] == 0, accepted
+    assert load(REGISTRY)["status"] == "proposed", "the reviewed baseline must stay proposed"
 
     with tempfile.TemporaryDirectory() as scratch:
         broken = Path(scratch) / "broken.json"
