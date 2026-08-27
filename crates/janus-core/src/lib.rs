@@ -109,7 +109,8 @@ pub use managed_service::{
     MAX_MANAGED_RESERVED_ENV_NAMES, MAX_MANAGED_SERVICE_CONTRACT_BYTES, MAX_SETUP_INTENT_TTL_SECS,
 };
 pub use manifest::{
-    load_secretspec_manifest_catalog, load_secretspec_manifest_secret_names, ManifestCatalog,
+    load_secretspec_manifest_catalog, load_secretspec_manifest_catalog_with_membership_scope,
+    load_secretspec_manifest_secret_names, ManifestCatalog,
 };
 pub use metadata::{SecretMetadataOverlay, SecretMetadataPatch};
 pub use migration::{MigrationCompatibility, MigrationManifest, MigrationPhase, MigrationRisk};

@@ -1,10 +1,35 @@
 {{ define "knowledge_term_illustration" -}}
 <svg class="knowledge-illustration" viewBox="0 0 160 72" role="img" aria-labelledby="term-art-{{ .ID }}">
   <title id="term-art-{{ .ID }}">Relationship illustration for {{ .Name }}</title>
+  {{ if eq .Icon "catalog" -}}
+  <rect class="knowledge-node knowledge-node-a" x="18" y="16" width="68" height="10" rx="5"></rect>
+  <rect class="knowledge-node knowledge-node-a" x="18" y="31" width="52" height="10" rx="5"></rect>
+  <rect class="knowledge-node knowledge-node-a" x="18" y="46" width="36" height="10" rx="5"></rect>
+  <path class="knowledge-link" d="M104 20v32"></path>
+  <circle class="knowledge-node knowledge-node-b" cx="128" cy="36" r="15"></circle>
+  {{- else if eq .Icon "cycle" -}}
+  <ellipse class="knowledge-link" cx="80" cy="32" rx="34" ry="20"></ellipse>
+  <circle class="knowledge-node knowledge-node-a" cx="46" cy="32" r="11"></circle>
+  <circle class="knowledge-node knowledge-node-b" cx="114" cy="32" r="11"></circle>
+  <circle class="knowledge-pulse" cx="80" cy="54" r="5"></circle>
+  {{- else if eq .Icon "shield" -}}
+  <path class="knowledge-node knowledge-node-a" d="M80 10 106 20V36C106 53 95 63 80 68 65 63 54 53 54 36V20Z"></path>
+  <circle class="knowledge-pulse" cx="80" cy="39" r="6"></circle>
+  {{- else if eq .Icon "boundary" -}}
+  <rect class="knowledge-node knowledge-node-a" x="12" y="16" width="48" height="40" rx="6"></rect>
+  <path class="knowledge-link" d="M22 29h28M22 38h28M22 47h18"></path>
+  <path class="knowledge-dash" d="M82 8v56"></path>
+  <g class="knowledge-node-b">
+    <circle class="knowledge-node" cx="124" cy="36" r="17"></circle>
+    <path class="knowledge-link" d="M118 34v-4a6 6 0 0 1 12 0v4"></path>
+    <rect class="knowledge-mark" x="115" y="34" width="18" height="13" rx="2"></rect>
+  </g>
+  {{- else -}}
   <path class="knowledge-link" d="M44 36h72"></path>
   <circle class="knowledge-node knowledge-node-a" cx="32" cy="36" r="15"></circle>
   <rect class="knowledge-node knowledge-node-b" x="116" y="21" width="30" height="30" rx="8"></rect>
   <circle class="knowledge-pulse" cx="80" cy="36" r="7"></circle>
+  {{- end }}
 </svg>
 {{- end }}
 
@@ -52,7 +77,7 @@
       <div class="knowledge-counts" aria-label="Knowledge inventory">
         <div><strong>{{ len .KnowledgeTerms }}</strong><span>concepts</span></div>
         <div><strong>{{ len .KnowledgeFlows }}</strong><span>workflows</span></div>
-        <div><strong>47</strong><span>runtime actions</span></div>
+        <div><strong>{{ .RuntimeActionCount }}</strong><span>runtime actions</span></div>
       </div>
     </section>
 

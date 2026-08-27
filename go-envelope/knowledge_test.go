@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -24,7 +25,7 @@ func TestKnowledgeInventoryCoversCodeVocabularies(t *testing.T) {
 		byID[term.ID] = term
 	}
 
-	expectedTerms := []string{"secret", "ref", "permit", "approval", "delegation", "role", "permission", "binding", "binding-source", "scope", "class", "egress-mode", "lifecycle", "plane", "runtime-action", "product-mode", "break-glass", "forge", "warden", "envelope", "engine"}
+	expectedTerms := []string{"secret", "ref", "permit", "approval", "delegation", "role", "permission", "binding", "binding-source", "scope", "class", "egress-mode", "lifecycle", "plane", "runtime-action", "product-mode", "break-glass", "forge", "warden", "envelope", "engine", "secretspec"}
 	for _, id := range expectedTerms {
 		if byID[id].ID == "" {
 			t.Fatalf("code-inventoried term %q is missing", id)
@@ -40,6 +41,23 @@ func TestKnowledgeInventoryCoversCodeVocabularies(t *testing.T) {
 	assertKnowledgeValues(t, byID["role"].Values, AllRoles())
 	if len(byID["runtime-action"].Values) != 49 {
 		t.Fatalf("runtime action glossary has %d values, want 49", len(byID["runtime-action"].Values))
+	}
+	if got := knowledgeRuntimeActionCount(); got != len(byID["runtime-action"].Values) {
+		t.Fatalf("knowledgeRuntimeActionCount() = %d, want %d to match the runtime-action term", got, len(byID["runtime-action"].Values))
+	}
+
+	secretspec := byID["secretspec"]
+	if !strings.Contains(secretspec.Detail, "membership allowlist") {
+		t.Fatalf("secretspec term must describe Janus's manifest parser as a membership allowlist, got: %q", secretspec.Detail)
+	}
+	if !strings.Contains(secretspec.Detail, "value boundary") {
+		t.Fatalf("secretspec term must name the value boundary Janus enforces, got: %q", secretspec.Detail)
+	}
+	if !strings.Contains(secretspec.Detail, "profiles with inheritance and required defaults") {
+		t.Fatalf("secretspec term must describe the profile defaults Janus parses, got: %q", secretspec.Detail)
+	}
+	if !strings.Contains(secretspec.Detail, "optional scope membership") {
+		t.Fatalf("secretspec term must describe the scope membership Janus parses, got: %q", secretspec.Detail)
 	}
 }
 
@@ -153,10 +171,13 @@ func TestKnowledgePagesAreIllustratedTruthfulAndSelfContained(t *testing.T) {
 		t.Fatalf("knowledge index got %d: %s", index.Code, index.Body.String())
 	}
 	body := index.Body.String()
-	for _, want := range []string{"Knowledge", "CODE-INVENTORIED FIELD GUIDE", "Runtime action", "admin.dynamic_transport", `class="knowledge-illustration"`, `href="/knowledge/flows/break-glass"`, `aria-current="page"`} {
+	for _, want := range []string{"Knowledge", "CODE-INVENTORIED FIELD GUIDE", "Runtime action", "admin.dynamic_transport", `class="knowledge-illustration"`, `href="/knowledge/flows/break-glass"`, `aria-current="page"`, `id="secretspec"`, "Secretspec"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("knowledge index should render %q", want)
 		}
+	}
+	if want := fmt.Sprintf("<strong>%d</strong><span>runtime actions</span>", knowledgeRuntimeActionCount()); !strings.Contains(body, want) {
+		t.Fatalf("knowledge index runtime action count must be derived from the code inventory, want %q", want)
 	}
 	if count := strings.Count(body, `class="knowledge-illustration"`); count != len(knowledgeTerms()) {
 		t.Fatalf("knowledge index has %d term illustrations, want %d", count, len(knowledgeTerms()))
