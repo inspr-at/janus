@@ -227,6 +227,11 @@ entries include:
 - `guideline/repo-topology-adr`
 - `guideline/where-janus-lives`
 
+The custody trust-context topology (personal / INSPR versus Augmentoring
+business deployments) is recorded in-repo at
+[`docs/trust-context-topology.md`](docs/trust-context-topology.md) with its
+machine-checked registry under `config/trust-context/`.
+
 Fetch an entry with:
 
 ```bash

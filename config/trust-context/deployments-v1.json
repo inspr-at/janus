@@ -1,0 +1,175 @@
+{
+  "schema_version": 1,
+  "owner": "JANUS-421",
+  "status": "proposed",
+  "proposed_on": "2026-08-27",
+  "proposed_by": "JANUS-421 builder (Claude family), for acceptance by Markus Barta",
+  "accepted_by": null,
+  "accepted_on": null,
+  "decision": "separate-deployments",
+  "decision_record": "docs/trust-context-topology.md",
+  "contexts": [
+    {
+      "id": "personal-inspr",
+      "label": "personal / INSPR",
+      "legal_owner": "Markus Barta (natural person; INSPR is the personal umbrella)",
+      "operational_owner": "Markus Barta as Janus maintainer",
+      "deployment": {
+        "public_url": "https://vault.barta.cm",
+        "host": "csb1",
+        "config_repository": "nixcfg",
+        "config_path": "hosts/csb1/docker/compose-spec.nix",
+        "catalog_path": "hosts/csb1/docker/janus/catalog/agenix-catalog.json",
+        "oidc_issuer": "https://auth.inspr.at",
+        "data_volume": "janus_data@csb1"
+      },
+      "tracker": {
+        "instance": "ppm",
+        "url": "https://pm.barta.cm",
+        "projects": [
+          "JANUS",
+          "PAI"
+        ]
+      },
+      "recovery": {
+        "ownership": "maintainer vault with two-of-three recovery share; contacts named in the maintainer's personal estate document",
+        "reference": "paimos docs/CONTINUITY.md section 2.3",
+        "backup_restore_gate": "personal-deployment off-host backup and restore evidence (not legacy ppm:AGM-18)"
+      },
+      "material_classes": [
+        "personal-apple-release-signing",
+        "inspr-platform"
+      ],
+      "secret_name_prefixes": [
+        "csb1-",
+        "traefik-"
+      ]
+    },
+    {
+      "id": "business-augmentoring",
+      "label": "Augmentoring business",
+      "legal_owner": "Augmentoring (business entity operating agm.ng)",
+      "operational_owner": "Augmentoring platform operations (Markus Barta acting for Augmentoring)",
+      "deployment": {
+        "public_url": "https://janus.agm.ng",
+        "host": "agm1",
+        "config_repository": "agm-nixcfg",
+        "config_path": "modules/agm-janus.nix",
+        "catalog_path": "hosts/agm1/janus-catalog.json",
+        "oidc_issuer": "https://zitadel.agm.ng",
+        "data_volume": "janus_data@agm1"
+      },
+      "tracker": {
+        "instance": "pma",
+        "url": "https://paimos.agm.ng",
+        "legacy_instance_note": "items opened before the Augmentoring tracker moved to pma (legacy ppm:AGM-5 done, legacy ppm:AGM-18 in progress) stay on ppm until complete; never mirrored to pma",
+        "projects": [
+          "AGM"
+        ]
+      },
+      "recovery": {
+        "ownership": "Augmentoring platform operations; encrypted off-host backup escrow per legacy ppm:AGM-18",
+        "reference": "legacy ppm:AGM-18",
+        "backup_restore_gate": "legacy ppm:AGM-18 live restore drill"
+      },
+      "material_classes": [
+        "augmentoring-platform",
+        "augmentoring-service"
+      ],
+      "secret_name_prefixes": [
+        "agm1-"
+      ]
+    }
+  ],
+  "material_bindings": [
+    {
+      "material_class": "personal-apple-release-signing",
+      "driver": "PAI-752",
+      "context": "personal-inspr",
+      "must_never_enter": [
+        "business-augmentoring"
+      ],
+      "migration_gates": [
+        "JANUS-420 issuer not-after tracking complete",
+        "personal-deployment off-host backup and restore evidence recorded",
+        "JANUS-422 retrieval drill passed on vault.barta.cm with a genuinely distinct recovery contact"
+      ],
+      "canonical_until_gates_pass": "maintainer vault plus the Paimos release-workflow certificate-expiry check"
+    },
+    {
+      "material_class": "augmentoring-platform",
+      "driver": "pma:AGM-4",
+      "context": "business-augmentoring",
+      "must_never_enter": [
+        "personal-inspr"
+      ],
+      "migration_gates": [
+        "legacy ppm:AGM-18 backup and restore gate passed"
+      ],
+      "canonical_until_gates_pass": "agm1 agenix custody"
+    }
+  ],
+  "boundary_evidence": [
+    {
+      "property": "distinct OIDC issuer per deployment",
+      "status": "verified",
+      "evidence": "nixcfg hosts/csb1/docker/compose-spec.nix OIDC_ISSUER; agm-nixcfg modules/agm-janus.nix oidcIssuer"
+    },
+    {
+      "property": "distinct host and data volume per deployment",
+      "status": "verified",
+      "evidence": "csb1 janus_data vs agm1 janus_data; separate NixOS hosts and config repositories"
+    },
+    {
+      "property": "distinct catalog with non-overlapping secret-name prefixes",
+      "status": "verified",
+      "evidence": "csb1 catalog: csb1-* and traefik-* entries; agm1 catalog: agm1-* entries"
+    },
+    {
+      "property": "distinct tracker instance and recovery ownership reference",
+      "status": "verified",
+      "evidence": "ppm pm.barta.cm vs pma paimos.agm.ng; paimos docs/CONTINUITY.md section 2.3 vs legacy ppm:AGM-18"
+    },
+    {
+      "property": "agenix recipient sets and age identities are disjoint across contexts",
+      "status": "open",
+      "evidence": "requires a value-free recipient fingerprint comparison of nixcfg secrets.nix and agm-nixcfg secrets.nix; a maintainer key present in both is a crossing"
+    },
+    {
+      "property": "Zitadel role bindings are disjoint across issuers",
+      "status": "open",
+      "evidence": "requires a value-free listing of janus:* grants per Zitadel project"
+    },
+    {
+      "property": "backup destinations and credentials are per context",
+      "status": "open",
+      "evidence": "csb1 restic covers every csb1 docker volume under a personal-catalog credential, which includes Augmentoring workload volumes co-hosted on csb1; the personal backup gate must show a janus_data@csb1 restore, and legacy ppm:AGM-18 must use a destination credential outside the personal catalog"
+    }
+  ],
+  "tracker_key_disambiguation": [
+    {
+      "key": "AGM-5",
+      "instance": "ppm",
+      "qualified": "legacy ppm:AGM-5",
+      "meaning": "Janus at janus.agm.ng - business credential custody (done); origin of the business deployment"
+    },
+    {
+      "key": "AGM-5",
+      "instance": "pma",
+      "qualified": "pma:AGM-5",
+      "meaning": "Switch Pharos beacon to Janus token mode (ex AGM-12); unrelated to the custody topology"
+    },
+    {
+      "key": "AGM-4",
+      "instance": "pma",
+      "qualified": "pma:AGM-4",
+      "meaning": "Migrate secret custody into Janus (ex AGM-11); current title is unscoped, this decision scopes it to the business context only"
+    },
+    {
+      "key": "AGM-18",
+      "instance": "ppm",
+      "qualified": "legacy ppm:AGM-18",
+      "meaning": "agm1 backup and restore gate; applies to the business deployment only"
+    }
+  ]
+}

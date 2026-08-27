@@ -94,6 +94,8 @@ jobs:
           bash scripts/assure-engine-release.sh --self-test
           python3 scripts/check-engine-assurance-inventory.py --self-test
           python3 scripts/check-engine-assurance-inventory.py
+          python3 scripts/check-trust-context.py --self-test
+          python3 scripts/check-trust-context.py
           python3 scripts/report-pr-critical-path.py --self-test
           scripts/check-source-release.py --self-test --verify-grandfathered
           python3 scripts/check-release-main-ancestry.py --self-test
