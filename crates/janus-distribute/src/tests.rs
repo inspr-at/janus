@@ -293,3 +293,36 @@ fn distribute_rejects_secret_reference_mismatch_without_changing_source() {
     assert_eq!(error.reason_code(), "host_envelope_secret_ref_mismatch");
     assert_source_unchanged(&source_before, &fixture.source_packet);
 }
+
+#[test]
+fn distribute_rejects_untrusted_source_signature_without_changing_source() {
+    let fixture = DistributeFixture::new();
+    let source_before = fixture.source_packet.clone();
+    let mut wrong_seed = [0_u8; 32];
+    OsRng.fill_bytes(&mut wrong_seed);
+    let wrong_verifying_key = SigningKey::from_bytes(&wrong_seed).verifying_key();
+    wrong_seed.zeroize();
+
+    let mut request = fixture.request();
+    request.source_verifying_key = &wrong_verifying_key;
+    let error = distribute_host_envelope(request)
+        .err()
+        .expect("untrusted source signature rejected");
+    assert_eq!(error.reason_code(), "host_envelope_signature_invalid");
+    assert_source_unchanged(&source_before, &fixture.source_packet);
+}
+
+#[test]
+fn distribute_rejects_oversized_source_packet_without_changing_source() {
+    let fixture = DistributeFixture::new();
+    let source_before = fixture.source_packet.clone();
+    let oversized_packet = vec![0_u8; 256 * 1024 + 1];
+
+    let mut request = fixture.request();
+    request.source_packet = &oversized_packet;
+    let error = distribute_host_envelope(request)
+        .err()
+        .expect("oversized source packet rejected");
+    assert_eq!(error.reason_code(), "host_envelope_packet_oversized");
+    assert_source_unchanged(&source_before, &fixture.source_packet);
+}
