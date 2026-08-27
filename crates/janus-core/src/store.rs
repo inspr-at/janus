@@ -3,9 +3,10 @@
 use async_trait::async_trait;
 
 use crate::{
-    AuditAction, AuditEvent, AuditOutcome, AuditSink, JanusError, JanusResult, OwnerRef,
-    PrincipalChain, ProfileId, RotationOutcome, RotationSpec, SafeLabel, ScopeRef, SecretName,
-    SecretRef, SecretValue, Severity, TrustLevel,
+    AuditAction, AuditEvent, AuditOutcome, AuditSink, JanusError, JanusResult,
+    MaterialExpiryStatus, MaterialLifetime, MaterialLifetimePolicy, OwnerRef, PrincipalChain,
+    ProfileId, RotationOutcome, RotationSpec, SafeLabel, ScopeRef, SecretName, SecretRef,
+    SecretValue, Severity, TrustLevel,
 };
 
 /// Backend capabilities used by manifest/profile requirements.
@@ -385,6 +386,8 @@ pub struct SecretMeta {
     pub trust_level: TrustLevel,
     /// Allowed profile ids for model-facing descriptions.
     pub allowed_uses: Vec<ProfileId>,
+    /// Optional value-free issuer material lifetime.
+    pub material_lifetime: Option<MaterialLifetime>,
 }
 
 impl SecretMeta {
@@ -401,6 +404,7 @@ impl SecretMeta {
             required: self.required,
             trust_level: self.trust_level,
             allowed_uses: self.allowed_uses.clone(),
+            material_lifetime: self.material_lifetime.clone(),
             present,
         }
     }
@@ -429,6 +433,8 @@ pub struct SecretDescriptor {
     pub trust_level: TrustLevel,
     /// Allowed profile ids for model-facing descriptions.
     pub allowed_uses: Vec<ProfileId>,
+    /// Optional value-free issuer material lifetime.
+    pub material_lifetime: Option<MaterialLifetime>,
     /// Whether the backend reports the value present.
     pub present: bool,
 }
@@ -463,15 +469,38 @@ impl SecretDescriptor {
         self.lifecycle.use_denial()
     }
 
+    /// Stable denial when known issuer expiry has been reached.
+    pub fn expiry_use_denial_at(
+        &self,
+        now: std::time::SystemTime,
+    ) -> Option<(&'static str, &'static str)> {
+        if MaterialLifetimePolicy::default().classify(self.material_lifetime.as_ref(), now)
+            == MaterialExpiryStatus::Expired
+        {
+            Some((
+                "denied_material_expired",
+                "issuer material expiry has been reached",
+            ))
+        } else {
+            None
+        }
+    }
+
+    /// Stable denial when known issuer expiry has been reached at the current clock.
+    pub fn expiry_use_denial(&self) -> Option<(&'static str, &'static str)> {
+        self.expiry_use_denial_at(std::time::SystemTime::now())
+    }
+
     /// Stable denial for normal approved-use paths.
     pub fn normal_use_denial(&self) -> Option<(&'static str, &'static str)> {
         self.metadata_use_denial()
             .or_else(|| self.lifecycle_use_denial())
+            .or_else(|| self.expiry_use_denial())
     }
 
     /// Whether normal approved-use paths are currently allowed.
     pub fn normal_use_allowed(&self) -> bool {
-        self.metadata_complete() && self.lifecycle.allows_normal_use()
+        self.normal_use_denial().is_none()
     }
 
     /// Safe model-facing metadata state.
@@ -554,6 +583,7 @@ mod tests {
             required: true,
             trust_level: TrustLevel::L1,
             allowed_uses: vec![ProfileId::new("profile.canary").unwrap()],
+            material_lifetime: None,
             present: true,
         }
     }
@@ -774,5 +804,33 @@ mod tests {
         assert_eq!(event.reason_code, "denied_missing_owner");
         assert_eq!(event.evidence.as_ref(), Some(&reason));
         assert!(!event.value_returned);
+    }
+
+    #[test]
+    fn expired_material_denies_normal_use_without_changing_lifecycle() {
+        let mut descriptor = lifecycle_descriptor(
+            SecretLifecycle::Active,
+            Some(OwnerRef::new("infra").unwrap()),
+            Some(SecretClass::Normal),
+        );
+        descriptor.material_lifetime = Some(
+            MaterialLifetime::new(
+                None,
+                crate::MaterialTimestamp::from_unix_seconds(100),
+                None,
+                Some(crate::MaterialLifetimeProvenance::ReviewedManual),
+            )
+            .unwrap(),
+        );
+
+        assert_eq!(
+            descriptor
+                .expiry_use_denial_at(std::time::UNIX_EPOCH + std::time::Duration::from_secs(100)),
+            Some((
+                "denied_material_expired",
+                "issuer material expiry has been reached"
+            ))
+        );
+        assert_eq!(descriptor.lifecycle, SecretLifecycle::Active);
     }
 }
