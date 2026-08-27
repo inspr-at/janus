@@ -116,6 +116,36 @@ pub struct HostEnvelopeSealRequest<'a> {
     pub value: SecretValue,
 }
 
+/// Input to the host-envelope reseal boundary composed by distribution.
+pub struct HostEnvelopeResealRequest<'a> {
+    pub source_packet: &'a [u8],
+    pub local_identity_path: &'a Path,
+    pub source_verifying_key: &'a VerifyingKey,
+    pub binding: HostEnvelopeBindingV1,
+    pub host_recipient: &'a str,
+    pub signing_key_id: &'a str,
+    pub signing_key: &'a SigningKey,
+}
+
+/// Value-free result metadata for one host-envelope reseal.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HostEnvelopeResealOutcome {
+    pub action: String,
+    pub host_ref: String,
+    pub secret_ref: String,
+    pub envelope_ref: String,
+    pub operation_ref: String,
+    pub changed: bool,
+    pub value_returned: bool,
+}
+
+/// Newly sealed packet and its value-free outcome.
+pub struct HostEnvelopeResealResult {
+    pub packet: Vec<u8>,
+    pub outcome: HostEnvelopeResealOutcome,
+}
+
 /// Signed packet delivered directly to the exact enrolled host.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -378,6 +408,51 @@ pub fn seal_host_envelope(request: HostEnvelopeSealRequest<'_>) -> HostResult<Ve
         return Err(HostEnvelopeError::new("host_envelope_packet_oversized"));
     }
     Ok(encoded)
+}
+
+/// Verify and decrypt one locally held packet, then seal its value into a new
+/// single-recipient packet. The value never crosses this boundary.
+pub fn reseal_host_envelope(
+    request: HostEnvelopeResealRequest<'_>,
+) -> HostResult<HostEnvelopeResealResult> {
+    if request.source_packet.is_empty() {
+        return Err(HostEnvelopeError::new("host_envelope_packet_invalid"));
+    }
+    if request.source_packet.len() > MAX_PACKET_BYTES {
+        return Err(HostEnvelopeError::new("host_envelope_packet_oversized"));
+    }
+    validate_binding(&request.binding)?;
+    validate_host_recipient(request.host_recipient)?;
+    if !valid_ref("key_", request.signing_key_id) {
+        return Err(HostEnvelopeError::new("host_envelope_signing_key_invalid"));
+    }
+
+    let (source_binding, value) = open_reseal_source(
+        request.source_packet,
+        request.local_identity_path,
+        request.source_verifying_key,
+    )?;
+    if source_binding.secret_ref != request.binding.secret_ref {
+        return Err(HostEnvelopeError::new("host_envelope_secret_ref_mismatch"));
+    }
+
+    let outcome = HostEnvelopeResealOutcome {
+        action: "host.envelope.reseal".to_string(),
+        host_ref: request.binding.host_ref.clone(),
+        secret_ref: request.binding.secret_ref.clone(),
+        envelope_ref: request.binding.envelope_ref.clone(),
+        operation_ref: request.binding.operation_ref.clone(),
+        changed: true,
+        value_returned: false,
+    };
+    let packet = seal_host_envelope(HostEnvelopeSealRequest {
+        binding: request.binding,
+        host_recipient: request.host_recipient,
+        signing_key_id: request.signing_key_id,
+        signing_key: request.signing_key,
+        value,
+    })?;
+    Ok(HostEnvelopeResealResult { packet, outcome })
 }
 
 /// Seal one dynamic value for exactly one host under a signature domain that
@@ -1853,24 +1928,30 @@ fn decrypt_with_identity(
     identity_path: &Path,
     owner_uid: u32,
 ) -> HostResult<Vec<u8>> {
-    let raw = read_private_regular(
+    let mut raw = read_private_regular(
         identity_path,
         64 * 1024,
         Some(owner_uid),
         "host_identity_unavailable",
     )?;
-    let identity = parse_identity(&raw)?;
+    let identity = parse_identity(&raw);
+    raw.zeroize();
+    let identity = identity?;
     let decryptor = Decryptor::new_buffered(ciphertext)
         .map_err(|_| HostEnvelopeError::new("host_envelope_decrypt_denied"))?;
     let mut reader = decryptor
         .decrypt(std::iter::once(identity.as_ref() as &dyn age::Identity))
         .map_err(|_| HostEnvelopeError::new("host_envelope_decrypt_denied"))?;
     let mut plaintext = Vec::new();
-    reader
+    if reader
         .by_ref()
         .take((MAX_SECRET_BYTES + MAX_PAYLOAD_METADATA_BYTES + 5) as u64)
         .read_to_end(&mut plaintext)
-        .map_err(|_| HostEnvelopeError::new("host_envelope_decrypt_denied"))?;
+        .is_err()
+    {
+        plaintext.zeroize();
+        return Err(HostEnvelopeError::new("host_envelope_decrypt_denied"));
+    }
     if plaintext.len() > MAX_SECRET_BYTES + MAX_PAYLOAD_METADATA_BYTES + 4 {
         plaintext.zeroize();
         return Err(HostEnvelopeError::new("host_envelope_plaintext_oversized"));
@@ -1920,6 +2001,45 @@ fn parse_plaintext(raw: &[u8]) -> HostResult<(HostEnvelopeBindingV1, SecretValue
         return Err(HostEnvelopeError::new("host_envelope_value_invalid"));
     }
     Ok((binding, SecretValue::new(value.to_vec())))
+}
+
+fn open_reseal_source(
+    raw_packet: &[u8],
+    identity_path: &Path,
+    source_verifying_key: &VerifyingKey,
+) -> HostResult<(HostEnvelopeBindingV1, SecretValue)> {
+    let packet: SignedHostEnvelopeV1 =
+        decode_strict_json(raw_packet, "host_envelope_packet_invalid")?;
+    if packet.schema != ENVELOPE_SCHEMA
+        || packet.schema_version != SCHEMA_VERSION
+        || !valid_ref("key_", &packet.key_id)
+    {
+        return Err(HostEnvelopeError::new("host_envelope_packet_invalid"));
+    }
+    let ciphertext = STANDARD_NO_PAD
+        .decode(packet.ciphertext.as_bytes())
+        .map_err(|_| HostEnvelopeError::new("host_envelope_ciphertext_invalid"))?;
+    if ciphertext.is_empty() || ciphertext.len() > MAX_CIPHERTEXT_BYTES {
+        return Err(HostEnvelopeError::new("host_envelope_ciphertext_oversized"));
+    }
+    let signature_bytes = STANDARD_NO_PAD
+        .decode(packet.signature.as_bytes())
+        .map_err(|_| HostEnvelopeError::new("host_envelope_signature_invalid"))?;
+    let signature = Signature::from_slice(&signature_bytes)
+        .map_err(|_| HostEnvelopeError::new("host_envelope_signature_invalid"))?;
+    source_verifying_key
+        .verify(&signature_message(&packet.key_id, &ciphertext), &signature)
+        .map_err(|_| HostEnvelopeError::new("host_envelope_signature_invalid"))?;
+
+    let owner_uid = fs::symlink_metadata(identity_path)
+        .map_err(|_| HostEnvelopeError::new("host_identity_unavailable"))?
+        .uid();
+    let mut plaintext = decrypt_with_identity(&ciphertext, identity_path, owner_uid)?;
+    let parsed = parse_plaintext(&plaintext);
+    plaintext.zeroize();
+    let (binding, value) = parsed?;
+    validate_binding(&binding)?;
+    Ok((binding, value))
 }
 
 fn signature_message(key_id: &str, ciphertext: &[u8]) -> Vec<u8> {

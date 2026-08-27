@@ -74,7 +74,7 @@ use janus_local::{
     PermitRegistry as SharedPermitRegistry, PermitStore as SharedPermitStore,
     TombstoneRegistry as SharedTombstoneRegistry,
 };
-use janus_provider_age::AgeSecretStore;
+use janus_provider_age::{AgeSecretStore, AgeStoreTarget};
 use pharos_retirement::{
     execute_retirement, expected_profile_id, prepare_binding, reconcile,
     FilePharosRetirementRegistry, PharosCredentialEvidence, PharosReconcileOutcome,
@@ -5663,13 +5663,17 @@ fn load_age_store_from_env_with_metadata_path(
     } else {
         metadata_overlay_from_env(METADATA_ENV_KEYS)?
     };
-    AgeSecretStore::load_from_secretspec_manifest_with_metadata(
+    let membership_scope = env_first(&["JANUS_AGE_SCOPE"]);
+    AgeSecretStore::load_from_secretspec_manifest_with_metadata_and_membership_scope(
         manifest,
-        profile,
-        store_dir,
-        identity_files,
-        recipients,
+        AgeStoreTarget {
+            profile,
+            root_dir: store_dir.into(),
+            identity_files,
+            recipients,
+        },
         runtime_scope_from_env()?,
+        membership_scope.as_deref(),
         metadata.as_ref(),
     )
     .context("failed to load age backend for the selected Janus runtime")
@@ -8078,6 +8082,7 @@ mod tests {
             required: true,
             trust_level: TrustLevel::L1,
             allowed_uses: vec![profile_id.clone()],
+            material_lifetime: None,
             present: true,
         }];
         let config = ApproveIssueConfig {
@@ -8126,6 +8131,7 @@ mod tests {
             required: true,
             trust_level: TrustLevel::L1,
             allowed_uses: vec![profile_id.clone()],
+            material_lifetime: None,
             present: true,
         }];
         let config = ApproveIssueConfig {
@@ -8479,6 +8485,7 @@ mod tests {
             required: true,
             trust_level: TrustLevel::L1,
             allowed_uses: vec![profile_id],
+            material_lifetime: None,
         }];
         overlay
             .apply_to_entries_with_manifest_names(&mut entries, &manifest_names)
@@ -8788,6 +8795,7 @@ mod tests {
             required: true,
             trust_level: TrustLevel::L1,
             allowed_uses: vec![profile_id],
+            material_lifetime: None,
         }];
         overlay.apply_to_entries(&mut entries).unwrap();
         assert_eq!(entries[0].owner.as_ref().unwrap().as_str(), "security");
@@ -9878,6 +9886,7 @@ mod tests {
                 required: true,
                 trust_level: TrustLevel::L1,
                 allowed_uses: vec![profile_id.clone()],
+                material_lifetime: None,
             }])
             .unwrap();
             let store = MockStore::new(catalog)
@@ -10522,6 +10531,7 @@ mod tests {
             required: true,
             trust_level: TrustLevel::L1,
             allowed_uses: vec![profile_id.clone()],
+            material_lifetime: None,
         }])
         .unwrap();
         MockStore::new(catalog)
@@ -10580,6 +10590,7 @@ mod tests {
             required: true,
             trust_level: TrustLevel::L1,
             allowed_uses: vec![profile_id.clone()],
+            material_lifetime: None,
         }];
         SecretMetadataOverlay::load_toml_file(metadata_file)
             .unwrap()
@@ -10607,6 +10618,7 @@ mod tests {
                     required: true,
                     trust_level: TrustLevel::L1,
                     allowed_uses: vec![profile_id.clone()],
+                    material_lifetime: None,
                 })
                 .collect(),
         )

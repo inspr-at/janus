@@ -24,17 +24,37 @@ c2b07e44b8b9d3fd3c12d260f3ee02268b5663b8:crates/janus-provider-age/src/lib.rs:pr
 
 # Reviewed JANUS-443 historical test fixture.
 4d3ccb915cf78cc27b69ce6ea8256a00c66c4a72:crates/janus-distribute/src/tests.rs:generic-api-key:289
+# Current tracked-tree position for the same reviewed in-process fixture.
+crates/janus-distribute/src/tests.rs:generic-api-key:289
+
+# Reviewed fixture at the #99 squash-merge history commit (JANUS-448).
+e563bfab667dbfb44aac13916b3a3c9d617d22d2:crates/janus-provider-age/src/lib.rs:private-key:1844
+
+# Same reviewed fixture at the #93 squash-merge history commit (JANUS-454).
+7ab54e81a3386fb0381343879e035cbe9cc72599:crates/janus-provider-age/src/lib.rs:private-key:1844
+
+# Same reviewed fixture at the #95 squash-merge history commit (JANUS-420).
+d92a7f3119125c8d0214992bf0473723f716fcfd:crates/janus-provider-age/src/lib.rs:private-key:1844
+
+# Same reviewed fixture at its current main tree position, independent of the
+# squash SHA. Gitleaks applies a commit-less path:rule:line fingerprint to both
+# history and tracked-tree scans, so a history scan that sees the PR base as a
+# whole-tree addition is covered without a per-squash commit entry.
+crates/janus-provider-age/src/lib.rs:private-key:1844
 
 # Current tracked-tree positions for the same required synthetic fixtures.
 # JANUS-398 preserves the exact pre-change main positions while production
 # edits move the current tracked-tree fixtures to new lines.
 7b9cf42f7738176821e3b8e2c8d5e1702618215e:crates/janus-provider-age/src/lib.rs:private-key:1597
-# JANUS-447 preserves the pre-change main-tip position of the same fixture
-# while the write primitive moves the current tracked-tree line to 1888.
-7ab54e81a3386fb0381343879e035cbe9cc72599:crates/janus-provider-age/src/lib.rs:private-key:1844
 7b9cf42f7738176821e3b8e2c8d5e1702618215e:crates/janusd/src/lifecycle_entry/web_transaction.rs:generic-api-key:1453
 go-envelope/vault_ui_test.go:generic-api-key:539
-crates/janus-provider-age/src/lib.rs:private-key:1888
+crates/janus-provider-age/src/lib.rs:private-key:1893
+# JANUS-445 adds production code above the same reviewed in-process fixture.
+# Keep this commit-independent so squash-merging cannot invalidate the scan.
+crates/janus-provider-age/src/lib.rs:private-key:2162
+# JANUS-447 adds the existing-value write primitive above the same reviewed
+# in-process fixture. Commit-independent so squash-merging cannot invalidate it.
+crates/janus-provider-age/src/lib.rs:private-key:2206
 go-envelope/main_test.go:generic-api-key:743
 contracts/managed-service-secret-contract-v1.json:generic-api-key:56
 faecb360b704e7ad7222f7dc3b640afb5a4dcb74:crates/janus-provider-age/src/lib.rs:private-key:1690

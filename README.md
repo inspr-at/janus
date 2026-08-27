@@ -190,8 +190,9 @@ membership semantics)**: project identity, profile membership, and
 `required`/`description` metadata. JANUS-448 (PR #94) lands the membership
 parity for that subset — default-profile inheritance with `inherit = false`,
 membership-only `[scopes]` filters, and the `dotenv://` URI form alongside
-the existing `dotenv:` form — together with its own field-by-field
-reference. See [`docs/secretspec-compatibility-boundary.md`](docs/secretspec-compatibility-boundary.md)
+the existing `dotenv:` form — together with its own
+[field-by-field reference](docs/secretspec-allowlist-subset.md). See
+[`docs/secretspec-compatibility-boundary.md`](docs/secretspec-compatibility-boundary.md)
 for the secretspec 0.20 landscape, the full rejected-field list and why each
 field is rejected, and the Janus position relative to upstream secretspec.
 
@@ -261,7 +262,8 @@ The package installs `janusd-use`, `janusd-admin`,
 `janusd-dynamic-deliveryd`, `janusd-dynamic-transportd`, `janusd-identityd`,
 `janusd-identity-admin`,
 `janus-host-executor`, `janus-managed-host-agent`,
-`janus-paimos-dependency-reporter`, `janus-warden`, and the
+`janus-paimos-dependency-reporter`, `janus-warden`,
+[`janus-agenix-import`](docs/agenix-import-bridge.md), and the
 non-operational `janusd` migration helper for supported Linux systems. The
 private daemons have no CLI operations and accept only their reviewed local
 socket protocols; the legacy helper cannot run either plane's commands.
