@@ -34,6 +34,12 @@ e563bfab667dbfb44aac13916b3a3c9d617d22d2:crates/janus-provider-age/src/lib.rs:pr
 # Same reviewed fixture at the #95 squash-merge history commit (JANUS-420).
 d92a7f3119125c8d0214992bf0473723f716fcfd:crates/janus-provider-age/src/lib.rs:private-key:1844
 
+# Same reviewed fixture at its current main tree position, independent of the
+# squash SHA. Gitleaks applies a commit-less path:rule:line fingerprint to both
+# history and tracked-tree scans, so a history scan that sees the PR base as a
+# whole-tree addition is covered without a per-squash commit entry.
+crates/janus-provider-age/src/lib.rs:private-key:1844
+
 # Current tracked-tree positions for the same required synthetic fixtures.
 # JANUS-398 preserves the exact pre-change main positions while production
 # edits move the current tracked-tree fixtures to new lines.
