@@ -12,7 +12,12 @@ from pathlib import Path
 REQUIRED = {
     "check-fast": ("release security policy and negative fixtures",),
     "check-nix": ("nix package",),
-    "check-assurance": ("engine release assurance gate",),
+    # JANUS-438: the 9m17s serial assurance gate is split into two
+    # independently-schedulable proof-family jobs plus a fan-in job that
+    # keeps the original "check-assurance" required check name.
+    "check-assurance-tests": ("engine release assurance gate (tests)",),
+    "check-assurance-smoke": ("engine release assurance gate (smoke)",),
+    "check-assurance": ("require both engine assurance proof families",),
     "image-amd64": ("build native amd64 image",),
     "image-arm64": ("build native arm64 image",),
     "image": (
@@ -21,6 +26,10 @@ REQUIRED = {
         "SPDX SBOM attestation", "verify published engine digest and mode receipts",
     ),
 }
+# Jobs whose wall-clock time overlaps rather than adds up, because they run
+# in parallel. The assurance critical path is the slower of the two proof
+# families, not their sum.
+PARALLEL_GROUPS = {"assurance": ("check-assurance-tests", "check-assurance-smoke")}
 
 
 def timestamp(value: str) -> dt.datetime:
@@ -50,10 +59,15 @@ def report(run: dict, jobs: list[dict], budget: int) -> dict:
             "steps_seconds": step_evidence,
         }
     elapsed = seconds(run["created_at"], found["image"]["completed_at"])
+    critical_paths = {
+        group: max(evidence[name]["duration_seconds"] for name in members)
+        for group, members in PARALLEL_GROUPS.items()
+    }
     return {
         "schema_version": 1, "run_id": str(run["id"]), "commit": run["head_sha"],
         "budget_seconds": budget, "release_elapsed_seconds": elapsed,
         "budget_passed": elapsed <= budget, "jobs": evidence,
+        "critical_path_seconds": critical_paths,
     }
 
 
@@ -65,7 +79,9 @@ def self_test() -> None:
         steps = [{"name": step, "conclusion": "success", "started_at": stamp(index * 10), "completed_at": stamp(index * 10 + 2)} for step in required_steps]
         jobs.append({"name": name, "conclusion": "success", "started_at": stamp(index * 10), "completed_at": stamp(index * 10 + 9), "steps": steps})
     run = {"id": 1, "head_sha": "a" * 40, "created_at": stamp(0)}
-    assert report(run, jobs, 900)["release_elapsed_seconds"] == 59
+    document = report(run, jobs, 900)
+    assert document["release_elapsed_seconds"] == 79
+    assert document["critical_path_seconds"]["assurance"] == 9
     for fixture in (jobs[:-1], [{**jobs[0], "conclusion": "failure"}, *jobs[1:]]):
         try:
             report(run, fixture, 900)
@@ -95,6 +111,8 @@ def main() -> int:
         args.output.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n")
         rows = ["## Rust release timing", "", f"Total: **{document['release_elapsed_seconds']}s** / {document['budget_seconds']}s budget", "", "| Job | Seconds |", "|---|---:|"]
         rows += [f"| {name} | {value['duration_seconds']} |" for name, value in document["jobs"].items()]
+        rows += ["", "| Critical path | Seconds |", "|---|---:|"]
+        rows += [f"| {name} | {value} |" for name, value in document["critical_path_seconds"].items()]
         args.summary.write_text("\n".join(rows) + "\n")
         result = "passed" if document["budget_passed"] else "blocked"
         print(f"Rust release timing {result}: {document['release_elapsed_seconds']}s")

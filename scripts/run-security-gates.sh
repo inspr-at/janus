@@ -13,6 +13,11 @@ python3 scripts/check-release-mode-receipts.py --self-test
 python3 scripts/check-github-repository-posture.py --self-test
 python3 scripts/check-duty-journal-boundary.py --self-test
 python3 scripts/check-duty-journal-boundary.py
+python3 scripts/classify-pr-paths.py --self-test
+bash scripts/assure-engine-release.sh --self-test
+python3 scripts/check-engine-assurance-inventory.py --self-test
+python3 scripts/check-engine-assurance-inventory.py
+python3 scripts/report-pr-critical-path.py --self-test
 ruby scripts/check-workflow-security.rb --self-test
 python3 scripts/check-security-gates.py --self-test
 python3 scripts/check-security-gates.py --check-installed-tools

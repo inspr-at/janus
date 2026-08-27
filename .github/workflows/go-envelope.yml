@@ -26,6 +26,8 @@ jobs:
     defaults:
       run:
         working-directory: go-envelope
+    outputs:
+      playwright_cache_hit: ${{ steps.playwright-cache.outputs.cache-hit }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -69,11 +71,23 @@ jobs:
         run: |
           python3 scripts/run-managed-service-ux-assurance.py --self-test
           python3 scripts/run-managed-service-ux-assurance.py --stack go
+      - name: cache Playwright Chromium
+        id: playwright-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}-${{ hashFiles('package-lock.json') }}-v1.61.1
       - name: install managed-service browser assurance
         working-directory: .
+        env:
+          CACHE_HIT: ${{ steps.playwright-cache.outputs.cache-hit }}
         run: |
           npm ci --ignore-scripts
-          npx playwright install --with-deps chromium
+          if [[ "${CACHE_HIT}" == "true" ]]; then
+            npx playwright install-deps chromium
+          else
+            npx playwright install --with-deps chromium
+          fi
       - name: managed-service real-browser assurance
         working-directory: .
         run: python3 scripts/run-managed-service-ux-assurance.py --stack browser
@@ -108,6 +122,48 @@ jobs:
           name: go-candidate-security-summary
           path: go-trivy-summary.json
           if-no-files-found: error
+
+  # JANUS-438 acceptance criteria 4 and 7: a value-free critical-path timing
+  # summary for the Go PR pipeline against the reviewed Go-only PR budget
+  # (warm under 5 minutes, cold under 8 minutes), selected by the Playwright
+  # Chromium cache outcome. Informational only (the step never fails the
+  # job) while real evidence accumulates across PRs.
+  pr-path-timing:
+    if: github.event_name == 'pull_request'
+    needs: build-test
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: measure PR-path critical path
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PLAYWRIGHT_CACHE_HIT: ${{ needs.build-test.outputs.playwright_cache_hit }}
+        run: |
+          gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" > go-pr-run.json
+          build_conclusion=""
+          for attempt in {1..6}; do
+            gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/jobs?per_page=100" \
+              | jq '{jobs: [.jobs[] | select(.name != "pr-path-timing")]}' > go-pr-jobs.json
+            build_conclusion="$(jq -r '.jobs[] | select(.name == "build-test") | .conclusion' go-pr-jobs.json)"
+            [[ "${build_conclusion}" = success ]] && break
+            sleep 5
+          done
+          test "${build_conclusion}" = success
+          cache_hit="false"
+          [[ "${PLAYWRIGHT_CACHE_HIT}" == "true" ]] && cache_hit="true"
+          budget=480
+          [[ "${cache_hit}" == "true" ]] && budget=300
+          python3 scripts/report-pr-critical-path.py --run go-pr-run.json --jobs go-pr-jobs.json --cache-hit "playwright=${cache_hit}" --budget-seconds "${budget}" --output go-pr-timing.json --summary go-pr-timing.md || true
+          cat go-pr-timing.md >> "${GITHUB_STEP_SUMMARY}" 2>/dev/null || true
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        if: always()
+        with:
+          name: go-pr-path-timing
+          path: go-pr-timing.json
+          if-no-files-found: ignore
 
   image:
     # Only on a published GitHub Release whose tag starts with go-envelope-v.
