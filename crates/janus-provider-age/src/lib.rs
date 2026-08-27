@@ -2481,7 +2481,7 @@ AAAEADBJvjZT8X6JRJI8xVq/1aU8nMVgOtVnmdwqWwrSlXG3sKLqeplhpW+uObz5dvMgjz
         let material_root = fixture._tmp.path().join("agenix-material");
         fs::create_dir(&material_root).unwrap();
         let outside = fixture._tmp.path().join("outside-material");
-        fs::write(&outside, [b'X']).unwrap();
+        fs::write(&outside, *b"X").unwrap();
         symlink(&outside, material_root.join(fixture.canary.as_str())).unwrap();
         let mut store = store(&fixture, fixture.identity_file.clone());
 
