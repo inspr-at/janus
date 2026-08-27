@@ -8,9 +8,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use janus_core::{
-    load_secretspec_manifest_catalog, HealthStatus, JanusError, JanusResult, ManifestCatalog,
-    RotationOutcome, RotationSpec, RotationStrategy, ScopeRef, SecretDescriptor, SecretMeta,
-    SecretMetadataOverlay, SecretName, SecretStore, SecretValue, StoreCapabilities,
+    load_secretspec_manifest_catalog_with_membership_scope, HealthStatus, JanusError, JanusResult,
+    ManifestCatalog, RotationOutcome, RotationSpec, RotationStrategy, ScopeRef, SecretDescriptor,
+    SecretMeta, SecretMetadataOverlay, SecretName, SecretStore, SecretValue, StoreCapabilities,
 };
 use secrecy::{ExposeSecret, SecretString};
 
@@ -21,12 +21,21 @@ struct DotenvProvider {
 
 impl DotenvProvider {
     fn load(uri: &str) -> JanusResult<Self> {
-        let path = uri
-            .strip_prefix("dotenv:")
-            .filter(|path| !path.is_empty())
-            .ok_or_else(|| JanusError::StoreUnavailable {
-                detail: "only an explicit dotenv provider URI is supported".to_string(),
-            })?;
+        let path = if let Some(path) = uri.strip_prefix("dotenv://") {
+            if path.is_empty() || !Path::new(path).is_absolute() {
+                return Err(JanusError::StoreUnavailable {
+                    detail: "dotenv double-slash provider URI requires an absolute path without authority"
+                        .to_string(),
+                });
+            }
+            path
+        } else {
+            uri.strip_prefix("dotenv:")
+                .filter(|path| !path.is_empty())
+                .ok_or_else(|| JanusError::StoreUnavailable {
+                    detail: "only an explicit dotenv provider URI is supported".to_string(),
+                })?
+        };
         let path = PathBuf::from(path);
         let mut values = BTreeMap::new();
         let entries = dotenvy::from_path_iter(&path).map_err(|_| JanusError::StoreUnavailable {
@@ -127,9 +136,33 @@ impl SecretspecStore {
         scope: ScopeRef,
         metadata: Option<&SecretMetadataOverlay>,
     ) -> JanusResult<Self> {
+        Self::load_from_with_metadata_and_membership_scope(
+            config_path,
+            profile,
+            provider_uri,
+            scope,
+            None,
+            metadata,
+        )
+    }
+
+    /// Load `secretspec.toml` with optional metadata and membership filtering.
+    pub fn load_from_with_metadata_and_membership_scope(
+        config_path: impl AsRef<Path>,
+        profile: impl Into<String>,
+        provider_uri: impl Into<String>,
+        scope: ScopeRef,
+        membership_scope: Option<&str>,
+        metadata: Option<&SecretMetadataOverlay>,
+    ) -> JanusResult<Self> {
         let profile = profile.into();
-        let (_, catalog) =
-            load_secretspec_manifest_catalog(config_path, &profile, &scope, metadata)?;
+        let (_, catalog) = load_secretspec_manifest_catalog_with_membership_scope(
+            config_path,
+            &profile,
+            membership_scope,
+            &scope,
+            metadata,
+        )?;
         let provider = DotenvProvider::load(&provider_uri.into())?;
 
         Ok(Self { provider, catalog })
@@ -344,6 +377,72 @@ CANARY = { description = "Canary token", required = true }
             "#,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn dotenv_uri_forms_resolve_the_same_absolute_file() {
+        let fixture = dotenv_fixture();
+        let colon =
+            DotenvProvider::load(&format!("dotenv:{}", fixture.env_file.display())).unwrap();
+        let double_slash =
+            DotenvProvider::load(&format!("dotenv://{}", fixture.env_file.display())).unwrap();
+
+        assert_eq!(colon.path, fixture.env_file);
+        assert_eq!(double_slash.path, colon.path);
+    }
+
+    #[test]
+    fn dotenv_double_slash_rejects_relative_and_authority_looking_paths() {
+        for uri in [
+            "dotenv://fixture.env",
+            "dotenv://fixture/fixture.env",
+            "dotenv://",
+        ] {
+            let Err(error) = DotenvProvider::load(uri) else {
+                panic!("ambiguous dotenv URI was accepted");
+            };
+            match error {
+                JanusError::StoreUnavailable { detail } => assert_eq!(
+                    detail,
+                    "dotenv double-slash provider URI requires an absolute path without authority"
+                ),
+                other => panic!("unexpected dotenv URI error: {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn secretspec_store_applies_membership_scope() {
+        let fixture = dotenv_fixture();
+        fs::write(
+            &fixture.manifest,
+            r#"
+[project]
+name = "janus"
+revision = "1.0"
+
+[profiles.default]
+CANARY = { description = "Canary fixture" }
+OTHER = { description = "Other fixture" }
+
+[scopes.worker]
+secrets = ["CANARY"]
+"#,
+        )
+        .unwrap();
+        let store = SecretspecStore::load_from_with_metadata_and_membership_scope(
+            &fixture.manifest,
+            "default",
+            format!("dotenv:{}", fixture.env_file.display()),
+            scope(),
+            Some("worker"),
+            None,
+        )
+        .unwrap();
+
+        let listed = store.list().await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].name.as_str(), "CANARY");
     }
 
     #[tokio::test]

@@ -14,8 +14,8 @@ use age::{Decryptor, Encryptor};
 use async_trait::async_trait;
 use fs2::FileExt;
 use janus_core::{
-    load_secretspec_manifest_catalog, AuditAction, AuditEvent, AuditOutcome, AuditSink,
-    HealthStatus, JanusError, JanusResult, ManifestCatalog, PrincipalChain, ProjectId,
+    load_secretspec_manifest_catalog_with_membership_scope, AuditAction, AuditEvent, AuditOutcome,
+    AuditSink, HealthStatus, JanusError, JanusResult, ManifestCatalog, PrincipalChain, ProjectId,
     RotationOutcome, RotationSpec, RotationStrategy, ScopeRef, SecretDescriptor, SecretMeta,
     SecretMetadataOverlay, SecretName, SecretRef, SecretStore, SecretValue, Severity,
     StoreCapabilities,
@@ -479,9 +479,37 @@ impl AgeSecretStore {
         scope: ScopeRef,
         metadata: Option<&SecretMetadataOverlay>,
     ) -> JanusResult<Self> {
+        Self::load_from_secretspec_manifest_with_metadata_and_membership_scope(
+            config_path,
+            profile,
+            root_dir,
+            identity_files,
+            recipients,
+            scope,
+            None,
+            metadata,
+        )
+    }
+
+    /// Load a `secretspec.toml` allowlist with optional metadata and membership filtering.
+    pub fn load_from_secretspec_manifest_with_metadata_and_membership_scope(
+        config_path: impl AsRef<Path>,
+        profile: impl Into<String>,
+        root_dir: impl Into<PathBuf>,
+        identity_files: Vec<PathBuf>,
+        recipients: Vec<String>,
+        scope: ScopeRef,
+        membership_scope: Option<&str>,
+        metadata: Option<&SecretMetadataOverlay>,
+    ) -> JanusResult<Self> {
         let profile = profile.into();
-        let (project, catalog) =
-            load_secretspec_manifest_catalog(config_path, &profile, &scope, metadata)?;
+        let (project, catalog) = load_secretspec_manifest_catalog_with_membership_scope(
+            config_path,
+            &profile,
+            membership_scope,
+            &scope,
+            metadata,
+        )?;
 
         Self::from_catalog(
             project,

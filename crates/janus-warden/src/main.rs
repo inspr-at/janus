@@ -369,11 +369,13 @@ fn load_secretspec_store() -> Result<SecretspecStore> {
         "JANUS_WARDEN_METADATA_FILE",
         "JANUS_METADATA_FILE",
     ])?;
-    SecretspecStore::load_from_with_metadata(
+    let membership_scope = env::var("JANUS_WARDEN_SECRETSPEC_SCOPE").ok();
+    SecretspecStore::load_from_with_metadata_and_membership_scope(
         manifest,
         profile,
         provider_uri,
         scope_from_env()?,
+        membership_scope.as_deref(),
         metadata.as_ref(),
     )
     .context("failed to load JANUS_WARDEN_SECRETSPEC_* backend")
@@ -395,13 +397,15 @@ fn load_age_store() -> Result<AgeSecretStore> {
         "JANUS_WARDEN_METADATA_FILE",
         "JANUS_METADATA_FILE",
     ])?;
-    AgeSecretStore::load_from_secretspec_manifest_with_metadata(
+    let membership_scope = env::var("JANUS_WARDEN_SECRETSPEC_SCOPE").ok();
+    AgeSecretStore::load_from_secretspec_manifest_with_metadata_and_membership_scope(
         manifest,
         profile,
         store_dir,
         identity_files,
         recipients,
         scope_from_env()?,
+        membership_scope.as_deref(),
         metadata.as_ref(),
     )
     .context("failed to load JANUS_WARDEN_BACKEND=age backend")

@@ -100,14 +100,16 @@ async fn verify_provider_recoverability(
         "JANUS_WARDEN_AGE_PROFILE",
     ])
     .unwrap_or_else(|| "default".to_string());
+    let membership_scope = recovery_env_first(&["JANUS_AGE_SCOPE"]);
     let identity_files = recovery_identity_files_from_env()?;
-    let store = AgeSecretStore::load_from_secretspec_manifest_with_metadata(
+    let store = AgeSecretStore::load_from_secretspec_manifest_with_metadata_and_membership_scope(
         &manifest,
         profile,
         target.age_root(),
         identity_files.clone(),
         recovery_recipients_from_env()?,
         runner.manifest().scope_ref(),
+        membership_scope.as_deref(),
         Some(&metadata),
     )
     .context("failed to load recovered Age state")?;

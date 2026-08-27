@@ -5663,13 +5663,15 @@ fn load_age_store_from_env_with_metadata_path(
     } else {
         metadata_overlay_from_env(METADATA_ENV_KEYS)?
     };
-    AgeSecretStore::load_from_secretspec_manifest_with_metadata(
+    let membership_scope = env_first(&["JANUS_AGE_SCOPE"]);
+    AgeSecretStore::load_from_secretspec_manifest_with_metadata_and_membership_scope(
         manifest,
         profile,
         store_dir,
         identity_files,
         recipients,
         runtime_scope_from_env()?,
+        membership_scope.as_deref(),
         metadata.as_ref(),
     )
     .context("failed to load age backend for the selected Janus runtime")

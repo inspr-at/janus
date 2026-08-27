@@ -1554,16 +1554,19 @@ impl EntryTransaction {
             .map(|path| path.to_string_lossy().to_string())
             .collect::<Vec<_>>();
         backend_binding.extend(recipients.iter().cloned());
-        let store = AgeSecretStore::load_from_secretspec_manifest_with_metadata(
-            &self.plan.file.secretspec_manifest,
-            self.plan.file.secretspec_profile.clone(),
-            &self.plan.file.age_store_dir,
-            identities,
-            recipients,
-            self.principal.scope.clone(),
-            Some(&metadata),
-        )
-        .context("entry age backend denied")?;
+        let membership_scope = super::env_first(&["JANUS_AGE_SCOPE"]);
+        let store =
+            AgeSecretStore::load_from_secretspec_manifest_with_metadata_and_membership_scope(
+                &self.plan.file.secretspec_manifest,
+                self.plan.file.secretspec_profile.clone(),
+                &self.plan.file.age_store_dir,
+                identities,
+                recipients,
+                self.principal.scope.clone(),
+                membership_scope.as_deref(),
+                Some(&metadata),
+            )
+            .context("entry age backend denied")?;
         let descriptors = store
             .list()
             .await
