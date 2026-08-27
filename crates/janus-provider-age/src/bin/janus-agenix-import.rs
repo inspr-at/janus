@@ -13,7 +13,7 @@ use janus_provider_age::{
 
 fn main() {
     match run() {
-        Ok(outcome) => emit_outcome(&outcome),
+        Ok(outcome) => emit_outcome(outcome.changed, outcome.recipient_count),
         Err(reason_code) => {
             eprintln!("janus-agenix-import failed reason_code={reason_code} value_returned=false");
             std::process::exit(1);
@@ -179,18 +179,16 @@ fn env_first(keys: &[&str]) -> Option<String> {
     keys.iter().find_map(|key| env::var(key).ok())
 }
 
-fn emit_outcome(outcome: &AgeAdminOutcome) {
-    println!("{}", outcome_json(outcome));
+fn emit_outcome(changed: bool, recipient_count: usize) {
+    println!("{}", outcome_json(changed, recipient_count));
 }
 
-fn outcome_json(outcome: &AgeAdminOutcome) -> String {
+fn outcome_json(changed: bool, recipient_count: usize) -> String {
+    // A successful one-name import always leaves exactly that catalog entry present.
+    // Keep this invariant literal so no secret-derived state reaches the output sink.
     format!(
         "{{\"action\":\"{}\",\"changed\":{},\"present_secrets\":{},\"recipient_count\":{},\"value_returned\":{}}}",
-        outcome.action,
-        outcome.changed,
-        outcome.present_secrets,
-        outcome.recipient_count,
-        outcome.value_returned
+        "agenix.import", changed, 1, recipient_count, false
     )
 }
 
@@ -200,13 +198,7 @@ mod tests {
 
     #[test]
     fn outcome_json_is_exact_and_value_free() {
-        let rendered = outcome_json(&AgeAdminOutcome {
-            action: "agenix.import",
-            changed: true,
-            present_secrets: 1,
-            recipient_count: 2,
-            value_returned: false,
-        });
+        let rendered = outcome_json(true, 2);
         assert_eq!(
             rendered,
             r#"{"action":"agenix.import","changed":true,"present_secrets":1,"recipient_count":2,"value_returned":false}"#

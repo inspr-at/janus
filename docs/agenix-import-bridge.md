@@ -22,6 +22,8 @@ recipients and becomes its custodian; the catalog descriptor then reports the
 secret as present. A repeated import is a value-free no-op and never replaces
 existing Janus ciphertext, even if the agenix material is no longer present.
 The command emits only a value-free JSON outcome and provides no reveal path.
+For this one-name action, `present_secrets` is `1` after every successful import;
+it is not a store-wide inventory count.
 
 This replaces per-secret import scripts with one name-derived action. It does
 not export values back to agenix or distribute them to another host. The
