@@ -7,7 +7,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use janus_core::{NamespaceId, ScopePathV1, ScopeRef, SecretName, WorkloadId};
-use janus_provider_age::{import_agenix_material_if_absent, AgeAdminOutcome, AgeSecretStore};
+use janus_provider_age::{
+    import_agenix_material_if_absent, AgeAdminOutcome, AgeSecretStore, AgeStoreTarget,
+};
 
 fn main() {
     match run() {
@@ -65,13 +67,18 @@ fn load_store_from_env() -> Result<AgeSecretStore, &'static str> {
         .unwrap_or_else(|| PathBuf::from("/var/lib/janus/secrets"));
     let identity_files = identity_files_from_env()?;
     let recipients = recipients_from_env()?;
-    AgeSecretStore::load_from_secretspec_manifest(
+    let membership_scope = env_first(&["JANUS_AGE_SCOPE"]);
+    AgeSecretStore::load_from_secretspec_manifest_with_metadata_and_membership_scope(
         manifest,
-        profile,
-        store_dir,
-        identity_files,
-        recipients,
+        AgeStoreTarget {
+            profile,
+            root_dir: store_dir,
+            identity_files,
+            recipients,
+        },
         scope_from_env()?,
+        membership_scope.as_deref(),
+        None,
     )
     .map_err(|_| "agenix_import_configuration_invalid")
 }
@@ -173,12 +180,39 @@ fn env_first(keys: &[&str]) -> Option<String> {
 }
 
 fn emit_outcome(outcome: &AgeAdminOutcome) {
-    println!(
+    println!("{}", outcome_json(outcome));
+}
+
+fn outcome_json(outcome: &AgeAdminOutcome) -> String {
+    format!(
         "{{\"action\":\"{}\",\"changed\":{},\"present_secrets\":{},\"recipient_count\":{},\"value_returned\":{}}}",
         outcome.action,
         outcome.changed,
         outcome.present_secrets,
         outcome.recipient_count,
         outcome.value_returned
-    );
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn outcome_json_is_exact_and_value_free() {
+        let rendered = outcome_json(&AgeAdminOutcome {
+            action: "agenix.import",
+            changed: true,
+            present_secrets: 1,
+            recipient_count: 2,
+            value_returned: false,
+        });
+        assert_eq!(
+            rendered,
+            r#"{"action":"agenix.import","changed":true,"present_secrets":1,"recipient_count":2,"value_returned":false}"#
+        );
+        for forbidden in ["secret_value", "plaintext", "material_root"] {
+            assert!(!rendered.contains(forbidden));
+        }
+    }
 }

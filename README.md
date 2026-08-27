@@ -262,7 +262,8 @@ The package installs `janusd-use`, `janusd-admin`,
 `janusd-dynamic-deliveryd`, `janusd-dynamic-transportd`, `janusd-identityd`,
 `janusd-identity-admin`,
 `janus-host-executor`, `janus-managed-host-agent`,
-`janus-paimos-dependency-reporter`, `janus-warden`, and the
+`janus-paimos-dependency-reporter`, `janus-warden`,
+[`janus-agenix-import`](docs/agenix-import-bridge.md), and the
 non-operational `janusd` migration helper for supported Linux systems. The
 private daemons have no CLI operations and accept only their reviewed local
 socket protocols; the legacy helper cannot run either plane's commands.

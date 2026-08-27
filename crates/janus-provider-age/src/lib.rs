@@ -20,7 +20,7 @@ use janus_core::{
     SecretMetadataOverlay, SecretName, SecretRef, SecretStore, SecretValue, Severity,
     StoreCapabilities,
 };
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 const MAX_AGENIX_MATERIAL_BYTES: usize = 64 * 1024;
 
@@ -87,7 +87,10 @@ fn agenix_import_outcome(changed: bool, recipient_count: usize) -> AgeAdminOutco
 
 #[cfg(not(unix))]
 fn validate_agenix_source_path(material_root: &Path, components: &[&str]) -> JanusResult<PathBuf> {
-    let root_metadata = fs::symlink_metadata(material_root).map_err(|err| {
+    // The root is administrator-configured and agenix intentionally exposes
+    // `/run/agenix` as a symlink to its current generation. Follow that one
+    // trusted boundary; every name-derived component below remains no-follow.
+    let root_metadata = fs::metadata(material_root).map_err(|err| {
         if err.kind() == std::io::ErrorKind::NotFound {
             agenix_import_denied(
                 "agenix_material_missing",
@@ -100,10 +103,10 @@ fn validate_agenix_source_path(material_root: &Path, components: &[&str]) -> Jan
             )
         }
     })?;
-    if !root_metadata.is_dir() || root_metadata.file_type().is_symlink() {
+    if !root_metadata.is_dir() {
         return Err(agenix_import_denied(
             "agenix_material_root_invalid",
-            "agenix material root must be a non-symlink directory",
+            "agenix material root must resolve to a directory",
         ));
     }
 
@@ -159,11 +162,15 @@ fn validate_agenix_source_path(material_root: &Path, components: &[&str]) -> Jan
 fn open_agenix_material(material_root: &Path, components: &[&str]) -> JanusResult<File> {
     use rustix::fs::{open, openat, Mode, OFlags};
 
-    let directory_flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    // Agenix exposes `/run/agenix` as a trusted symlink to its current
+    // generation. Follow only this administrator-selected root; every
+    // name-derived component and the final file remain O_NOFOLLOW.
+    let directory_flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC;
+    let component_flags = directory_flags | OFlags::NOFOLLOW;
     let mut directory = open(material_root, directory_flags, Mode::empty())
         .map_err(|err| map_agenix_root_open_error(err.into()))?;
     for component in &components[..components.len() - 1] {
-        directory = openat(&directory, *component, directory_flags, Mode::empty())
+        directory = openat(&directory, *component, component_flags, Mode::empty())
             .map_err(|err| map_agenix_source_open_error(err.into()))?;
     }
     let source = openat(
@@ -186,7 +193,7 @@ fn map_agenix_root_open_error(err: std::io::Error) -> JanusError {
     } else {
         agenix_import_denied(
             "agenix_material_root_invalid",
-            "agenix material root must be a non-symlink directory",
+            "agenix material root must resolve to a directory",
         )
     }
 }
@@ -673,12 +680,10 @@ impl AgeSecretStore {
         let scope_dir = self.scope_dir();
         let recipients = self.recipients.clone();
         let recipient_count = recipients.len();
-        let mut plaintext = value.expose_bytes().to_vec();
+        let plaintext = Zeroizing::new(value.expose_bytes().to_vec());
         tokio::task::spawn_blocking(move || {
             let _lock = try_lock_store_exclusive(&scope_dir)?;
-            let result = encrypt_to_new_file(&path, &scope_dir, &recipients, &plaintext);
-            plaintext.zeroize();
-            result
+            encrypt_to_new_file(&path, &scope_dir, &recipients, &plaintext)
         })
         .await
         .map_err(|err| JanusError::StoreUnavailable {
@@ -2539,6 +2544,26 @@ AAAEADBJvjZT8X6JRJI8xVq/1aU8nMVgOtVnmdwqWwrSlXG3sKLqeplhpW+uObz5dvMgjz
             .await
             .unwrap_err();
         assert_agenix_import_policy_reason(error, "agenix_material_invalid");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn agenix_import_accepts_trusted_symlink_material_root() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = fixture();
+        let generation_root = fixture._tmp.path().join("agenix-generation");
+        fs::create_dir(&generation_root).unwrap();
+        fs::write(generation_root.join(fixture.canary.as_str()), *b"Q").unwrap();
+        let material_root = fixture._tmp.path().join("agenix-material");
+        symlink(&generation_root, &material_root).unwrap();
+        let mut store = store(&fixture, fixture.identity_file.clone());
+
+        let outcome = import_agenix_material_if_absent(&material_root, &fixture.canary, &mut store)
+            .await
+            .unwrap();
+        assert!(outcome.changed);
+        assert!(!outcome.value_returned);
     }
 
     fn metadata_overlay() -> SecretMetadataOverlay {

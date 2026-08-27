@@ -4,14 +4,18 @@
 agenix secrets into the Janus age store. The command accepts exactly one
 catalog-declared secret name. It derives the source as
 `JANUS_AGENIX_MATERIAL_ROOT/<name>`; the root defaults to `/run/agenix` and
-must be an absolute, non-symlink directory. Operators cannot supply a source
-path or secret value on the command line.
+must be absolute and resolve to a directory. The trusted root may be agenix's
+generation symlink; every name-derived component and the secret file itself
+must not be a symlink. Operators cannot supply a source path or secret value
+on the command line.
 
-The command uses the same `JANUS_AGE_*` store, manifest, profile, identity, and
-recipient environment as `janusd`, including its `JANUS_WARDEN_AGE_*` aliases
-and canonical `JANUS_SCOPE_*` scope configuration. The source must be a
-non-empty regular file no larger than 64 KiB. Symlinks and names outside the
-reviewed catalog fail closed.
+The command uses the existing `JANUS_AGE_*` variables for the store, manifest,
+profile, identity, and recipients, including their `JANUS_WARDEN_AGE_*`
+aliases, plus the canonical `JANUS_SCOPE_*` scope configuration.
+`JANUS_AGE_SCOPE`, when set, applies the same manifest-membership subset as
+`janusd`; lifecycle metadata overlays are not needed for this create-if-absent
+operation. The source must be a non-empty regular file no larger than 64 KiB.
+Name-derived symlinks and names outside the reviewed catalog fail closed.
 
 On the first import, Janus seals the material with the configured age
 recipients and becomes its custodian; the catalog descriptor then reports the
