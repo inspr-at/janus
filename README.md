@@ -569,13 +569,21 @@ janusd-use projection issue \
   --host ares
 ```
 
+The closed catalog also accepts `managed-service-environment` with the same
+two arguments. It resolves only profiles declaring the reviewed
+`managed-service-environment-generation-v1` format.
+
 Janus resolves exactly one reviewed env-file profile, derives and immediately
 consumes its short-lived permit, writes the private host env file, and
-publishes the `pharos-beacon-token-generation-v2` verifier generation. The
-outcome contains identifiers, reviewed paths, a generation, and an opaque
-`prj_...` handle—never the permit or credential. Unknown, reserved, missing,
-and ambiguous capabilities fail closed; managed-service environment setup
-continues to use its value-free setup-intent path.
+publishes the capability's reviewed generation. Pharos keeps its
+`pharos-beacon-token-generation-v2` verifier contract. Managed-service
+environments publish an opaque value-independent host revision: neither the
+entry, generation, nor `prj_...` handle contains or derives from credential
+bytes, so it cannot become an offline verifier. Outcomes contain only reviewed
+identifiers and paths, the generation, and the handle—never a permit or
+credential. Unknown, missing, ambiguous, wrong-format, and wrong-host requests
+fail closed before secret use. The dependent nixcfg consumer module is tracked
+separately as NIX-391; Janus does not configure systemd `LoadCredential=`.
 
 ### Exact-use delegation
 

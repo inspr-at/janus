@@ -134,12 +134,16 @@ which secretspec 0.20 changes.
 
 ## systemd-credential pattern (documented option, not a runtime path)
 
-For the JANUS-446 fleet-secret NixOS module shape, one documented option
-pairs a Janus projection with systemd's own credential plumbing instead of a
+JANUS-446 supplies the Janus-side `managed-service-environment` projection.
+The dependent NIX-391 ticket owns the fleet-secret NixOS module that pairs
+that projection with systemd's own credential plumbing instead of adding a
 Janus-native systemd-credential provider:
 
-1. Janus issues a capability-named host projection (Pharos) and materializes
-   a reviewed, value-free-audited file on the host.
+1. Janus issues the exact `managed-service-environment` capability for a
+   reviewed host profile and materializes the private credential env file on
+   the host. Only its audit, outcome, and immutable generation evidence are
+   value-free; the generation is value-independent and is not a credential
+   verifier.
 2. The host's systemd unit picks that file up with `LoadCredential=` (or
    `LoadCredentialEncrypted=` / `SetCredentialEncrypted=` if the unit adds
    its own systemd-level encryption on top).
@@ -150,9 +154,9 @@ Janus-native systemd-credential provider:
 
 Janus's role stops at step 1: producing the reviewed file that becomes the
 `LoadCredential=` source. Janus does not grow a `systemd-credential`
-provider, a plugin mechanism, or a new runtime path as part of this
-documentation — this is a pattern description for JANUS-446's module shape,
-not an implementation.
+provider, a plugin mechanism, or a new runtime path. JANUS-446 ends at that
+Janus projection contract; NIX-391 owns the reusable module and the unit's
+one-line `LoadCredential=` consumer. Neither ticket changes secretspec.
 
 ## Positioning
 
