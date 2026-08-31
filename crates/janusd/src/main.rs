@@ -3759,6 +3759,9 @@ fn parse_env_file_hash_sidecar_format(value: &str) -> Result<EnvFileHashSidecarF
         "pharos-beacon-token-generation-v2" => {
             Ok(EnvFileHashSidecarFormat::PharosBeaconTokenGenerationV2)
         }
+        "managed-service-environment-generation-v1" => {
+            Ok(EnvFileHashSidecarFormat::ManagedServiceEnvironmentGenerationV1)
+        }
         _ => anyhow::bail!("unsupported env-file hash sidecar format"),
     }
 }
@@ -6065,7 +6068,7 @@ fn print_usage(selected_plane: Option<RuntimePlane>) {
             "janusd\n\nThe mixed Janus runtime entry point is retired and performs no operational command.\nUse 'janusd-use --help' for permit-bound use or 'janusd-admin --help' for administration.\nreason_code=legacy_mixed_entrypoint_retired value_returned=false"
         ),
         Some(RuntimePlane::Use) => eprintln!(
-            "janusd-use\n\nPermit-bound use commands:\n  permit issue --secret-ref REF --profile PROFILE --purpose PURPOSE\n  run preflight --profile PROFILE -- ARG...\n  run --profile PROFILE (--permit use_...|--break-glass-activation bga_...) -- ARG...\n  env-file preflight --profile PROFILE\n  env-file --profile PROFILE (--permit use_...|--break-glass-activation bga_...)\n  projection preflight --capability NAME --host HOST\n  projection issue --capability NAME --host HOST\n\nThis process cannot issue approvals, change lifecycle state, rotate, migrate, transfer scope, run recovery drills, or retire hosts.\nPermit issue derives destination, executor, egress, and TTL from reviewed policy and cannot mint approval-required use.\nManaged-command preflight validates the reviewed profile, exact argv, and executable without a permit, backend, or secret read.\nEnv-file and projection preflight check reviewed targets without a permit, backend, or secret read.\nProjection callers name only a release-reviewed capability and host; Janus derives and consumes the permit internally and never returns the credential.\nAll non-help commands require JANUS_SCOPE_ORGANIZATION, JANUS_SCOPE_PROJECT, JANUS_SCOPE_REPOSITORY, and JANUS_SCOPE_ENVIRONMENT. JANUS_SCOPE_NAMESPACE and JANUS_SCOPE_WORKLOAD are optional; workload requires namespace."
+            "janusd-use\n\nPermit-bound use commands:\n  permit issue --secret-ref REF --profile PROFILE --purpose PURPOSE\n  run preflight --profile PROFILE -- ARG...\n  run --profile PROFILE (--permit use_...|--break-glass-activation bga_...) -- ARG...\n  env-file preflight --profile PROFILE\n  env-file --profile PROFILE (--permit use_...|--break-glass-activation bga_...)\n  projection preflight --capability NAME --host HOST\n  projection issue --capability NAME --host HOST\n\nThis process cannot issue approvals, change lifecycle state, rotate, migrate, transfer scope, run recovery drills, or retire hosts.\nPermit issue derives destination, executor, egress, and TTL from reviewed policy and cannot mint approval-required use.\nManaged-command preflight validates the reviewed profile, exact argv, and executable without a permit, backend, or secret read.\nEnv-file and projection preflight check reviewed targets without a permit, backend, or secret read.\nProjection callers name only a release-reviewed capability and host; supported capabilities are pharos-beacon-token and managed-service-environment. Janus derives and consumes the permit internally and never returns the credential or a managed-service credential digest.\nAll non-help commands require JANUS_SCOPE_ORGANIZATION, JANUS_SCOPE_PROJECT, JANUS_SCOPE_REPOSITORY, and JANUS_SCOPE_ENVIRONMENT. JANUS_SCOPE_NAMESPACE and JANUS_SCOPE_WORKLOAD are optional; workload requires namespace."
         ),
         Some(RuntimePlane::Admin) => eprintln!("{ADMIN_USAGE}"),
     }
@@ -7125,20 +7128,18 @@ mod tests {
             .contains("projection capability is not release-reviewed"));
         assert!(!unknown.to_string().contains("SENSITIVE_CAPABILITY_CANARY"));
 
-        let reserved = parse_args(
-            [
-                "projection",
-                "issue",
-                "--capability",
-                "managed-service-environment",
-                "--host",
-                "ares",
-            ]
-            .into_iter()
-            .map(str::to_string),
-        )
-        .unwrap_err();
-        assert!(reserved.to_string().contains("setup-intent"));
+        let managed = parse_projection_issue_ok(&[
+            "projection",
+            "issue",
+            "--capability",
+            "managed-service-environment",
+            "--host",
+            "ares",
+        ]);
+        assert_eq!(
+            managed.selector.capability(),
+            HostProjectionCapability::ManagedServiceEnvironment
+        );
 
         let permit = parse_args(
             [
@@ -7961,6 +7962,20 @@ mod tests {
         output_path: &Path,
         hash_output_path: &Path,
     ) -> String {
+        env_file_profile_with_generation_toml(
+            secret_ref,
+            output_path,
+            hash_output_path,
+            "pharos-beacon-token-generation-v2",
+        )
+    }
+
+    fn env_file_profile_with_generation_toml(
+        secret_ref: &SecretRef,
+        output_path: &Path,
+        hash_output_path: &Path,
+        format: &str,
+    ) -> String {
         format!(
             r#"
                 [[env_files]]
@@ -7972,7 +7987,7 @@ mod tests {
                 output = {}
 
                 [env_files.hash_sidecar]
-                format = "pharos-beacon-token-generation-v2"
+                format = {}
                 subject = "ares"
                 output = {}
 
@@ -7988,6 +8003,7 @@ mod tests {
             "#,
             toml_string(secret_ref.as_str()),
             toml_string(output_path.to_string_lossy().as_ref()),
+            toml_string(format),
             toml_string(hash_output_path.to_string_lossy().as_ref()),
         )
     }
@@ -8060,6 +8076,31 @@ mod tests {
         );
         assert_eq!(sidecar.subject().as_str(), "ares");
         assert_eq!(sidecar.output_path(), hash_output_path.as_path());
+    }
+
+    #[test]
+    fn env_file_profile_manifest_parses_managed_service_generation_contract() {
+        let secret_ref = SecretRef::new("sec_fixture").unwrap();
+        let output_path = PathBuf::from("/run/janus/env/fixture.env");
+        let generation_path = PathBuf::from("/run/janus/env/fixture-generation.json");
+        let catalog = ManagedCommandProfileCatalog::parse(&env_file_profile_with_generation_toml(
+            &secret_ref,
+            &output_path,
+            &generation_path,
+            "managed-service-environment-generation-v1",
+        ))
+        .unwrap();
+        let profile = catalog
+            .env_file_profile(&ProfileId::new("profile.service_env").unwrap())
+            .unwrap();
+        let sidecar = profile.hash_sidecar().expect("generation sidecar");
+
+        assert_eq!(
+            sidecar.format(),
+            EnvFileHashSidecarFormat::ManagedServiceEnvironmentGenerationV1
+        );
+        assert_eq!(sidecar.subject().as_str(), "ares");
+        assert_eq!(sidecar.output_path(), generation_path.as_path());
     }
 
     #[test]
@@ -9987,13 +10028,29 @@ mod tests {
         }
 
         async fn new_with_hash_sidecar(output_dir: &Path) -> Self {
-            Self::new_with_optional_hash_sidecar(output_dir, true).await
+            Self::new_with_generation(output_dir, Some("pharos-beacon-token-generation-v2")).await
+        }
+
+        async fn new_with_managed_generation(output_dir: &Path) -> Self {
+            Self::new_with_generation(
+                output_dir,
+                Some("managed-service-environment-generation-v1"),
+            )
+            .await
         }
 
         async fn new_with_optional_hash_sidecar(
             output_dir: &Path,
             include_hash_sidecar: bool,
         ) -> Self {
+            Self::new_with_generation(
+                output_dir,
+                include_hash_sidecar.then_some("pharos-beacon-token-generation-v2"),
+            )
+            .await
+        }
+
+        async fn new_with_generation(output_dir: &Path, format: Option<&str>) -> Self {
             let name = SecretName::new("CANARY").unwrap();
             let secret_ref = SecretRef::for_manifest_entry(&test_scope(), &name);
             let profile_id = ProfileId::new("profile.service_env").unwrap();
@@ -10033,10 +10090,14 @@ mod tests {
                 .await
                 .unwrap();
             let output_path = output_dir.join("service.env");
-            let hash_output_path =
-                include_hash_sidecar.then(|| output_dir.join("service-token-hash.json"));
+            let hash_output_path = format.map(|_| output_dir.join("service-generation.json"));
             let profile_toml = if let Some(hash_output_path) = &hash_output_path {
-                env_file_profile_with_hash_sidecar_toml(&secret_ref, &output_path, hash_output_path)
+                env_file_profile_with_generation_toml(
+                    &secret_ref,
+                    &output_path,
+                    hash_output_path,
+                    format.expect("generation format"),
+                )
             } else {
                 env_file_profile_toml(&secret_ref, &output_path)
             };
@@ -10070,12 +10131,16 @@ mod tests {
         }
 
         fn projection_config(&self, host: &str) -> ProjectionIssueConfig {
+            self.projection_config_for(HostProjectionCapability::PharosBeaconToken, host)
+        }
+
+        fn projection_config_for(
+            &self,
+            capability: HostProjectionCapability,
+            host: &str,
+        ) -> ProjectionIssueConfig {
             ProjectionIssueConfig {
-                selector: HostProjectionSelector::new(
-                    HostProjectionCapability::PharosBeaconToken,
-                    host,
-                )
-                .unwrap(),
+                selector: HostProjectionSelector::new(capability, host).unwrap(),
             }
         }
 
@@ -10356,6 +10421,134 @@ mod tests {
         let rendered = format!("{outcome:?}");
         assert!(!rendered.contains("expected-canary"));
         assert!(!rendered.contains("SERVICE_TOKEN="));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn managed_service_projection_publishes_value_independent_generation() {
+        let output_dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(output_dir.path(), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        let mut harness =
+            FixtureEnvFileHarness::new_with_managed_generation(output_dir.path()).await;
+        let config = harness
+            .projection_config_for(HostProjectionCapability::ManagedServiceEnvironment, "ares");
+
+        let outcome = run_projection_issue_with(&config, harness.runner_mut())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            outcome.capability,
+            HostProjectionCapability::ManagedServiceEnvironment
+        );
+        assert_eq!(
+            outcome.hash_format,
+            "managed-service-environment-generation-v1"
+        );
+        assert_eq!(outcome.reason_code, "ok");
+        assert!(!outcome.value_returned);
+        let generation = outcome.generation.as_deref().expect("generation evidence");
+        assert_eq!(generation.len(), 64);
+        let sidecar = std::fs::read_to_string(
+            harness
+                .hash_output_path
+                .as_ref()
+                .expect("generation sidecar"),
+        )
+        .unwrap();
+        let generation_payload = std::fs::read_to_string(
+            output_dir
+                .path()
+                .join(format!("generation-{generation}.json")),
+        )
+        .unwrap();
+        for rendered in [format!("{outcome:?}"), sidecar, generation_payload] {
+            assert!(!rendered.contains("expected-canary"));
+            assert!(!rendered
+                .contains("9e69be364a375af1132a76c9989d5a21f62ebb24336eb34910028be1550fcc84"));
+        }
+        assert!(std::fs::read_to_string(
+            harness
+                .hash_output_path
+                .as_ref()
+                .expect("generation sidecar")
+        )
+        .unwrap()
+        .contains("inspr.janus.managed-service-environment-entry.v1"));
+        assert_eq!(
+            std::fs::symlink_metadata(&outcome.output_path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+
+        let second_dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(second_dir.path(), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        let mut second =
+            FixtureEnvFileHarness::new_with_managed_generation(second_dir.path()).await;
+        let second_config = second
+            .projection_config_for(HostProjectionCapability::ManagedServiceEnvironment, "ares");
+        let second_outcome = run_projection_issue_with(&second_config, second.runner_mut())
+            .await
+            .unwrap();
+        assert_ne!(outcome.generation, second_outcome.generation);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn managed_service_projection_rejects_corrupt_generation_before_permit_use() {
+        fn audit_count(harness: FixtureEnvFileHarness) -> usize {
+            let broker = harness.runner.executor.into_broker();
+            let (_, _, audit) = broker.into_parts();
+            audit.events().len()
+        }
+
+        let baseline_dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(baseline_dir.path(), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        let baseline =
+            FixtureEnvFileHarness::new_with_managed_generation(baseline_dir.path()).await;
+        let baseline_audit_count = audit_count(baseline);
+
+        let output_dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(output_dir.path(), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        let mut harness =
+            FixtureEnvFileHarness::new_with_managed_generation(output_dir.path()).await;
+        let config = harness
+            .projection_config_for(HostProjectionCapability::ManagedServiceEnvironment, "ares");
+        std::fs::write(output_dir.path().join("current"), b"not-a-generation\n").unwrap();
+
+        let error = run_projection_issue_with(&config, harness.runner_mut())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("current generation is invalid"));
+        assert!(!harness.output_path.exists());
+        assert!(!harness
+            .hash_output_path
+            .as_ref()
+            .expect("generation sidecar")
+            .exists());
+        assert_eq!(
+            audit_count(harness),
+            baseline_audit_count,
+            "generation preflight must fail before requesting a projection permit"
+        );
+
+        let retry_dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(retry_dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut retry = FixtureEnvFileHarness::new_with_managed_generation(retry_dir.path()).await;
+        let retry_config = retry
+            .projection_config_for(HostProjectionCapability::ManagedServiceEnvironment, "ares");
+        let outcome = run_projection_issue_with(&retry_config, retry.runner_mut())
+            .await
+            .expect("a valid generation root remains issuable");
+        assert_eq!(outcome.reason_code, "ok");
+        assert!(!outcome.value_returned);
     }
 
     #[cfg(unix)]

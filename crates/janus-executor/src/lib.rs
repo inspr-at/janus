@@ -8,6 +8,7 @@
 
 #![forbid(unsafe_code)]
 
+mod managed_generation;
 mod pharos_generation;
 mod projection;
 
@@ -154,7 +155,8 @@ pub struct EnvFileProfileSpec {
     pub env_name: SafeLabel,
     /// Reviewed absolute output path for the env file.
     pub output_path: PathBuf,
-    /// Optional reviewed SHA-256 sidecar artifact derived from the same secret.
+    /// Optional reviewed value-free generation sidecar. Some legacy formats
+    /// contain a verifier; managed-service generations are value-independent.
     pub hash_sidecar: Option<EnvFileHashSidecarSpec>,
     /// Declared service/host consumer metadata used by rotation evidence.
     pub consumer: ConsumerDescriptor,
@@ -165,6 +167,8 @@ pub struct EnvFileProfileSpec {
 pub enum EnvFileHashSidecarFormat {
     /// Pharos immutable `inspr.pharos.beacon-token-generation.v2` contract.
     PharosBeaconTokenGenerationV2,
+    /// Value-independent managed-service host projection generation.
+    ManagedServiceEnvironmentGenerationV1,
 }
 
 impl EnvFileHashSidecarFormat {
@@ -172,6 +176,9 @@ impl EnvFileHashSidecarFormat {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::PharosBeaconTokenGenerationV2 => "pharos-beacon-token-generation-v2",
+            Self::ManagedServiceEnvironmentGenerationV1 => {
+                "managed-service-environment-generation-v1"
+            }
         }
     }
 }
@@ -231,13 +238,25 @@ impl EnvFileProfile {
                             .to_string(),
                     });
                 }
-                if sidecar.format == EnvFileHashSidecarFormat::PharosBeaconTokenGenerationV2
-                    && !pharos_generation::valid_token_subject(sidecar.subject.as_str())
-                {
-                    return Err(JanusError::InvalidManifest {
-                        detail: "Pharos hash sidecar subject must be a canonical host name"
-                            .to_string(),
-                    });
+                match sidecar.format {
+                    EnvFileHashSidecarFormat::PharosBeaconTokenGenerationV2
+                        if !pharos_generation::valid_token_subject(sidecar.subject.as_str()) =>
+                    {
+                        return Err(JanusError::InvalidManifest {
+                            detail: "Pharos hash sidecar subject must be a canonical host name"
+                                .to_string(),
+                        });
+                    }
+                    EnvFileHashSidecarFormat::ManagedServiceEnvironmentGenerationV1
+                        if !managed_generation::valid_subject(sidecar.subject.as_str()) =>
+                    {
+                        return Err(JanusError::InvalidManifest {
+                            detail:
+                                "managed-service generation subject must be a canonical host name"
+                                    .to_string(),
+                        });
+                    }
+                    _ => {}
                 }
                 Ok(EnvFileHashSidecar {
                     format: sidecar.format,
@@ -317,8 +336,8 @@ impl EnvFileProfile {
     pub fn preflight_target(&self) -> JanusResult<EnvFilePlan> {
         let plan = self.plan();
         preflight_env_file_target(&plan.output_path, &plan.env_name)?;
-        if let Some(sidecar) = &plan.hash_sidecar {
-            preflight_hash_sidecar_target(&sidecar.output_path)?;
+        if let Some(sidecar) = self.hash_sidecar() {
+            preflight_generation_target(sidecar)?;
         }
         Ok(plan)
     }
@@ -1040,7 +1059,7 @@ where
         let plan = request.profile.plan();
         preflight_env_file_target(&plan.output_path, &plan.env_name)?;
         if let Some(sidecar) = request.profile.hash_sidecar() {
-            preflight_hash_sidecar_target(sidecar.output_path())?;
+            preflight_generation_target(sidecar)?;
         }
         let value = self
             .broker
@@ -1101,6 +1120,7 @@ where
         now: SystemTime,
     ) -> JanusResult<HostProjectionOutcome> {
         HostProjectionPlan::from_env_file_plan(selector, profile.plan())?;
+        profile.preflight_target()?;
         let permit = self
             .broker
             .request_use(
@@ -1218,8 +1238,8 @@ fn write_env_file_atomic(
     result
 }
 
-/// Write the value-free hash sidecar atomically and publish the immutable
-/// generation. Returns the published generation id; never the hash or value.
+/// Write the reviewed generation sidecar atomically and publish the immutable
+/// generation. Returns only the published generation id.
 fn write_hash_sidecar_atomic(
     sidecar: &EnvFileHashSidecar,
     value: &SecretValue,
@@ -1254,7 +1274,7 @@ fn write_hash_sidecar_atomic(
                 detail: "failed to create temporary hash sidecar".to_string(),
             })?;
         created_temp = true;
-        let token_sha256 = write_hash_sidecar(&mut file, sidecar, value)?;
+        let entry_revision = write_hash_sidecar(&mut file, sidecar, value)?;
         file.flush().map_err(|_| JanusError::StoreUnavailable {
             detail: "failed to flush temporary hash sidecar".to_string(),
         })?;
@@ -1265,7 +1285,14 @@ fn write_hash_sidecar_atomic(
             detail: "failed to replace hash sidecar atomically".to_string(),
         })?;
         created_temp = false;
-        pharos_generation::publish_entry(parent, sidecar.subject(), &token_sha256)
+        match sidecar.format() {
+            EnvFileHashSidecarFormat::PharosBeaconTokenGenerationV2 => {
+                pharos_generation::publish_entry(parent, sidecar.subject(), &entry_revision)
+            }
+            EnvFileHashSidecarFormat::ManagedServiceEnvironmentGenerationV1 => {
+                managed_generation::publish_entry(parent, sidecar.subject(), &entry_revision)
+            }
+        }
     })();
     if created_temp {
         let _ = fs::remove_file(&temp_path);
@@ -1311,6 +1338,19 @@ fn preflight_managed_command_binary(path: &Path) -> JanusResult<PathBuf> {
 
 fn preflight_hash_sidecar_target(path: &Path) -> JanusResult<()> {
     preflight_private_output_path(path, "env-file hash sidecar output")
+}
+
+fn preflight_generation_target(sidecar: &EnvFileHashSidecar) -> JanusResult<()> {
+    preflight_hash_sidecar_target(sidecar.output_path())?;
+    if sidecar.format() == EnvFileHashSidecarFormat::ManagedServiceEnvironmentGenerationV1 {
+        let root = sidecar
+            .output_path()
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .expect("output-path preflight validates a parent");
+        managed_generation::preflight_root(root)?;
+    }
+    Ok(())
 }
 
 fn preflight_private_output_path(path: &Path, label: &'static str) -> JanusResult<()> {
@@ -1411,6 +1451,9 @@ fn write_hash_sidecar(
     match sidecar.format() {
         EnvFileHashSidecarFormat::PharosBeaconTokenGenerationV2 => {
             pharos_generation::write_entry(&mut writer, sidecar.subject(), value.expose_bytes())
+        }
+        EnvFileHashSidecarFormat::ManagedServiceEnvironmentGenerationV1 => {
+            managed_generation::write_entry(&mut writer, sidecar.subject())
         }
     }
 }

@@ -7,10 +7,9 @@
 //! immutable generation, and an opaque projection handle. Callers never supply
 //! or receive the credential, and there is deliberately no reveal path.
 //!
-//! The catalog is closed. `pharos-beacon-token` is the first capability; the
-//! managed-service environment vocabulary is reserved here so the name fails
-//! closed with a distinct reason code until the value-free setup-intent and
-//! dynamic-custody path exposes it.
+//! The catalog is closed. `pharos-beacon-token` publishes its reviewed verifier
+//! generation; `managed-service-environment` publishes a value-independent
+//! generation that cannot become a credential oracle.
 
 use std::path::{Path, PathBuf};
 
@@ -32,38 +31,31 @@ pub enum HostProjectionCapability {
     /// Pharos consumes only the value-free
     /// `pharos-beacon-token-generation-v2` verifier generation.
     PharosBeaconToken,
+    /// A reviewed managed-service env file. Its generation contains only an
+    /// opaque per-host revision and never a credential digest.
+    ManagedServiceEnvironment,
 }
 
 impl HostProjectionCapability {
     /// Every issuable capability, used by closed-catalog tests.
-    pub const ALL: [Self; 1] = [Self::PharosBeaconToken];
-
-    /// Capability names that are declared for a future surface but are not
-    /// issuable through the host-projection path. They fail closed with a
-    /// distinct reason code so a caller can tell "unknown" from "not here".
-    pub const RESERVED: [&'static str; 1] = ["managed-service-environment"];
+    pub const ALL: [Self; 2] = [Self::PharosBeaconToken, Self::ManagedServiceEnvironment];
 
     /// Stable caller-facing name.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::PharosBeaconToken => "pharos-beacon-token",
+            Self::ManagedServiceEnvironment => "managed-service-environment",
         }
     }
 
-    /// Parse one exact catalog name. Unknown and reserved names fail closed
-    /// without echoing the caller input.
+    /// Parse one exact catalog name. Unknown names fail closed without echoing
+    /// the caller input.
     pub fn parse(value: &str) -> JanusResult<Self> {
         if let Some(capability) = Self::ALL
             .into_iter()
             .find(|capability| capability.as_str() == value)
         {
             return Ok(capability);
-        }
-        if Self::RESERVED.contains(&value) {
-            return Err(JanusError::policy_denied(
-                "projection_capability_reserved",
-                "projection capability is reserved for the managed-service setup-intent path and is not issuable as a host projection",
-            ));
         }
         Err(JanusError::policy_denied(
             "projection_capability_unknown",
@@ -75,6 +67,9 @@ impl HostProjectionCapability {
     pub const fn hash_sidecar_format(self) -> EnvFileHashSidecarFormat {
         match self {
             Self::PharosBeaconToken => EnvFileHashSidecarFormat::PharosBeaconTokenGenerationV2,
+            Self::ManagedServiceEnvironment => {
+                EnvFileHashSidecarFormat::ManagedServiceEnvironmentGenerationV1
+            }
         }
     }
 
@@ -83,6 +78,13 @@ impl HostProjectionCapability {
         match self {
             Self::PharosBeaconToken if pharos_generation::valid_token_subject(host) => Ok(()),
             Self::PharosBeaconToken => Err(JanusError::policy_denied(
+                "projection_host_invalid",
+                "projection host must be a canonical host name or host reference",
+            )),
+            Self::ManagedServiceEnvironment if pharos_generation::valid_token_subject(host) => {
+                Ok(())
+            }
+            Self::ManagedServiceEnvironment => Err(JanusError::policy_denied(
                 "projection_host_invalid",
                 "projection host must be a canonical host name or host reference",
             )),
@@ -328,6 +330,18 @@ mod tests {
     };
 
     fn profile(profile_id: &str, subject: Option<&str>) -> EnvFileProfile {
+        profile_with_format(
+            profile_id,
+            subject,
+            EnvFileHashSidecarFormat::PharosBeaconTokenGenerationV2,
+        )
+    }
+
+    fn profile_with_format(
+        profile_id: &str,
+        subject: Option<&str>,
+        format: EnvFileHashSidecarFormat,
+    ) -> EnvFileProfile {
         let secret_ref = SecretRef::new(format!("sec_{profile_id}")).unwrap();
         let scope = ScopePathV1::for_repository("fixture-org", "janus", "janus", "dev")
             .unwrap()
@@ -340,7 +354,7 @@ mod tests {
             env_name: SafeLabel::new("PHAROS_TOKEN").unwrap(),
             output_path: PathBuf::from(format!("/run/janus/env/pharos/beacons/{profile_id}.env")),
             hash_sidecar: subject.map(|subject| EnvFileHashSidecarSpec {
-                format: EnvFileHashSidecarFormat::PharosBeaconTokenGenerationV2,
+                format,
                 subject: SafeLabel::new(subject).unwrap(),
                 output_path: PathBuf::from(format!(
                     "/run/janus/env/pharos/beacon-token-hashes/{profile_id}.json"
@@ -365,7 +379,7 @@ mod tests {
 
     #[test]
     fn capability_catalog_is_closed_and_fails_closed_without_echo() {
-        assert_eq!(HostProjectionCapability::ALL.len(), 1);
+        assert_eq!(HostProjectionCapability::ALL.len(), 2);
         assert_eq!(
             HostProjectionCapability::parse("pharos-beacon-token").unwrap(),
             HostProjectionCapability::PharosBeaconToken
@@ -373,6 +387,14 @@ mod tests {
         assert_eq!(
             HostProjectionCapability::PharosBeaconToken.hash_sidecar_format(),
             EnvFileHashSidecarFormat::PharosBeaconTokenGenerationV2
+        );
+        assert_eq!(
+            HostProjectionCapability::parse("managed-service-environment").unwrap(),
+            HostProjectionCapability::ManagedServiceEnvironment
+        );
+        assert_eq!(
+            HostProjectionCapability::ManagedServiceEnvironment.hash_sidecar_format(),
+            EnvFileHashSidecarFormat::ManagedServiceEnvironmentGenerationV1
         );
 
         let unknown = HostProjectionCapability::parse("SENSITIVE_CAPABILITY_CANARY").unwrap_err();
@@ -385,19 +407,6 @@ mod tests {
         ));
         assert!(!unknown.to_string().contains("SENSITIVE_CAPABILITY_CANARY"));
 
-        let reserved = HostProjectionCapability::parse("managed-service-environment").unwrap_err();
-        assert!(matches!(
-            reserved,
-            JanusError::PolicyDenied {
-                reason_code: "projection_capability_reserved",
-                ..
-            }
-        ));
-        for reserved in HostProjectionCapability::RESERVED {
-            assert!(HostProjectionCapability::ALL
-                .iter()
-                .all(|capability| capability.as_str() != reserved));
-        }
         assert!(HostProjectionCapability::parse("").is_err());
         assert!(HostProjectionCapability::parse("Pharos-Beacon-Token").is_err());
     }
@@ -453,6 +462,31 @@ mod tests {
 
         let unknown_host = HostProjectionSelector::new(capability, "zeus").unwrap();
         assert!(resolve_host_projection_profile([&ares, &hera], &unknown_host).is_err());
+    }
+
+    #[test]
+    fn managed_service_resolution_requires_its_dedicated_format_and_exact_host() {
+        let managed = profile_with_format(
+            "managed-ares",
+            Some("ares"),
+            EnvFileHashSidecarFormat::ManagedServiceEnvironmentGenerationV1,
+        );
+        let pharos = profile("pharos-ares", Some("ares"));
+        let selector = HostProjectionSelector::new(
+            HostProjectionCapability::ManagedServiceEnvironment,
+            "ares",
+        )
+        .unwrap();
+        let resolved = resolve_host_projection_profile([&managed, &pharos], &selector).unwrap();
+        assert_eq!(resolved.profile_id().as_str(), "profile.managed-ares");
+        assert!(resolve_host_projection_profile([&pharos], &selector).is_err());
+
+        let other = HostProjectionSelector::new(
+            HostProjectionCapability::ManagedServiceEnvironment,
+            "hera",
+        )
+        .unwrap();
+        assert!(resolve_host_projection_profile([&managed], &other).is_err());
     }
 
     #[test]
