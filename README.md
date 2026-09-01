@@ -4,8 +4,9 @@
 
 Janus is the INSPR governance and approved-use layer for credentials. It keeps
 secret values behind a policy boundary, gives consumers opaque references and
-single-use permits, emits value-free audit events, and persists value-free
-lifecycle evidence on supported operator paths.
+single-use permits, executes reviewed work inside that boundary, rotates
+generated credentials through guarded hooks, and records value-free lifecycle
+evidence on supported operator paths.
 
 The result is one deliberate control plane for services, operators, and AI
 agents - without making raw credentials part of prompts, command arguments,
@@ -14,9 +15,14 @@ logs, or application code.
 [![License: AGPL-3.0-only](https://img.shields.io/badge/license-AGPL--3.0--only-1f7a72.svg)](LICENSE)
 [![Rust engine](https://img.shields.io/badge/Rust_engine-v0.1.33-cb7c28.svg)](https://github.com/inspr-at/janus/releases/tag/rust-engine-v0.1.33)
 
-[Product site](https://janus.inspr.at) ·
+[Product site](https://janus.inspr.at/) ·
+[Deutsch](https://janus.inspr.at/de/) ·
 [Rust engine v0.1.33](https://github.com/inspr-at/janus/releases/tag/rust-engine-v0.1.33) ·
 [INSPR](https://www.inspr.at)
+
+Janus is part of the open INSPR product family and is authored and published
+by [Markus Barta](https://github.com/markus-barta). Augmentoring's professional
+services deploy and operate Janus; Augmentoring is not the product owner.
 
 ## What Janus does
 
@@ -676,6 +682,8 @@ When a change touches an operator path, extend the corresponding smoke test and
 assert that fixture secret values cannot appear in captured output.
 
 ## License
+
+Copyright © 2026 [Markus Barta](https://github.com/markus-barta).
 
 Janus is free and open-source software licensed under
 [`AGPL-3.0-only`](LICENSE).
