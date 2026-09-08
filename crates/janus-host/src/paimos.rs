@@ -1680,4 +1680,142 @@ mod tests {
             "trailing"
         );
     }
+
+    type ConfigMutation = fn(ReporterConfigV1) -> ReporterConfigV1;
+
+    const CHECKED_EXAMPLE_PATH: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../examples/paimos-dependency-reporter/config.example.json"
+    );
+    const README_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../README.md");
+    const README_PAIMOS_JSON_MARKER: &str =
+        "The strict configuration shape is mirrored byte-for-byte from that example:\n\n```json\n";
+
+    fn checked_example_bytes() -> Vec<u8> {
+        fs::read(CHECKED_EXAMPLE_PATH).expect("read checked Paimos example")
+    }
+
+    fn readme_paimos_config_bytes() -> Vec<u8> {
+        let readme = fs::read_to_string(README_PATH).expect("read README");
+        let start = readme
+            .find(README_PAIMOS_JSON_MARKER)
+            .expect("README Paimos JSON marker")
+            + README_PAIMOS_JSON_MARKER.len();
+        let rest = readme[start..]
+            .split_once("\n```")
+            .expect("README Paimos JSON fence")
+            .0;
+        rest.to_string().into_bytes()
+    }
+
+    fn parse_checked_config(raw: &[u8]) -> ReporterConfigV1 {
+        decode_strict(raw, "checked_example_invalid").expect("checked example JSON")
+    }
+
+    #[test]
+    fn checked_example_parses_and_validates_before_transport() {
+        let raw = checked_example_bytes();
+        let config = parse_checked_config(&raw);
+        validate_config(&config, false).expect("checked example shape");
+        assert_eq!(config.schema, CONFIG_SCHEMA);
+        assert_eq!(config.schema_version, 1);
+        assert_eq!(config.handoff_id, HANDOFF_ID);
+        assert_eq!(config.evidence.kind(), EvidenceKind::Authorization);
+    }
+
+    #[test]
+    fn readme_paimos_json_matches_checked_example() {
+        let example = checked_example_bytes();
+        let readme = readme_paimos_config_bytes();
+        let example_value: Value =
+            serde_json::from_slice(&example).expect("parse checked example JSON");
+        let readme_value: Value = serde_json::from_slice(&readme).expect("parse README JSON");
+        assert_eq!(
+            example_value, readme_value,
+            "README Paimos JSON must match examples/paimos-dependency-reporter/config.example.json"
+        );
+    }
+
+    #[test]
+    fn checked_example_negative_shapes_fail_before_transport() {
+        let valid = parse_checked_config(&checked_example_bytes());
+        let cases: Vec<(&str, ConfigMutation, &'static str)> = vec![
+            (
+                "shared credential path",
+                |mut config| {
+                    config.handoff_secret_file = config.api_key_file.clone();
+                    config
+                },
+                "paimos_reporter_config_invalid",
+            ),
+            (
+                "non-https origin",
+                |mut config| {
+                    config.paimos_origin = "http://paimos.example".to_string();
+                    config
+                },
+                "paimos_reporter_origin_refused",
+            ),
+            (
+                "wrong schema",
+                |mut config| {
+                    config.schema = "inspr.janus.paimos-dependency-reporter-config.v0".to_string();
+                    config
+                },
+                "paimos_reporter_config_invalid",
+            ),
+            (
+                "invalid execution number",
+                |mut config| {
+                    config.expected.execution_number = 0;
+                    config
+                },
+                "paimos_reporter_config_invalid",
+            ),
+            (
+                "invalid digest",
+                |mut config| {
+                    config.expected.plan_digest = "sha256:not-a-valid-wire-digest".to_string();
+                    config
+                },
+                "paimos_reporter_config_invalid",
+            ),
+            (
+                "invalid timestamp",
+                |mut config| {
+                    config.evidence = DependencyEvidenceV1::Authorization {
+                        observed_at: "not-a-timestamp".to_string(),
+                    };
+                    config
+                },
+                "paimos_reporter_config_invalid",
+            ),
+        ];
+        for (label, mutate, expected_reason) in cases {
+            let config = mutate(valid.clone());
+            let error = validate_config(&config, false)
+                .expect_err(&format!("{label} must fail validation"));
+            assert_eq!(
+                error.reason_code(),
+                expected_reason,
+                "{label}: unexpected refusal"
+            );
+        }
+
+        let unknown_field = br#"{"schema":"inspr.janus.paimos-dependency-reporter-config.v1","schema_version":1,"opaque":"forbidden"}"#;
+        assert_eq!(
+            decode_strict::<ReporterConfigV1>(unknown_field, "unknown_field")
+                .expect_err("unknown field")
+                .reason_code(),
+            "unknown_field"
+        );
+        let duplicate_name =
+            br#"{"schema":"inspr.janus.paimos-dependency-reporter-config.v1","schema":"dup"}"#;
+        assert_eq!(
+            decode_strict::<ReporterConfigV1>(duplicate_name, "duplicate_field")
+                .expect_err("duplicate field")
+                .reason_code(),
+            "duplicate_field"
+        );
+    }
 }
