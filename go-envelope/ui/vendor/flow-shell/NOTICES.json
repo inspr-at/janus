@@ -1,0 +1,28 @@
+{
+  "package": {
+    "name": "@inspr/flow-shell",
+    "version": "0.1.4",
+    "license": "AGPL-3.0-only",
+    "private": true
+  },
+  "original_work": {
+    "license": "AGPL-3.0-only",
+    "notice": "Original work in this package is licensed under AGPL-3.0-only. The LICENSE file is the GNU Affero General Public License version 3 text. This candidate does not relicense third-party components or claim an npm namespace."
+  },
+  "runtime_dependencies": [],
+  "development_dependencies": [
+    {
+      "name": "happy-dom",
+      "version": "19.0.2",
+      "license": "MIT",
+      "use": "Node test harness for the Web Component. Not a runtime dependency and not installed for package consumers."
+    }
+  ],
+  "not_copied": [
+    "private INSPR umbrella README, doctrine, AGENTS, and worker files",
+    "private Git history, remotes, and operator residue",
+    "host authentication, tokens, cookies, raw emails, and live identity",
+    "customer records",
+    "env/secret files"
+  ]
+}

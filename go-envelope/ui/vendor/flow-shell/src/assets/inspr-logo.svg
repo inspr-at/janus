@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1254 1254" role="img" aria-labelledby="inspr-title inspr-desc">
+  <title id="inspr-title">INSPR</title>
+  <desc id="inspr-desc">A fivefold technological knot with alternating over and under crossings.</desc>
+  <defs>
+    <path id="inspr-knot" d="M627 210C720.2 210 797.1 313.9 803.3 412.3C809.5 510.6 764.4 576.2 774.4 607.1C784.4 638 859.5 664.5 912.3 747.7C965.1 830.9 964 960.2 888.6 1015C813.2 1069.8 689.8 1030.9 627 955C564.2 879.1 562.2 799.5 535.9 780.4C509.6 761.3 433.3 784 341.7 747.7C250.1 711.4 175 606.1 203.8 517.5C232.6 428.8 355.2 387.8 450.7 412.3C546.1 436.8 594.5 500 627 500C659.5 500 707.9 436.8 803.3 412.3C898.8 387.8 1021.4 428.8 1050.2 517.5C1079 606.1 1003.9 711.4 912.3 747.7C820.7 784 744.4 761.3 718.1 780.4C691.8 799.5 689.8 879.1 627 955C564.2 1030.9 440.8 1069.8 365.4 1015C290 960.2 288.9 830.9 341.7 747.7C394.5 664.5 469.6 638 479.6 607.1C489.6 576.2 444.5 510.6 450.7 412.3C456.9 313.9 533.8 210 627 210Z"/>
+    <g id="inspr-bridges">
+      <path d="M778.4 314.5C808.2 375.8 807.4 450 796 503"/>
+      <path d="M704.7 1019.5C644.5 987.4 601.6 926.9 579.6 877.3"/>
+      <path d="M349.9 405.8C417.4 396.4 487.7 420.1 534.7 447.3"/>
+      <path d="M997.7 693.7C948.6 741.1 877.8 763.2 823.8 768.8"/>
+      <path d="M304.4 841.5C316.3 774.4 360.5 714.9 400.9 678.6"/>
+    </g>
+    <g id="inspr-terminals" fill="none" stroke="#000" stroke-width="24" stroke-linecap="round">
+      <path d="M627 210h68"/>
+      <path d="M627 210h68" transform="rotate(72 627 655)"/>
+      <path d="M627 210h68" transform="rotate(144 627 655)"/>
+      <path d="M627 210h68" transform="rotate(216 627 655)"/>
+      <path d="M627 210h68" transform="rotate(288 627 655)"/>
+    </g>
+    <mask id="inspr-weave" maskUnits="userSpaceOnUse" maskContentUnits="userSpaceOnUse" x="0" y="0" width="1254" height="1254" style="mask-type:luminance">
+      <rect width="1254" height="1254" fill="#fff"/>
+      <use href="#inspr-bridges" fill="none" stroke="#000" stroke-width="172" stroke-linecap="butt" stroke-linejoin="round"/>
+      <use href="#inspr-terminals"/>
+    </mask>
+  </defs>
+  <use href="#inspr-knot" fill="none" stroke="#0E6F6C" stroke-width="116" stroke-linecap="round" stroke-linejoin="round" mask="url(#inspr-weave)"/>
+  <use href="#inspr-bridges" fill="none" stroke="#0E6F6C" stroke-width="116" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

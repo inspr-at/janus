@@ -1,0 +1,82 @@
+{
+  "schema": "inspr.janus.flow-shell-vendor/1",
+  "package": "@inspr/flow-shell",
+  "version": "0.1.4",
+  "source_commit": "efc5e63a6a37cc9d1fd9aa437f8808b3a6536acf",
+  "runtime_tgz_sha256": "sha256:b5e773eeca6eff42432efe4c776e9079132ccaa58f65a48a64bbc5b6a18d55b0",
+  "runtime_tgz_url": "https://github.com/inspr-at/flow-shell/releases/download/v0.1.4/inspr-flow-shell-0.1.4.tgz",
+  "license": "AGPL-3.0-only",
+  "notices_path": "NOTICES.json",
+  "files": [
+    {
+      "path": "LICENSE",
+      "sha256": "sha256:0d96a4ff68ad6d4b6f1f30f713b18d5184912ba8dd389f86aa7710db079abcb0",
+      "bytes": 34523
+    },
+    {
+      "path": "NOTICES.json",
+      "sha256": "sha256:e085f63c966cabbf67fcc1eff1c0381b9847a86d497a91a867c7ee36cfea6e61",
+      "bytes": 982
+    },
+    {
+      "path": "src/adapter.js",
+      "sha256": "sha256:1ee83bfe30972fc369d5443be9c0b6bed37d018c9d7049cabd59ec24ecdad9b6",
+      "bytes": 16627
+    },
+    {
+      "path": "src/assets/inspr-logo.svg",
+      "sha256": "sha256:ed9605fec08477c06fd8525a4851d31431fbd621b1f1d66025b519cb1a417a75",
+      "bytes": 2421
+    },
+    {
+      "path": "src/flow-shell.css",
+      "sha256": "sha256:d6c5be87d9d21a9d6f5ab21de3deac9d168d550c66ef907344a217086e6633a9",
+      "bytes": 14616
+    },
+    {
+      "path": "src/forecast.js",
+      "sha256": "sha256:5b838d7d6aa7fed4e9e4ec49dc6689a0af39061ecbea94fddac2e9110036441f",
+      "bytes": 4218
+    },
+    {
+      "path": "src/gates.js",
+      "sha256": "sha256:f78e1b0c4cf96057935080af2b3e2886710e0408c8a4ea92049ccb08f9ad650f",
+      "bytes": 9133
+    },
+    {
+      "path": "src/host-layout.js",
+      "sha256": "sha256:6688acedc414109a184e7a32c6146e5c989e5f9f443cf81240cb5f5a9fe4f2cd",
+      "bytes": 2161
+    },
+    {
+      "path": "src/identity.js",
+      "sha256": "sha256:c4f6c0eea70ba7c28f5eca9c2a92d9b75156a0fd4c94085d94338610212849bf",
+      "bytes": 12216
+    },
+    {
+      "path": "src/inspr-flow-shell.js",
+      "sha256": "sha256:e30d6916745cab38cbd732c6664514bcb7131217c13d5d8fa32562100f264a68",
+      "bytes": 30455
+    },
+    {
+      "path": "src/intents.js",
+      "sha256": "sha256:d802033b23212b75df8484a983fe410974da722b50c0753bb9c15918a34a73c8",
+      "bytes": 4274
+    },
+    {
+      "path": "src/sanitize.js",
+      "sha256": "sha256:45fc7926913e86191940b513c56a5b60e5a73a44533932d2c0c899dd2c202b9d",
+      "bytes": 2002
+    },
+    {
+      "path": "src/stages.js",
+      "sha256": "sha256:d3482c66ff6ccec0342a6c46957fcd3cd2d29f68bebfcd11e91ef5d6b4e58b17",
+      "bytes": 1276
+    },
+    {
+      "path": "src/state.js",
+      "sha256": "sha256:703740a9efcbfd2eedff7cd27baaeb7ba4e50d04eed0c87542bb1195b0a38e0c",
+      "bytes": 11152
+    }
+  ]
+}

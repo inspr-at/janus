@@ -83,6 +83,12 @@ func humanSince(t time.Time) string {
 
 func (app *App) handleStatic(w http.ResponseWriter, r *http.Request) {
 	name := strings.TrimPrefix(r.URL.Path, "/static/")
+	if data, contentType, ok := flowStaticAsset(name); ok {
+		w.Header().Set("Content-Type", contentType)
+		w.Header().Set("Cache-Control", "public, max-age=300")
+		_, _ = w.Write(data)
+		return
+	}
 	var contentType string
 	switch name {
 	case "janus.css":
