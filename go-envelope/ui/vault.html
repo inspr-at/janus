@@ -2,8 +2,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   {{ if .CSRF }}<meta name="csrf-token" content="{{ .CSRF }}">{{ end }}
-  <link rel="icon" type="image/svg+xml" href="/static/janus-logo.svg">
-  <link rel="stylesheet" href="/static/janus.css">
+  <link rel="icon" type="image/svg+xml" href="{{ publicPath "/static/janus-logo.svg" }}">
+  <link rel="stylesheet" href="{{ publicPath "/static/janus.css" }}">
   <style nonce="{{ .CSPNonce }}">
     /* dual-tone light of the hero: cool looks back, warm looks forward */
     body::before {
@@ -19,17 +19,17 @@
 {{ define "doorkeeper_side" -}}
   <aside class="side">
     <div class="brand">
-      <span class="brand-mark-slot" aria-hidden="true"><img class="brand-mark" src="/static/janus-logo.svg" alt=""></span>
+      <span class="brand-mark-slot" aria-hidden="true"><img class="brand-mark" src="{{ publicPath "/static/janus-logo.svg" }}" alt=""></span>
       <span class="brand-wordmark">JANUS</span>
     </div>
     <nav class="nav" aria-label="Main">
-      <a {{ if eq .ActivePage "vault" }}class="active" aria-current="page" {{ end }}href="/"><span class="nav-ico nav-vault"></span><span>Vault</span></a>
-      <a {{ if eq .ActivePage "requests" }}class="active" aria-current="page" {{ end }}href="/requests"><span class="nav-ico nav-permits"></span><span>Permits</span></a>
-      <a {{ if eq .ActivePage "access" }}class="active" aria-current="page" {{ end }}href="/access"><span class="nav-ico nav-access"></span><span>Access</span></a>
-      <a {{ if eq .ActivePage "ledger" }}class="active" aria-current="page" {{ end }}href="/ledger"><span class="nav-ico nav-audit"></span><span>Audit</span></a>
-      <a {{ if eq .ActivePage "assurance" }}class="active" aria-current="page" {{ end }}href="/assurance"><span class="nav-ico nav-health"></span><span>Health</span></a>
-      <a {{ if eq .ActivePage "knowledge" }}class="active" aria-current="page" {{ end }}href="/knowledge"><span class="nav-ico nav-knowledge"></span><span>Knowledge</span></a>
-      <a {{ if eq .ActivePage "settings" }}class="active" aria-current="page" {{ end }}href="/settings"><span class="nav-ico nav-settings"></span><span>Settings</span></a>
+      <a {{ if eq .ActivePage "vault" }}class="active" aria-current="page" {{ end }}href="{{ publicPath "/" }}"><span class="nav-ico nav-vault"></span><span>Vault</span></a>
+      <a {{ if eq .ActivePage "requests" }}class="active" aria-current="page" {{ end }}href="{{ publicPath "/requests" }}"><span class="nav-ico nav-permits"></span><span>Permits</span></a>
+      <a {{ if eq .ActivePage "access" }}class="active" aria-current="page" {{ end }}href="{{ publicPath "/access" }}"><span class="nav-ico nav-access"></span><span>Access</span></a>
+      <a {{ if eq .ActivePage "ledger" }}class="active" aria-current="page" {{ end }}href="{{ publicPath "/ledger" }}"><span class="nav-ico nav-audit"></span><span>Audit</span></a>
+      <a {{ if eq .ActivePage "assurance" }}class="active" aria-current="page" {{ end }}href="{{ publicPath "/assurance" }}"><span class="nav-ico nav-health"></span><span>Health</span></a>
+      <a {{ if eq .ActivePage "knowledge" }}class="active" aria-current="page" {{ end }}href="{{ publicPath "/knowledge" }}"><span class="nav-ico nav-knowledge"></span><span>Knowledge</span></a>
+      <a {{ if eq .ActivePage "settings" }}class="active" aria-current="page" {{ end }}href="{{ publicPath "/settings" }}"><span class="nav-ico nav-settings"></span><span>Settings</span></a>
     </nav>
     <div class="side-tail">
       <div class="spacer"></div>
@@ -37,7 +37,7 @@
         <div class="userchip">
           <span class="user-avatar" aria-hidden="true">J</span>
           <span class="user-copy"><b>Signed in</b><small>{{ .SessionRoleBadge }}</small></span>
-          <form method="post" action="/logout"><input type="hidden" name="csrf_token" value="{{ .CSRF }}"><button class="user-menu" type="submit" title="Sign out" aria-label="Sign out">⌄</button></form>
+          <form method="post" action="{{ publicPath "/logout" }}"><input type="hidden" name="csrf_token" value="{{ .CSRF }}"><button class="user-menu" type="submit" title="Sign out" aria-label="Sign out">⌄</button></form>
         </div>
       </div>
     </div>
@@ -115,7 +115,7 @@
         {{ if .OutputScrubbed }}<span class="state ok">Scrubbed output</span>{{ end }}
       </div>
       {{ if and $.CanOperate (not .OutputScrubbed) }}
-      <form method="post" action="/ui/permits/{{ .PermitID }}/run">
+      <form method="post" action="{{ publicPath (printf "/ui/permits/%s/run" .PermitID) }}">
         <input type="hidden" name="csrf_token" value="{{ $.CSRF }}">
         <button class="btn quiet" type="submit">Verify that execution is disabled</button>
       </form>
@@ -152,7 +152,7 @@
     <div class="vault-workspace">
       <section class="vault-results">
         <h2 id="vault">Secrets</h2>
-        <form class="filterbar" method="get" action="/#vault">
+        <form class="filterbar" method="get" action="{{ publicPath "/" }}#vault">
           <input type="search" name="q" value="{{ .Query }}" placeholder="Search name, host, tag…" aria-label="Search secrets">
           <select name="provider" aria-label="Backend">
             <option value="">backend: all</option>
@@ -166,11 +166,11 @@
           <input type="hidden" name="view" value="{{ .View }}">
           <button class="btn quiet" type="submit">Filter</button>
           <span class="viewtoggle">
-            <a {{ if eq .View "grid" }}class="on" {{ end }}href="/?q={{ .Query | urlquery }}&amp;provider={{ .FilterProvider | urlquery }}&amp;state={{ .FilterState | urlquery }}&amp;view=grid#vault">grid</a>
+            <a {{ if eq .View "grid" }}class="on" {{ end }}href="{{ publicPath "/" }}?q={{ .Query | urlquery }}&amp;provider={{ .FilterProvider | urlquery }}&amp;state={{ .FilterState | urlquery }}&amp;view=grid#vault">grid</a>
             ·
-            <a {{ if eq .View "list" }}class="on" {{ end }}href="/?q={{ .Query | urlquery }}&amp;provider={{ .FilterProvider | urlquery }}&amp;state={{ .FilterState | urlquery }}&amp;view=list#vault">list</a>
+            <a {{ if eq .View "list" }}class="on" {{ end }}href="{{ publicPath "/" }}?q={{ .Query | urlquery }}&amp;provider={{ .FilterProvider | urlquery }}&amp;state={{ .FilterState | urlquery }}&amp;view=list#vault">list</a>
           </span>
-          <a class="btn newbtn" href="/vault/new">Advanced manual setup</a>
+          <a class="btn newbtn" href="{{ publicPath "/vault/new" }}">Advanced manual setup</a>
         </form>
         {{ if .Descriptors }}
         {{ if eq .View "list" }}
@@ -186,7 +186,7 @@
               <td data-label="state">{{ if eq .Lifecycle "active" }}<span class="state ok">active</span>{{ else if eq .Lifecycle "rotating" }}<span class="state warn">rotating</span>{{ else }}<span class="state bad">{{ .Lifecycle }}</span>{{ end }}</td>
               <td data-label="rotates">{{ if and (eq .RecordType "service_secret") .RotationPosture }}{{ .RotationPosture }} · {{ end }}{{ .RotationDays }}d</td>
               <td data-label="last checked">{{ since .LastCheckedAt }}{{ if and (eq .RecordType "service_secret") .Health }}<br><small>health: {{ .Health }}</small>{{ end }}</td>
-              <td data-label=""><a href="/?ref={{ .ID }}#focus">View details →</a></td>
+              <td data-label=""><a href="{{ publicPath "/" }}?ref={{ .ID }}#focus">View details →</a></td>
             </tr>
             {{ end }}
           </table>
@@ -216,17 +216,17 @@
             </div>
             <div class="foot">
               <span class="mono">{{ .ID }}</span>
-              <a href="/?ref={{ .ID }}#focus">View details →</a>
+              <a href="{{ publicPath "/" }}?ref={{ .ID }}#focus">View details →</a>
             </div>
           </div>
           {{ end }}
         </div>
         {{ end }}
-        {{ if ne (len .Descriptors) .TotalCount }}<p class="filternote">{{ len .Descriptors }} of {{ .TotalCount }} secrets shown — <a href="/#vault">clear filters</a></p>{{ end }}
+        {{ if ne (len .Descriptors) .TotalCount }}<p class="filternote">{{ len .Descriptors }} of {{ .TotalCount }} secrets shown — <a href="{{ publicPath "/" }}#vault">clear filters</a></p>{{ end }}
         {{ else if .TotalCount }}
-        <div class="empty">Nothing matches these filters. <a href="/#vault">Clear them</a> to see all {{ .TotalCount }} secrets.</div>
+        <div class="empty">Nothing matches these filters. <a href="{{ publicPath "/" }}#vault">Clear them</a> to see all {{ .TotalCount }} secrets.</div>
         {{ else }}
-        <div class="empty">No secrets are configured yet. Point <code>JANUS_CATALOG_FILE</code> at a reviewed JSON descriptor catalog, or use <a href="/vault/new">Advanced manual setup</a> to prepare one. Janus does not add sample entries.</div>
+        <div class="empty">No secrets are configured yet. Point <code>JANUS_CATALOG_FILE</code> at a reviewed JSON descriptor catalog, or use <a href="{{ publicPath "/vault/new" }}">Advanced manual setup</a> to prepare one. Janus does not add sample entries.</div>
         {{ end }}
       </section>
 
@@ -234,7 +234,7 @@
       <aside class="panel focus-rail" id="focus">
         <strong>Secret not found</strong>
         <p class="lead">That secret is not in the current Vault view. No action was selected or taken.</p>
-        <a class="btn quiet" href="/">Return to the Vault</a>
+        <a class="btn quiet" href="{{ publicPath "/" }}">Return to the Vault</a>
       </aside>
       {{ else if .Focus.Descriptor.ID }}
       <aside class="panel focus-rail" id="focus">
@@ -265,7 +265,7 @@
         <div class="rail-section service-setup-callout">
           <strong>Managed service secrets start in Pharos</strong>
           <p class="lead">Open the service in Pharos to use its locked host, service, and secret slot. This manual configuration guide is only the advanced fallback.</p>
-          <a class="btn quiet" href="/vault/new">Advanced manual setup</a>
+          <a class="btn quiet" href="{{ publicPath "/vault/new" }}">Advanced manual setup</a>
         </div>
 
         {{ if .CanOperate }}
@@ -275,7 +275,7 @@
         <div class="advanced-control-block">
           <strong>Create temporary metadata reference</strong>
           <p class="lead">A short-lived reference to this record for API tooling. It cannot read the secret.</p>
-          <form class="action" method="post" action="/ui/warden/resolve">
+          <form class="action" method="post" action="{{ publicPath "/ui/warden/resolve" }}">
             <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
             <input type="hidden" name="ref" value="{{ .Focus.Descriptor.ID }}">
             <label>Work item or reason
@@ -287,7 +287,7 @@
         </div>
         <div class="advanced-control-block">
           <strong>Record metadata authorization</strong>
-          <form class="action" method="post" action="/ui/permits">
+          <form class="action" method="post" action="{{ publicPath "/ui/permits" }}">
             <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
             <input type="hidden" name="ref" value="{{ .Focus.Descriptor.ID }}">
             <label>Action

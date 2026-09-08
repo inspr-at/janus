@@ -16,7 +16,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -67,21 +66,22 @@ const (
 const maxTemplateResponseBytes = 8 << 20
 
 type Config struct {
-	Listen        string
-	PublicURL     string
-	ProductMode   string
-	DataDir       string
-	CatalogFile   string
-	RequireAuth   bool
-	OIDCIssuer    string
-	OIDCClientID  string
-	OIDCSecret    string
-	OIDCProjectID string
-	CookieKey     []byte
-	RolePolicy    RolePolicy
-	ScopePolicy   ScopePolicy
-	ManagedSetup  *managedSetupRuntimeConfig
-	DynamicSetup  *managedDynamicSetupRuntimeConfig
+	Listen         string
+	PublicURL      string
+	PublicBasePath string
+	ProductMode    string
+	DataDir        string
+	CatalogFile    string
+	RequireAuth    bool
+	OIDCIssuer     string
+	OIDCClientID   string
+	OIDCSecret     string
+	OIDCProjectID  string
+	CookieKey      []byte
+	RolePolicy     RolePolicy
+	ScopePolicy    ScopePolicy
+	ManagedSetup   *managedSetupRuntimeConfig
+	DynamicSetup   *managedDynamicSetupRuntimeConfig
 }
 
 func (c Config) OIDCConfigured() bool {
@@ -643,7 +643,6 @@ func main() {
 func loadConfig() (Config, error) {
 	cfg := Config{
 		Listen:      envDefault("JANUS_LISTEN", ":8080"),
-		PublicURL:   strings.TrimRight(envDefault("JANUS_PUBLIC_URL", "https://vault.barta.cm"), "/"),
 		ProductMode: envDefault("JANUS_PRODUCT_MODE", "self_hosted"),
 		DataDir:     envDefault("JANUS_DATA_DIR", "/data"),
 		CatalogFile: envDefault("JANUS_CATALOG_FILE", ""),
@@ -682,9 +681,16 @@ func loadConfig() (Config, error) {
 	}
 	cfg.DynamicSetup = dynamicSetup
 
-	if _, err := url.ParseRequestURI(cfg.PublicURL); err != nil {
+	publicOrigin, err := parsePublicOrigin(envDefault("JANUS_PUBLIC_URL", "https://vault.barta.cm"))
+	if err != nil {
 		return cfg, fmt.Errorf("JANUS_PUBLIC_URL is invalid: %w", err)
 	}
+	cfg.PublicURL = publicOrigin
+	basePath, err := NormalizePublicBasePath(strings.TrimSpace(os.Getenv("JANUS_PUBLIC_BASE_PATH")))
+	if err != nil {
+		return cfg, fmt.Errorf("JANUS_PUBLIC_BASE_PATH is invalid: %w", err)
+	}
+	cfg.PublicBasePath = basePath
 	if cfg.RequireAuth && !cfg.OIDCConfigured() {
 		log.Printf("auth is required but OIDC is not fully configured; serving setup-only surface")
 	}
@@ -723,7 +729,7 @@ func NewApp(ctx context.Context, cfg Config, store *Store) (*App, error) {
 		broker:    NewBroker(store).WithScopePolicy(cfg.ScopePolicy),
 		permits:   permitStore,
 		limiter:   NewRateLimiter(180, time.Minute),
-		templates: mustTemplates(),
+		templates: templatesFor(cfg.PublicBasePath),
 	}
 	flow, err := loadFlowHostService()
 	if err != nil {
@@ -769,7 +775,7 @@ func NewApp(ctx context.Context, cfg Config, store *Store) (*App, error) {
 			ClientID:     cfg.OIDCClientID,
 			ClientSecret: cfg.OIDCSecret,
 			Endpoint:     provider.Endpoint(),
-			RedirectURL:  cfg.PublicURL + "/oidc/callback",
+			RedirectURL:  cfg.PublicURLFor("/oidc/callback"),
 			Scopes:       []string{oidc.ScopeOpenID, "profile", "email"},
 		}
 		app.verifier = provider.Verifier(&oidc.Config{ClientID: cfg.OIDCClientID})
@@ -849,7 +855,7 @@ func (app *App) routes() http.Handler {
 		}
 		mux.HandleFunc(route.pattern, handler)
 	}
-	return app.securityHeaders(app.requestIDs(app.rateLimit(app.limitRequestBody(app.safeHTTPBoundary(app.flowPageWrap(mux))))))
+	return app.securityHeaders(app.requestIDs(app.stripPublicBase(app.rateLimit(app.limitRequestBody(app.safeHTTPBoundary(app.flowPageWrap(mux)))))))
 }
 
 func (app *App) safeHTTPBoundary(next http.Handler) http.Handler {
@@ -1094,12 +1100,12 @@ func (app *App) withAuth(next http.HandlerFunc) http.HandlerFunc {
 						return
 					}
 				}
-				if _, safe := safeLoginReturnPath(r.URL.RequestURI()); safe {
+				if _, safe := app.safeLoginReturnPath(r.URL.RequestURI()); safe {
 					app.renderLoginLanding(w, r)
 					return
 				}
 			}
-			http.Redirect(w, r, loginRedirectTarget(r), http.StatusFound)
+			http.Redirect(w, r, app.loginRedirectTarget(r), http.StatusFound)
 			return
 		}
 		if len(session.Roles) == 0 {
@@ -2049,7 +2055,7 @@ func (app *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if rawNext := r.URL.Query().Get("next"); rawNext != "" {
-		if returnPath, ok := safeLoginReturnPath(rawNext); ok {
+		if returnPath, ok := app.safeLoginReturnPath(rawNext); ok {
 			app.writeOIDCLoginReturnPath(w, returnPath)
 		} else {
 			app.clearOIDCLoginReturnCookie(w)
@@ -2092,14 +2098,14 @@ func (app *App) handleAuthReset(w http.ResponseWriter, r *http.Request) {
 }
 
 func (app *App) renderLoginLanding(w http.ResponseWriter, r *http.Request) {
-	startHref := loginRedirectTarget(r)
+	startHref := app.loginRedirectTarget(r)
 	if r.URL.Path == "/managed-service/setup" {
 		if _, ok := exactManagedIntentQuery(r.URL); ok {
-			startHref = "/login?managed=1"
+			startHref = app.cfg.PublicPath("/login") + "?managed=1"
 		}
 	} else if r.URL.Path == "/managed-environment/setup" {
 		if _, ok := exactManagedIntentQuery(r.URL); ok {
-			startHref = "/login?dynamic=1"
+			startHref = app.cfg.PublicPath("/login") + "?dynamic=1"
 		}
 	}
 	renderTemplateStatus(w, app.templates, "login_landing", http.StatusOK, map[string]any{
@@ -2374,7 +2380,7 @@ func (app *App) handleLogout(w http.ResponseWriter, r *http.Request) {
 	app.clearManagedLoginIntentCookies(w)
 	app.clearManagedDynamicLoginIntentCookies(w)
 	app.clearManagedCompletionCookies(w)
-	http.Redirect(w, r, "/", http.StatusFound)
+	http.Redirect(w, r, app.cfg.PublicPath("/"), http.StatusFound)
 }
 
 func (app *App) renderAuthContinuation(w http.ResponseWriter, r *http.Request, target, kind string) {
@@ -2389,6 +2395,7 @@ func (app *App) renderAuthContinuation(w http.ResponseWriter, r *http.Request, t
 		)
 		return
 	}
+	target = app.cfg.PublicHref(target)
 	headline := "Signed in"
 	message := "Janus accepted the identity check. Continuing inside Janus activates the signed browser session."
 	primaryLabel := "Open Janus"
@@ -2483,14 +2490,14 @@ func (app *App) renderSetup(w http.ResponseWriter, r *http.Request) {
 
 func (app *App) renderAuthError(w http.ResponseWriter, r *http.Request, status int, reasonCode, message string) {
 	headline, nextAction := authErrorCopy(reasonCode)
-	primaryHref := "/login"
+	primaryHref := app.cfg.PublicPath("/login")
 	primaryLabel := "Try again"
-	secondaryHref := "/auth/reset"
+	secondaryHref := app.cfg.PublicPath("/auth/reset")
 	secondaryText := "Reset login session"
 	if reasonCode == "login_loop_paused" {
-		primaryHref = "/auth/reset"
+		primaryHref = app.cfg.PublicPath("/auth/reset")
 		primaryLabel = "Reset login session"
-		secondaryHref = "/"
+		secondaryHref = app.cfg.PublicPath("/")
 		secondaryText = "Back to Janus"
 	}
 	renderTemplateStatus(w, app.templates, "auth_error", status, AuthErrorView{
@@ -2582,36 +2589,6 @@ func (app *App) readSession(r *http.Request) (Session, bool) {
 	return session, true
 }
 
-func loginRedirectTarget(r *http.Request) string {
-	if r == nil || r.URL == nil {
-		return "/login"
-	}
-	returnPath, ok := safeLoginReturnPath(r.URL.RequestURI())
-	if !ok || returnPath == "/" {
-		return "/login"
-	}
-	return "/login?next=" + url.QueryEscape(returnPath)
-}
-
-func safeLoginReturnPath(raw string) (string, bool) {
-	raw = strings.TrimSpace(raw)
-	if raw == "" || strings.ContainsAny(raw, "\r\n\t") || strings.HasPrefix(raw, "//") {
-		return "/", false
-	}
-	u, err := url.Parse(raw)
-	if err != nil || u.IsAbs() || u.Host != "" {
-		return "/", false
-	}
-	if u.Path == "" {
-		return "/", false
-	}
-	cleanPath := path.Clean("/" + strings.TrimPrefix(u.Path, "/"))
-	if !loginReturnPathAllowed(cleanPath) {
-		return "/", false
-	}
-	return cleanPath, true
-}
-
 func loginReturnPathAllowed(returnPath string) bool {
 	switch returnPath {
 	case "/", "/access", "/requests", "/ledger", "/assurance", "/knowledge", "/settings", "/vault/new", "/auth/smoke", "/session-witness", "/session-witness/verify":
@@ -2622,7 +2599,7 @@ func loginReturnPathAllowed(returnPath string) bool {
 }
 
 func (app *App) writeOIDCLoginReturnPath(w http.ResponseWriter, returnPath string) {
-	returnPath, ok := safeLoginReturnPath(returnPath)
+	returnPath, ok := app.safeLoginReturnPath(returnPath)
 	if !ok {
 		app.clearOIDCLoginReturnCookie(w)
 		return
@@ -2652,7 +2629,7 @@ func (app *App) readOIDCLoginReturnPath(r *http.Request) (string, bool) {
 	if err != nil {
 		return "/", false
 	}
-	return safeLoginReturnPath(string(raw))
+	return app.safeLoginReturnPath(string(raw))
 }
 
 func (app *App) sessionPosture(session Session) SessionPosture {
@@ -3575,6 +3552,17 @@ func (b *boundedTemplateBuffer) Write(p []byte) (int, error) {
 }
 
 func mustTemplates() *template.Template {
+	return templatesFor("")
+}
+
+func templatesFor(publicBasePath string) *template.Template {
+	publicPath := func(endpoint string) string {
+		joined, err := JoinPublicPath(publicBasePath, endpoint)
+		if err != nil {
+			return endpoint
+		}
+		return joined
+	}
 	t := template.Must(template.New("janus").Funcs(template.FuncMap{
 		"buildCommitShort":   func() string { return shortCommit(buildCommit) },
 		"since":              humanSince,
@@ -3582,6 +3570,7 @@ func mustTemplates() *template.Template {
 		"permitStatusLabel":  permitStatusLabel,
 		"permitStatusTone":   permitStatusTone,
 		"knowledgeFlowTitle": knowledgeFlowTitle,
+		"publicPath":         publicPath,
 	}).Parse(`
 {{ define "base_top" -}}
 <!doctype html>
@@ -3591,7 +3580,7 @@ func mustTemplates() *template.Template {
   <meta name="viewport" content="width=device-width, initial-scale=1">
   {{ if .CSRF }}<meta name="csrf-token" content="{{ .CSRF }}">{{ end }}
   <title>{{ .Title }}</title>
-  <link rel="icon" type="image/svg+xml" href="/static/janus-logo.svg">
+  <link rel="icon" type="image/svg+xml" href="{{ publicPath "/static/janus-logo.svg" }}">
   <style nonce="{{ .CSPNonce }}">
     :root {
       color-scheme: light dark;
@@ -3707,7 +3696,7 @@ func mustTemplates() *template.Template {
 	  position: absolute;
 	  z-index: -2;
 	  inset: 0;
-	  background: url("/static/janus-login-hero.png") center 22% / cover no-repeat;
+	  background: url("{{ publicPath "/static/janus-login-hero.png" }}") center 22% / cover no-repeat;
 	  opacity: .94;
 	}
 	body.login-body { min-height: 100svh; overflow-x: hidden; }
@@ -4764,16 +4753,16 @@ func mustTemplates() *template.Template {
 <a class="skip-link" href="#command-center">Skip to command center</a>
 <header>
   <div class="bar">
-    <div class="brand"><img class="brand-logo" src="/static/janus-logo.svg" alt="JANUS"><small>build {{ buildCommitShort }}</small></div>
+    <div class="brand"><img class="brand-logo" src="{{ publicPath "/static/janus-logo.svg" }}" alt="JANUS"><small>build {{ buildCommitShort }}</small></div>
 		    {{ if .Session.Subject }}
 		    <nav class="nav" aria-label="Primary">
 			      {{ if .WitnessPage }}
-			      <a href="/">Dashboard</a>
-			      <a href="/auth/smoke">Smoke</a>
-			      <a href="/session-witness">Witness</a>
-			      <a href="/session-witness.txt">Text</a>
-		      <a href="/session-witness/verify">Verify</a>
-		      <a href="/api/auth/session-witness">JSON</a>
+			      <a href="{{ publicPath "/" }}">Dashboard</a>
+			      <a href="{{ publicPath "/auth/smoke" }}">Smoke</a>
+			      <a href="{{ publicPath "/session-witness" }}">Witness</a>
+			      <a href="{{ publicPath "/session-witness.txt" }}">Text</a>
+		      <a href="{{ publicPath "/session-witness/verify" }}">Verify</a>
+		      <a href="{{ publicPath "/api/auth/session-witness" }}">JSON</a>
 		      {{ else }}
 		      <a href="#overview">Overview</a>
 		      <a href="#command-center">Command</a>
@@ -4798,11 +4787,11 @@ func mustTemplates() *template.Template {
 	      <strong>Signed in</strong>
 	      <span>{{ range .Session.Roles }}{{ . }} {{ end }} identity values withheld</span>
 	    </div>
-    <form method="post" action="/logout"><input type="hidden" name="csrf_token" value="{{ .CSRF }}"><button type="submit">Sign out</button></form>
+    <form method="post" action="{{ publicPath "/logout" }}"><input type="hidden" name="csrf_token" value="{{ .CSRF }}"><button type="submit">Sign out</button></form>
 	    {{ else if .AuthScreen }}
 	    {{ if not .LoginScreen }}<span class="header-boundary">identity and secret values withheld</span>{{ end }}
     {{ else }}
-    <a class="button primary" href="/login">Sign in</a>
+    <a class="button primary" href="{{ publicPath "/login" }}">Sign in</a>
     {{ end }}
   </div>
 </header>
@@ -4825,10 +4814,10 @@ func mustTemplates() *template.Template {
 		      <p>A short proof path for this browser: reset stale login state, prove the signed session, then keep one receipt hash. Identity and secret values stay out of the page.</p>
 		    </div>
 		    <div class="toolbar">
-		      <a class="button primary" href="/auth/reset">Clean sign-in reset</a>
-		      <a class="button quiet" href="/session-witness">Full witness</a>
-		      <a class="button quiet" href="/session-witness/verify">Verifier</a>
-		      <a class="button quiet" href="/">Dashboard</a>
+		      <a class="button primary" href="{{ publicPath "/auth/reset" }}">Clean sign-in reset</a>
+		      <a class="button quiet" href="{{ publicPath "/session-witness" }}">Full witness</a>
+		      <a class="button quiet" href="{{ publicPath "/session-witness/verify" }}">Verifier</a>
+		      <a class="button quiet" href="{{ publicPath "/" }}">Dashboard</a>
 		    </div>
 		    <div class="evidence-workstation" aria-label="Authenticated browser smoke path">
 		      <div class="workstation-head">
@@ -4841,19 +4830,19 @@ func mustTemplates() *template.Template {
 		          <b>1</b>
 		          <strong>Clean start</strong>
 		          <p>If the browser feels stale, clear Janus auth cookies and start a fresh Zitadel login.</p>
-		          <a class="button quiet" href="/auth/reset">Reset sign-in</a>
+		          <a class="button quiet" href="{{ publicPath "/auth/reset" }}">Reset sign-in</a>
 		        </div>
 		        <div class="handoff-step ok">
 		          <b>2</b>
 		          <strong>Prove session</strong>
 		          <p>This browser reached an auth-only page and has a signed Janus session. The proof is the request id and witness hash.</p>
-		          <a class="button primary" href="/session-witness">Session witness</a>
+		          <a class="button primary" href="{{ publicPath "/session-witness" }}">Session witness</a>
 		        </div>
 		        <div class="handoff-step ok">
 		          <b>3</b>
 		          <strong>Keep receipt</strong>
 		          <p>Keep the request id and hash. Do not copy identity values, cookies, tokens, request bodies, or secret material.</p>
-		          <a class="button quiet" href="/session-witness/verify">Open verifier</a>
+		          <a class="button quiet" href="{{ publicPath "/session-witness/verify" }}">Open verifier</a>
 		        </div>
 		      </div>
 		      <p><span class="pill ok">auth_smoke_launchpad=true</span> <span class="pill ok">csrf_bound=true</span> <span class="pill ok">value_returned=false</span></p>
@@ -4958,14 +4947,14 @@ func mustTemplates() *template.Template {
 	      <p>Checks copy-safe evidence and proof receipts. Pasted input is not returned.</p>
 	    </div>
 	    <div class="toolbar">
-	      <a class="button quiet" href="/session-witness">Witness</a>
-	      <a class="button quiet" href="/session-witness.txt">Proof text</a>
-	      <a class="button quiet" href="/api/auth/session-witness">Witness JSON</a>
-		      <form method="post" action="/session-witness/verify-current">
+	      <a class="button quiet" href="{{ publicPath "/session-witness" }}">Witness</a>
+	      <a class="button quiet" href="{{ publicPath "/session-witness.txt" }}">Proof text</a>
+	      <a class="button quiet" href="{{ publicPath "/api/auth/session-witness" }}">Witness JSON</a>
+		      <form method="post" action="{{ publicPath "/session-witness/verify-current" }}">
 		        <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
 		        <button class="button quiet" type="submit">Verify current session</button>
 		      </form>
-	      <a class="button quiet" href="/">Dashboard</a>
+	      <a class="button quiet" href="{{ publicPath "/" }}">Dashboard</a>
 	    </div>
 	    <div class="evidence-workstation" aria-label="Evidence verification workstation">
 	      <div class="workstation-head">
@@ -4978,7 +4967,7 @@ func mustTemplates() *template.Template {
 	          <b>1</b>
 	          <strong>Verify this session</strong>
 	          <p>Runs the current witness roundtrip. No paste needed.</p>
-		          <form method="post" action="/session-witness/verify-current">
+		          <form method="post" action="{{ publicPath "/session-witness/verify-current" }}">
 		            <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
 		            <button class="button primary" type="submit">Verify current session</button>
 		          </form>
@@ -4993,7 +4982,7 @@ func mustTemplates() *template.Template {
 	          <b>3</b>
 	          <strong>Keep the receipt</strong>
 	          <p>Verification returns normalized facts and a receipt hash, never the submitted input.</p>
-	          <a class="button quiet" href="/session-witness.txt">Open proof text</a>
+	          <a class="button quiet" href="{{ publicPath "/session-witness.txt" }}">Open proof text</a>
 	        </div>
 	      </div>
 	      <p><span class="pill ok">input_not_returned=true</span> <span class="pill ok">request_body_returned=false</span> <span class="pill ok">value_returned=false</span></p>
@@ -5029,7 +5018,7 @@ func mustTemplates() *template.Template {
 	  <div class="status" id="proof-line-form">
 	    <div class="status-head"><h2>Verify proof line</h2><span class="pill ok">input not returned</span></div>
 	    <div class="panel-body stack">
-	      <form class="stack" method="post" action="/session-witness/verify">
+	      <form class="stack" method="post" action="{{ publicPath "/session-witness/verify" }}">
 	        <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
 	        <label>Proof line<textarea name="proof_line" required spellcheck="false" autocomplete="off"></textarea></label>
 	        <label>Proof hash<input name="proof_hash" required autocomplete="off" spellcheck="false"></label>
@@ -5127,10 +5116,10 @@ func mustTemplates() *template.Template {
 	      <p>{{ .AuthenticatedBrowser.Summary }}</p>
 	    </div>
 	    <div class="toolbar">
-	      <a class="button quiet" href="/">Dashboard</a>
-	      <a class="button quiet" href="/session-witness.txt">Proof text</a>
-	      <a class="button quiet" href="/session-witness/verify">Verify proof</a>
-	      <a class="button quiet" href="/api/auth/session-witness">Witness JSON</a>
+	      <a class="button quiet" href="{{ publicPath "/" }}">Dashboard</a>
+	      <a class="button quiet" href="{{ publicPath "/session-witness.txt" }}">Proof text</a>
+	      <a class="button quiet" href="{{ publicPath "/session-witness/verify" }}">Verify proof</a>
+	      <a class="button quiet" href="{{ publicPath "/api/auth/session-witness" }}">Witness JSON</a>
 	    </div>
 	    <div class="evidence-workstation" aria-label="Evidence handoff workstation">
 	      <div class="workstation-head">
@@ -5143,13 +5132,13 @@ func mustTemplates() *template.Template {
 	          <b>1</b>
 	          <strong>Capture the witness</strong>
 	          <p>This page is the capture: a copy-safe proof line and hash for the signed session.</p>
-	          <a class="button quiet" href="/session-witness.txt">Open proof text</a>
+	          <a class="button quiet" href="{{ publicPath "/session-witness.txt" }}">Open proof text</a>
 	        </div>
 	        <div class="handoff-step ok">
 	          <b>2</b>
 	          <strong>Verify the session</strong>
 	          <p>The verifier checks the current session or a pasted proof line without returning the input.</p>
-	          <a class="button primary" href="/session-witness/verify">Open verifier</a>
+	          <a class="button primary" href="{{ publicPath "/session-witness/verify" }}">Open verifier</a>
 	        </div>
 	        <div class="handoff-step info">
 	          <b>3</b>
@@ -5334,7 +5323,7 @@ func mustTemplates() *template.Template {
       <p>Ask the operator to grant Janus access, then sign in again.</p>
     </div>
     <div class="toolbar">
-      <a class="button primary" href="/auth/reset">Sign out</a>
+      <a class="button primary" href="{{ publicPath "/auth/reset" }}">Sign out</a>
     </div>
     <div class="auth-trust" aria-label="Access boundary">
       <span><i aria-hidden="true"></i>Janus stayed locked and returned no catalog or secret metadata.</span>
@@ -5422,8 +5411,8 @@ func mustTemplates() *template.Template {
 	      <p>If the identity provider itself still loops, use a fresh browser profile or clear that provider session outside Janus.</p>
 	    </div>
 	    <div class="toolbar">
-	      <a class="button primary" href="/login">Sign in cleanly</a>
-	      <a class="button quiet" href="/">Return to Janus</a>
+	      <a class="button primary" href="{{ publicPath "/login" }}">Sign in cleanly</a>
+	      <a class="button quiet" href="{{ publicPath "/" }}">Return to Janus</a>
 	    </div>
 	  </div>
 	  <div class="status">
@@ -5465,9 +5454,9 @@ func mustTemplates() *template.Template {
       <p>{{ .Message }}</p>
     </div>
 	    <div class="toolbar">
-	      <a class="button primary" href="/">Return to Janus</a>
-	      <a class="button quiet" href="/login">Sign in</a>
-	      <a class="button quiet" href="/auth/reset">Reset sign-in</a>
+	      <a class="button primary" href="{{ publicPath "/" }}">Return to Janus</a>
+	      <a class="button quiet" href="{{ publicPath "/login" }}">Sign in</a>
+	      <a class="button quiet" href="{{ publicPath "/auth/reset" }}">Reset sign-in</a>
 	    </div>
 	  </div>
   <div class="status">

@@ -142,7 +142,7 @@ func (app *App) handleManagedSetup(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		app.audit(r, "managed_secret.setup.recover", "allowed", session.Subject, "existing value-free operation")
-		http.Redirect(w, r, target, http.StatusSeeOther)
+		http.Redirect(w, r, app.cfg.PublicHref(target), http.StatusSeeOther)
 		return
 	}
 	inspection, err := app.inspectManagedSetupIntent(r.Context(), session, intentRef)
@@ -351,7 +351,7 @@ func (app *App) handleManagedSetupExecute(w http.ResponseWriter, r *http.Request
 		}
 		w.Header().Set("Clear-Site-Data", `"cache", "storage"`)
 		app.audit(r, "managed_secret.execute", "allowed", session.Subject, "duplicate resolved to existing operation")
-		http.Redirect(w, r, target, http.StatusSeeOther)
+		http.Redirect(w, r, app.cfg.PublicHref(target), http.StatusSeeOther)
 		return
 	}
 	if prefixOK {
@@ -370,7 +370,7 @@ func (app *App) handleManagedSetupExecute(w http.ResponseWriter, r *http.Request
 			app.writeManagedCompletionReceipt(w, receipt)
 			w.Header().Set("Clear-Site-Data", `"cache", "storage"`)
 			app.audit(r, "managed_secret.execute", "allowed", session.Subject, "existing operation status recovered without value read")
-			http.Redirect(w, r, target, http.StatusSeeOther)
+			http.Redirect(w, r, app.cfg.PublicHref(target), http.StatusSeeOther)
 			return
 		}
 	}
@@ -388,7 +388,7 @@ func (app *App) handleManagedSetupExecute(w http.ResponseWriter, r *http.Request
 			http.Redirect(
 				w,
 				r,
-				"/managed-service/setup?intent="+url.QueryEscape(intentRef),
+				app.cfg.PublicHref("/managed-service/setup?intent="+url.QueryEscape(intentRef)),
 				http.StatusSeeOther,
 			)
 			return
@@ -464,7 +464,7 @@ func (app *App) handleManagedSetupExecute(w http.ResponseWriter, r *http.Request
 		HumanSessionRef: humanSessionRef,
 	})
 	app.auditWithRef(r, "managed_secret.execute", "allowed", session.Subject, result.SecretRef, "operation registered without value return")
-	http.Redirect(w, r, target, http.StatusSeeOther)
+	http.Redirect(w, r, app.cfg.PublicHref(target), http.StatusSeeOther)
 }
 
 func (app *App) recoverManagedCompletion(

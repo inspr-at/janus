@@ -1,4 +1,4 @@
-import '/static/vendor/flow-shell/src/inspr-flow-shell.js';
+import './vendor/flow-shell/src/inspr-flow-shell.js';
 
 const shell = document.querySelector('inspr-flow-shell[data-flow-host]');
 if (shell) {
@@ -69,7 +69,7 @@ if (shell) {
   }
 
   function shellStateUrl() {
-    const url = new URL('/flow/shell-state.json', document.baseURI);
+    const url = new URL('../flow/shell-state.json', import.meta.url);
     if (projectId) {
       url.searchParams.set('flow_project', projectId);
     }
@@ -77,7 +77,7 @@ if (shell) {
   }
 
   function intentsUrl() {
-    const url = new URL('/flow/intents', document.baseURI);
+    const url = new URL('../flow/intents', import.meta.url);
     if (projectId) {
       url.searchParams.set('flow_project', projectId);
     }
@@ -173,7 +173,12 @@ if (shell) {
     if (target.origin !== allowed.origin) {
       return false;
     }
-    return /^\/projects\/\d+$/.test(target.pathname);
+    const basePath = allowed.pathname.replace(/\/$/, '');
+    const prefix = (basePath === '' ? '' : basePath) + '/projects/';
+    if (!target.pathname.startsWith(prefix)) {
+      return false;
+    }
+    return /^\d+$/.test(target.pathname.slice(prefix.length));
   }
 
   shell.addEventListener('flow-intent', async (event) => {

@@ -129,6 +129,26 @@ for compatibility. Production deployments should mount private credential
 files and set only the corresponding `_FILE` paths so secret values do not
 enter container configuration or the process environment.
 
+`JANUS_PUBLIC_URL` is the public origin only (`scheme://host`, optional port).
+An optional `JANUS_PUBLIC_BASE_PATH` mounts the same envelope under a native
+prefix such as `/janus` so a prefix-preserving reverse proxy can share one
+customer origin. Empty (the default) keeps every route at the standalone root.
+The path must be canonical ASCII: one or more `/segment` components matching
+`[A-Za-z0-9_-]+`, with no trailing slash, empty or dot segments, percent
+encoding, query, or fragment. Janus joins origin and path once for the OIDC
+callback, generated links, and safe post-login returns (including
+`flow_project`). `__Host-janus_*` cookies stay `Secure`, `Path=/`, and
+without `Domain`. Cookie names and paths are not isolation against a
+compromised same-origin sibling; each app remains its own OIDC client and
+membership verifier. Janus does not rewrite HTML at the proxy, trust
+`X-Forwarded-User` / `X-Remote-User`, or treat `X-Forwarded-Prefix` as the
+mount source of truth.
+
+When Flow is enabled, `paimos_origin` remains the server-only upstream used
+with the API key. Optional `paimos_browser_url` is the browser navigation
+address and may include a native Paimos prefix independent of that
+upstream.
+
 Janus has no local-password route. Browser sign-in uses the OIDC authorization
 code flow with a nonce and S256 PKCE. Break-glass recovery remains out of band
 and does not create a second human login surface.

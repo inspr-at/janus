@@ -15,7 +15,7 @@
         <h1>Access <span class="janus-flourish" aria-hidden="true"></span></h1>
         <div class="sub">who may open which door</div>
       </div>
-      <span class="asof">as of {{ .Now.Format "15:04:05" }} UTC <a class="refresh-link" href="/access" aria-label="Refresh access posture">↻</a></span>
+      <span class="asof">as of {{ .Now.Format "15:04:05" }} UTC <a class="refresh-link" href="{{ publicPath "/access" }}" aria-label="Refresh access posture">↻</a></span>
     </div>
 
     <div class="access-layout">
@@ -176,7 +176,7 @@
         <div class="status-strip-item status-mode"><i aria-hidden="true"></i><span><b>Janus mode <abbr class="info-tip" tabindex="0" title="Configured operating mode; this is not a certification claim.">i</abbr></b><em>{{ .Mode }}</em></span></div>
         <div class="status-strip-item status-policy"><i aria-hidden="true"></i><span><b>Policy health</b><em>{{ .RolePolicyReadiness.Status }}</em></span></div>
         <div class="status-strip-item status-value"><i aria-hidden="true"></i><span><b>value_returned</b><em>false</em></span></div>
-        <a class="posture-link" href="/api/posture">View full posture <span aria-hidden="true">→</span></a>
+        <a class="posture-link" href="{{ publicPath "/api/posture" }}">View full posture <span aria-hidden="true">→</span></a>
       </section>
     </div>
   </main>

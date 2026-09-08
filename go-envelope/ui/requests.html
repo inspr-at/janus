@@ -43,7 +43,7 @@
           <span>expires <b>{{ since .ExpiresAt }}</b>{{ if .Destination }} · for <b>{{ .Destination }}</b>{{ end }}</span>
         </div>
         <div class="foot">
-          <form method="post" action="/ui/permits/{{ .ID }}/run">
+          <form method="post" action="{{ publicPath (printf "/ui/permits/%s/run" .ID) }}">
             <input type="hidden" name="csrf_token" value="{{ $.CSRF }}">
             <button class="btn quiet" type="submit">Verify that execution is disabled</button>
           </form>
@@ -52,7 +52,7 @@
       {{ end }}
     </div>
     {{ else }}
-    <div class="empty">No active metadata authorizations. Create one from a secret's <a href="/">details panel</a> when API tooling needs a temporary record.</div>
+    <div class="empty">No active metadata authorizations. Create one from a secret's <a href="{{ publicPath "/" }}">details panel</a> when API tooling needs a temporary record.</div>
     {{ end }}
 
     <h2>Expired records</h2>

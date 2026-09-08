@@ -67,14 +67,15 @@ type flowError struct {
 func (e flowError) Error() string { return e.message }
 
 type flowConfigDocument struct {
-	Schema        string                `json:"schema"`
-	SchemaVersion uint16                `json:"schema_version"`
-	Enabled       bool                  `json:"enabled"`
-	HostID        string                `json:"host_id"`
-	PaimosOrigin  string                `json:"paimos_origin"`
-	APIKeyFile    string                `json:"api_key_file"`
-	InstanceLabel *string               `json:"instance_label"`
-	Bindings      []flowBindingDocument `json:"bindings"`
+	Schema           string                `json:"schema"`
+	SchemaVersion    uint16                `json:"schema_version"`
+	Enabled          bool                  `json:"enabled"`
+	HostID           string                `json:"host_id"`
+	PaimosOrigin     string                `json:"paimos_origin"`
+	PaimosBrowserURL *string               `json:"paimos_browser_url"`
+	APIKeyFile       string                `json:"api_key_file"`
+	InstanceLabel    *string               `json:"instance_label"`
+	Bindings         []flowBindingDocument `json:"bindings"`
 }
 
 type flowBindingDocument struct {
@@ -92,13 +93,14 @@ type flowBinding struct {
 }
 
 type flowHostConfig struct {
-	Enabled       bool
-	HostID        string
-	PaimosOrigin  *url.URL
-	APIKeyFile    string
-	InstanceLabel string
-	Bindings      []flowBinding
-	ConfigDigest  string
+	Enabled          bool
+	HostID           string
+	PaimosOrigin     *url.URL
+	PaimosBrowserURL *url.URL
+	APIKeyFile       string
+	InstanceLabel    string
+	Bindings         []flowBinding
+	ConfigDigest     string
 }
 
 type flowHostService struct {
@@ -214,6 +216,13 @@ func loadFlowHostConfig(path string) (flowHostConfig, error) {
 	if err != nil {
 		return flowHostConfig{}, errors.New("invalid flow host configuration")
 	}
+	var browser *url.URL
+	if document.PaimosBrowserURL != nil && strings.TrimSpace(*document.PaimosBrowserURL) != "" {
+		browser, err = parseFlowBrowserURL(strings.TrimSpace(*document.PaimosBrowserURL), allowLoopback)
+		if err != nil {
+			return flowHostConfig{}, errors.New("invalid flow host configuration")
+		}
+	}
 	if !filepath.IsAbs(document.APIKeyFile) {
 		return flowHostConfig{}, errors.New("invalid flow host configuration")
 	}
@@ -230,13 +239,14 @@ func loadFlowHostConfig(path string) (flowHostConfig, error) {
 		label = strings.TrimSpace(*document.InstanceLabel)
 	}
 	return flowHostConfig{
-		Enabled:       document.Enabled,
-		HostID:        document.HostID,
-		PaimosOrigin:  origin,
-		APIKeyFile:    document.APIKeyFile,
-		InstanceLabel: label,
-		Bindings:      bindings,
-		ConfigDigest:  "sha256:" + hex.EncodeToString(sha256Sum(raw)),
+		Enabled:          document.Enabled,
+		HostID:           document.HostID,
+		PaimosOrigin:     origin,
+		PaimosBrowserURL: browser,
+		APIKeyFile:       document.APIKeyFile,
+		InstanceLabel:    label,
+		Bindings:         bindings,
+		ConfigDigest:     "sha256:" + hex.EncodeToString(sha256Sum(raw)),
 	}, nil
 }
 
@@ -612,12 +622,30 @@ func (s *flowHostService) validateSubmittedIdentity(context flowResolvedContext,
 	return issues
 }
 
+func (s *flowHostService) paimosBrowser() *url.URL {
+	if s == nil {
+		return nil
+	}
+	if s.config.PaimosBrowserURL != nil {
+		return s.config.PaimosBrowserURL
+	}
+	return s.config.PaimosOrigin
+}
+
+func (s *flowHostService) paimosBrowserString() string {
+	browser := s.paimosBrowser()
+	if browser == nil {
+		return ""
+	}
+	return strings.TrimRight(browser.String(), "/")
+}
+
 func (s *flowHostService) reviewURL(projectID uint64) string {
-	return fmt.Sprintf("%s/projects/%d?tab=overview%s", strings.TrimRight(s.config.PaimosOrigin.String(), "/"), projectID, flowReviewFragment)
+	return fmt.Sprintf("%s/projects/%d?tab=overview%s", s.paimosBrowserString(), projectID, flowReviewFragment)
 }
 
 func (s *flowHostService) projectOverviewURL(projectID uint64) string {
-	return fmt.Sprintf("%s/projects/%d?tab=overview", strings.TrimRight(s.config.PaimosOrigin.String(), "/"), projectID)
+	return fmt.Sprintf("%s/projects/%d?tab=overview", s.paimosBrowserString(), projectID)
 }
 
 func (s *flowHostService) validNavigationLocation(location string) string {
@@ -625,10 +653,19 @@ func (s *flowHostService) validNavigationLocation(location string) string {
 	if err != nil {
 		return ""
 	}
-	if parsed.Scheme != s.config.PaimosOrigin.Scheme || parsed.Host != s.config.PaimosOrigin.Host {
+	browser := s.paimosBrowser()
+	if browser == nil {
 		return ""
 	}
-	tail, ok := strings.CutPrefix(parsed.Path, "/projects/")
+	if parsed.Scheme != browser.Scheme || parsed.Host != browser.Host {
+		return ""
+	}
+	basePath := strings.TrimSuffix(browser.Path, "/")
+	prefix := "/projects/"
+	if basePath != "" {
+		prefix = basePath + "/projects/"
+	}
+	tail, ok := strings.CutPrefix(parsed.Path, prefix)
 	if !ok || tail == "" || strings.Contains(tail, "/") {
 		return ""
 	}
@@ -668,11 +705,11 @@ func (app *App) injectFlowShell(r *http.Request, html string) (string, bool) {
 	if reason != "" {
 		return html, false
 	}
-	origin := htmlEscapeAttr(app.flow.config.PaimosOrigin.String())
+	origin := htmlEscapeAttr(app.flow.paimosBrowserString())
 	project := htmlEscapeAttr(strconv.FormatUint(context.binding.ProjectID, 10))
 	wrapped := strings.Replace(html, "<main", `<inspr-flow-shell layout-mode="bounded" content-padding="24px" data-flow-host data-flow-project="`+project+`" data-flow-paimos-origin="`+origin+`"><main`, 1)
 	wrapped = strings.Replace(wrapped, "</main>", "</main></inspr-flow-shell>", 1)
-	bootstrap := `<script type="module" src="/static/flow-host-bootstrap.mjs" nonce="` + nonce + `"></script>`
+	bootstrap := `<script type="module" src="` + htmlEscapeAttr(app.cfg.PublicPath("/static/flow-host-bootstrap.mjs")) + `" nonce="` + nonce + `"></script>`
 	if index := strings.LastIndex(wrapped, "</body>"); index >= 0 {
 		return wrapped[:index] + bootstrap + wrapped[index:], true
 	}
@@ -1222,6 +1259,30 @@ func parseFlowOrigin(value string, allowLoopback bool) (*url.URL, error) {
 	if parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || (parsed.Path != "" && parsed.Path != "/") {
 		return nil, errors.New("invalid origin")
 	}
+	return validateFlowOriginScheme(parsed, allowLoopback)
+}
+
+func parseFlowBrowserURL(value string, allowLoopback bool) (*url.URL, error) {
+	parsed, err := url.Parse(value)
+	if err != nil {
+		return nil, err
+	}
+	if parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return nil, errors.New("invalid origin")
+	}
+	path := parsed.Path
+	if path == "/" {
+		path = ""
+	}
+	if _, err := NormalizePublicBasePath(path); err != nil {
+		return nil, err
+	}
+	parsed.Path = path
+	parsed.RawPath = ""
+	return validateFlowOriginScheme(parsed, allowLoopback)
+}
+
+func validateFlowOriginScheme(parsed *url.URL, allowLoopback bool) (*url.URL, error) {
 	switch parsed.Scheme {
 	case "https":
 		return parsed, nil

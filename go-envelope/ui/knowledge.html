@@ -85,7 +85,7 @@
       <div class="section-title"><div><div class="eyebrow">WORKFLOWS</div><h2 id="flow-index-title">Follow one governed operation</h2></div><p>Each guide separates present enforcement from intended boundaries.</p></div>
       <div class="flow-index">
         {{ range .KnowledgeFlows }}
-        <a class="flow-index-card" href="/knowledge/flows/{{ .Slug }}">
+        <a class="flow-index-card" href="{{ publicPath (printf "/knowledge/flows/%s" .Slug) }}">
           <span class="flow-index-mark" aria-hidden="true">→</span>
           <strong>{{ .Title }}</strong>
           <span>{{ .Summary }}</span>
@@ -110,7 +110,7 @@
             {{ range . }}<div><code>{{ .Code }}</code><span>{{ .Detail }}</span></div>{{ end }}
           </div>
           {{ end }}
-          <div class="knowledge-related"><span>Appears in</span>{{ range .FlowSlugs }}<a href="/knowledge/flows/{{ . }}">{{ knowledgeFlowTitle . }}</a>{{ end }}</div>
+          <div class="knowledge-related"><span>Appears in</span>{{ range .FlowSlugs }}<a href="{{ publicPath (printf "/knowledge/flows/%s" .) }}">{{ knowledgeFlowTitle . }}</a>{{ end }}</div>
         </article>
         {{ end }}
       </div>
@@ -133,7 +133,7 @@
   {{ template "doorkeeper_side" . }}
   <main class="main knowledge-main">
     <div class="pagehead">
-      <div><a class="knowledge-back" href="/knowledge">← Knowledge</a><h1>{{ .Flow.Title }}</h1><div class="sub">{{ .Flow.Summary }}</div></div>
+      <div><a class="knowledge-back" href="{{ publicPath "/knowledge" }}">← Knowledge</a><h1>{{ .Flow.Title }}</h1><div class="sub">{{ .Flow.Summary }}</div></div>
       <span class="asof">value-free guide</span>
     </div>
 
@@ -163,7 +163,7 @@
       <p>{{ .Flow.Evidence }}</p>
     </section>
 
-    <nav class="flow-other" aria-label="Other workflows"><span>Other workflows</span>{{ range .KnowledgeFlows }}{{ if ne .Slug $.Flow.Slug }}<a href="/knowledge/flows/{{ .Slug }}">{{ .Title }}</a>{{ end }}{{ end }}</nav>
+    <nav class="flow-other" aria-label="Other workflows"><span>Other workflows</span>{{ range .KnowledgeFlows }}{{ if ne .Slug $.Flow.Slug }}<a href="{{ publicPath (printf "/knowledge/flows/%s" .Slug) }}">{{ .Title }}</a>{{ end }}{{ end }}</nav>
   </main>
 </div>
 </body>
