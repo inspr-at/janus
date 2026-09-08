@@ -453,6 +453,7 @@ type App struct {
 	managedDynamicDelivery   managedDynamicDeliveryExecutor
 	managedDynamicTransport  managedDynamicTransportExecutor
 	managedDynamicHostTokens *managedHostTokenVerifier
+	flow                     *flowHostService
 }
 
 type Session struct {
@@ -724,6 +725,11 @@ func NewApp(ctx context.Context, cfg Config, store *Store) (*App, error) {
 		limiter:   NewRateLimiter(180, time.Minute),
 		templates: mustTemplates(),
 	}
+	flow, err := loadFlowHostService()
+	if err != nil {
+		return nil, fmt.Errorf("flow host: %w", err)
+	}
+	app.flow = flow
 	if cfg.ManagedSetup != nil {
 		managedSetup, err := newManagedSetupIntentConsumer(*cfg.ManagedSetup, cfg.DataDir)
 		if err != nil {
@@ -827,6 +833,8 @@ func (app *App) routeSpecs() []routeSpec {
 		{pattern: "GET /settings", permission: PermissionDescriptorRead, authenticated: true, handler: app.handleSettingsPage},
 		{pattern: "GET /vault/new", permission: PermissionDescriptorRead, authenticated: true, handler: app.handleNewSecretPage},
 		{pattern: "GET /vault/new/plan.sh", permission: PermissionManagedRun, authenticated: true, handler: app.handleNewSecretScript},
+		{pattern: "GET /flow/shell-state.json", permission: PermissionDescriptorRead, authenticated: true, handler: app.handleFlowShellState},
+		{pattern: "POST /flow/intents", permission: PermissionDescriptorRead, authenticated: true, handler: app.handleFlowIntent},
 		{pattern: "GET /static/", permission: PermissionHealthRead, handler: app.handleStatic},
 		{pattern: "GET /", permission: PermissionDescriptorRead, authenticated: true, handler: app.handleDashboard},
 	}
@@ -841,7 +849,7 @@ func (app *App) routes() http.Handler {
 		}
 		mux.HandleFunc(route.pattern, handler)
 	}
-	return app.securityHeaders(app.requestIDs(app.rateLimit(app.limitRequestBody(app.safeHTTPBoundary(mux)))))
+	return app.securityHeaders(app.requestIDs(app.rateLimit(app.limitRequestBody(app.safeHTTPBoundary(app.flowPageWrap(mux))))))
 }
 
 func (app *App) safeHTTPBoundary(next http.Handler) http.Handler {
@@ -862,13 +870,13 @@ func (app *App) safeHTTPBoundary(next http.Handler) http.Handler {
 
 func allowedMethodsForPath(path string) ([]string, bool) {
 	switch path {
-	case "/", "/access", "/requests", "/ledger", "/assurance", "/knowledge", "/settings", "/vault/new", "/vault/new/plan.sh", "/auth/smoke", "/session-witness", "/session-witness.txt", "/managed-service/setup", "/managed-environment/setup", "/healthz", "/readyz", "/buildz", "/favicon.ico", "/login", "/auth/reset", "/oidc/callback", "/api/warden/descriptors", "/api/audit/recent", "/api/auth/session-witness", "/api/posture", "/api/evidence":
+	case "/", "/access", "/requests", "/ledger", "/assurance", "/knowledge", "/settings", "/vault/new", "/vault/new/plan.sh", "/auth/smoke", "/session-witness", "/session-witness.txt", "/managed-service/setup", "/managed-environment/setup", "/healthz", "/readyz", "/buildz", "/favicon.ico", "/login", "/auth/reset", "/oidc/callback", "/api/warden/descriptors", "/api/audit/recent", "/api/auth/session-witness", "/api/posture", "/api/evidence", "/flow/shell-state.json":
 		return []string{http.MethodGet}, true
 	case "/session-witness/verify":
 		return []string{http.MethodGet, http.MethodPost}, true
 	case "/session-witness/verify-current":
 		return []string{http.MethodPost}, true
-	case "/logout", "/managed-service/setup/step-up", "/managed-service/setup/execute", "/managed-environment/setup/step-up", "/managed-environment/setup/admit", "/api/warden/resolve", "/api/permits", "/ui/warden/resolve", "/ui/permits":
+	case "/logout", "/managed-service/setup/step-up", "/managed-service/setup/execute", "/managed-environment/setup/step-up", "/managed-environment/setup/admit", "/api/warden/resolve", "/api/permits", "/ui/warden/resolve", "/ui/permits", "/flow/intents":
 		return []string{http.MethodPost}, true
 	case "/api/auth/session-witness/verify":
 		return []string{http.MethodPost}, true
@@ -1108,7 +1116,7 @@ func (app *App) withAuth(next http.HandlerFunc) http.HandlerFunc {
 }
 
 func isAPIRequest(r *http.Request) bool {
-	return r.URL.Path == "/api" || strings.HasPrefix(r.URL.Path, "/api/")
+	return r.URL.Path == "/api" || strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/flow/")
 }
 
 func (app *App) requireRole(role, action string, next http.HandlerFunc) http.HandlerFunc {

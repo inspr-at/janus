@@ -3629,6 +3629,8 @@ func TestRouteValueLeakSentinelCoversPublicAPIAndUI(t *testing.T) {
 		{name: "settings", pattern: "GET /settings", method: http.MethodGet, path: "/settings", status: http.StatusOK},
 		{name: "new secret", pattern: "GET /vault/new", method: http.MethodGet, path: "/vault/new", status: http.StatusOK},
 		{name: "new secret script denial", pattern: "GET /vault/new/plan.sh", method: http.MethodGet, path: "/vault/new/plan.sh", status: http.StatusBadRequest},
+		{name: "flow shell state disabled", pattern: "GET /flow/shell-state.json", method: http.MethodGet, path: "/flow/shell-state.json", status: http.StatusOK},
+		{name: "flow intent unconfigured", pattern: "POST /flow/intents", method: http.MethodPost, path: "/flow/intents", body: `{"type":"flow:review-batch"}`, contentType: "application/json", status: http.StatusConflict},
 		{name: "static asset", pattern: "GET /static/", method: http.MethodGet, path: "/static/janus.css", status: http.StatusOK},
 		{name: "ui resolve", pattern: "POST /ui/warden/resolve", method: http.MethodPost, path: "/ui/warden/resolve", body: "ref=zitadel-janus-oidc&reason=local+smoke", contentType: "application/x-www-form-urlencoded", status: http.StatusOK},
 		{name: "ui permit", pattern: "POST /ui/permits", method: http.MethodPost, path: "/ui/permits", body: "ref=zitadel-janus-oidc&action=metadata_use&destination=dashboard&reason=local+smoke", contentType: "application/x-www-form-urlencoded", status: http.StatusOK},
@@ -3697,6 +3699,8 @@ func TestJSONErrorResponsesAreRequestCorrelated(t *testing.T) {
 		{name: "auth required witness verifier", method: http.MethodPost, path: "/api/auth/session-witness/verify", status: http.StatusUnauthorized},
 		{name: "auth required resolve", method: http.MethodPost, path: "/api/warden/resolve", status: http.StatusUnauthorized},
 		{name: "auth required evidence", method: http.MethodGet, path: "/api/evidence", status: http.StatusUnauthorized},
+		{name: "auth required flow state", method: http.MethodGet, path: "/flow/shell-state.json", status: http.StatusUnauthorized},
+		{name: "auth required flow intent", method: http.MethodPost, path: "/flow/intents", status: http.StatusUnauthorized},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			reqID := "json-error-" + strings.NewReplacer(" ", "-", "/", "-").Replace(tc.name)
