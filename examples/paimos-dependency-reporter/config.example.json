@@ -1,0 +1,24 @@
+{
+  "schema": "inspr.janus.paimos-dependency-reporter-config.v1",
+  "schema_version": 1,
+  "paimos_origin": "https://paimos.example",
+  "handoff_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+  "api_key_file": "/example/inert/paimos-api-key",
+  "handoff_secret_file": "/example/inert/paimos-handoff-secret",
+  "journal_directory": "/example/inert/paimos-dependency-journal",
+  "expected": {
+    "dependency_key": "privileged-handoff",
+    "stage_key": "deployment",
+    "execution_number": 1,
+    "plan_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    "predecessor_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+    "authority_epoch": 1,
+    "context_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+    "credential_epoch": 1,
+    "expires_at": "2026-08-22T12:00:00Z"
+  },
+  "evidence": {
+    "kind": "authorization",
+    "observed_at": "2026-08-22T11:55:00Z"
+  }
+}

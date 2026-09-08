@@ -473,7 +473,7 @@ transaction has produced one positive, value-free `authorization` or
 `credential_handoff` fact. It accepts no arguments and reads one exact request
 from `/run/janus-paimos-dependency-reporter/config.json`.
 
-The root-owned config uses schema
+The root-owned production config uses schema
 `inspr.janus.paimos-dependency-reporter-config.v1` and names only an HTTPS
 Paimos origin, handoff ID, separate API-key and handoff-secret files, a private
 journal directory, the expected dependency/stage/execution/lineage/authority/
@@ -483,6 +483,13 @@ contains exactly the 32 raw mint/rotate bytes. Both must be owner-only,
 single-link regular files owned by root and must not share an inode; the
 journal directory must be root-owned mode `0700`.
 
+The checked, identity-free example at
+[`examples/paimos-dependency-reporter/config.example.json`](examples/paimos-dependency-reporter/config.example.json)
+uses synthetic paths and illustrative digests only. It is not a live handoff
+binding. An operator must obtain the exact fresh `expected` tuple, evidence
+timestamp, handoff ID, origin, and credential files from a reviewed Janus
+transaction and the current Paimos handoff pull—never from this fixture.
+
 The strict configuration shape is:
 
 ```json
@@ -491,9 +498,9 @@ The strict configuration shape is:
   "schema_version": 1,
   "paimos_origin": "https://paimos.example",
   "handoff_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
-  "api_key_file": "/run/credentials/paimos-api-key",
-  "handoff_secret_file": "/run/credentials/paimos-handoff.bin",
-  "journal_directory": "/var/lib/janus/paimos-dependency-reporter",
+  "api_key_file": "/example/inert/paimos-api-key",
+  "handoff_secret_file": "/example/inert/paimos-handoff-secret",
+  "journal_directory": "/example/inert/paimos-dependency-journal",
   "expected": {
     "dependency_key": "privileged-handoff",
     "stage_key": "deployment",
@@ -536,6 +543,30 @@ Paimos `v5.11.0`, certified commit
 `sha256:0318f4025902c9d5dd790384950cc9daebb16e02e79a4a90ce7dddc673e68bed`;
 the exact released bytes live under `contracts/paimos-external-stage-v1/` and
 are checked by `scripts/check-paimos-external-stage-pins.py`.
+
+#### Threat model and operating checklist
+
+| Control | Requirement |
+| --- | --- |
+| Config custody | Root-owned, mode `0600`, single-link regular file at the fixed path; no argv or environment override. |
+| Credential custody | API key and 32-byte handoff secret live in separate `0600` files with distinct inodes; neither value may appear in config, logs, argv, or fixtures. |
+| Dependency-only role | Reporter class `janus`, role `dependency` only; it cannot mark specification, implementation, QA, deployment, or verification successful and adds no new authorization claim. |
+| Exact binding | `expected` must match the current Paimos pull byte-for-byte on execution, plan/predecessor/context digests, authority epoch, credential epoch, and `expires_at`. |
+| Local evidence assertion | Config carries one trusted positive `authorization` or `credential_handoff` timestamp from an already-reviewed Janus transaction; the reporter does not independently certify transaction or target readiness. |
+| Journal / crash replay | Accept and report bodies are journaled before send; ambiguous transport failures replay identical bytes and idempotency keys without a new pull. |
+| Server-side freshness | Paimos enforces registration, handoff validity, revocation, rotation, sequence, and expiry; stale, rotated, or revoked handoffs fail closed at pull or mutation. |
+| No `janusd` wiring yet | Nothing in `janusd`, Warden, or the executor writes reporter config or execs the binary; orchestration remains external (systemd, operator script, future worker). |
+
+**What this evidence proves:** one Janus dependency reporter, bound to one
+reviewed handoff, observed one allowed positive fact (`authorization` granted or
+`credential_handoff` completed) at the configured timestamp and reported it
+value-free to Paimos under the frozen v1 contract pins.
+
+**What it does not prove:** secret provisioning; Pharos owner completion; QA,
+deployment, or verification success; target readiness; delivery-stream
+prerequisite satisfaction; or that any downstream apply is safe. Pin major v1
+remains appropriate for this Janus dependency adapter even when a Pharos owner
+uses v2 elsewhere.
 
 ### Service env file
 
