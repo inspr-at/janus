@@ -490,7 +490,7 @@ binding. An operator must obtain the exact fresh `expected` tuple, evidence
 timestamp, handoff ID, origin, and credential files from a reviewed Janus
 transaction and the current Paimos handoff pull—never from this fixture.
 
-The strict configuration shape is:
+The strict configuration shape is mirrored byte-for-byte from that example:
 
 ```json
 {
@@ -558,9 +558,10 @@ are checked by `scripts/check-paimos-external-stage-pins.py`.
 | No `janusd` wiring yet | Nothing in `janusd`, Warden, or the executor writes reporter config or execs the binary; orchestration remains external (systemd, operator script, future worker). |
 
 **What this evidence proves:** one Janus dependency reporter, bound to one
-reviewed handoff, observed one allowed positive fact (`authorization` granted or
-`credential_handoff` completed) at the configured timestamp and reported it
-value-free to Paimos under the frozen v1 contract pins.
+reviewed handoff, was configured with one asserted positive fact
+(`authorization` granted or `credential_handoff` completed) at the configured
+timestamp and reported it value-free to Paimos under the frozen v1 contract
+pins.
 
 **What it does not prove:** secret provisioning; Pharos owner completion; QA,
 deployment, or verification success; target readiness; delivery-stream

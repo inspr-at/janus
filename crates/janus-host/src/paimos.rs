@@ -1681,12 +1681,15 @@ mod tests {
         );
     }
 
+    type ConfigMutation = fn(ReporterConfigV1) -> ReporterConfigV1;
+
     const CHECKED_EXAMPLE_PATH: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../examples/paimos-dependency-reporter/config.example.json"
     );
     const README_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../README.md");
-    const README_PAIMOS_JSON_MARKER: &str = "The strict configuration shape is:\n\n```json\n";
+    const README_PAIMOS_JSON_MARKER: &str =
+        "The strict configuration shape is mirrored byte-for-byte from that example:\n\n```json\n";
 
     fn checked_example_bytes() -> Vec<u8> {
         fs::read(CHECKED_EXAMPLE_PATH).expect("read checked Paimos example")
@@ -1721,15 +1724,14 @@ mod tests {
     }
 
     #[test]
-    fn readme_json_matches_checked_example_bytes() {
+    fn readme_paimos_json_matches_checked_example() {
         let example = checked_example_bytes();
         let readme = readme_paimos_config_bytes();
         let example_value: Value =
             serde_json::from_slice(&example).expect("parse checked example JSON");
         let readme_value: Value = serde_json::from_slice(&readme).expect("parse README JSON");
         assert_eq!(
-            example_value,
-            readme_value,
+            example_value, readme_value,
             "README Paimos JSON must match examples/paimos-dependency-reporter/config.example.json"
         );
     }
@@ -1737,13 +1739,14 @@ mod tests {
     #[test]
     fn checked_example_negative_shapes_fail_before_transport() {
         let valid = parse_checked_config(&checked_example_bytes());
-        let cases: Vec<(&str, fn(ReporterConfigV1) -> ReporterConfigV1)> = vec![
+        let cases: Vec<(&str, ConfigMutation, &'static str)> = vec![
             (
                 "shared credential path",
                 |mut config| {
                     config.handoff_secret_file = config.api_key_file.clone();
                     config
                 },
+                "paimos_reporter_config_invalid",
             ),
             (
                 "non-https origin",
@@ -1751,6 +1754,7 @@ mod tests {
                     config.paimos_origin = "http://paimos.example".to_string();
                     config
                 },
+                "paimos_reporter_origin_refused",
             ),
             (
                 "wrong schema",
@@ -1758,6 +1762,7 @@ mod tests {
                     config.schema = "inspr.janus.paimos-dependency-reporter-config.v0".to_string();
                     config
                 },
+                "paimos_reporter_config_invalid",
             ),
             (
                 "invalid execution number",
@@ -1765,6 +1770,7 @@ mod tests {
                     config.expected.execution_number = 0;
                     config
                 },
+                "paimos_reporter_config_invalid",
             ),
             (
                 "invalid digest",
@@ -1772,6 +1778,7 @@ mod tests {
                     config.expected.plan_digest = "sha256:not-a-valid-wire-digest".to_string();
                     config
                 },
+                "paimos_reporter_config_invalid",
             ),
             (
                 "invalid timestamp",
@@ -1781,17 +1788,16 @@ mod tests {
                     };
                     config
                 },
+                "paimos_reporter_config_invalid",
             ),
         ];
-        for (label, mutate) in cases {
+        for (label, mutate, expected_reason) in cases {
             let config = mutate(valid.clone());
             let error = validate_config(&config, false)
                 .expect_err(&format!("{label} must fail validation"));
-            assert!(
-                matches!(
-                    error.reason_code(),
-                    "paimos_reporter_config_invalid" | "paimos_reporter_origin_refused"
-                ),
+            assert_eq!(
+                error.reason_code(),
+                expected_reason,
                 "{label}: unexpected refusal"
             );
         }
