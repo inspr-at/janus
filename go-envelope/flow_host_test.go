@@ -197,7 +197,7 @@ func TestUnauthorizedPrincipalAndProject(t *testing.T) {
 	if strings.Contains(out.Body.String(), "shellState") && strings.Contains(out.Body.String(), `"mountShell":true`) {
 		t.Fatal("unknown principal must not mount")
 	}
-	if !strings.Contains(out.Body.String(), "No configured Flow binding") {
+	if !strings.Contains(out.Body.String(), "no configured Flow binding") {
 		t.Fatalf("body=%s", out.Body.String())
 	}
 

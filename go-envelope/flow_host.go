@@ -476,10 +476,10 @@ func (s *flowHostService) selectBinding(subject string, projectID uint64) (flowB
 		matches = append(matches, binding)
 	}
 	if len(matches) == 0 {
-		return flowBinding{}, errors.New("No configured Flow binding matches this principal.")
+		return flowBinding{}, errors.New("no configured Flow binding matches this principal")
 	}
 	if len(matches) > 1 {
-		return flowBinding{}, errors.New("Multiple configured Flow bindings match; project scope is required.")
+		return flowBinding{}, errors.New("multiple configured Flow bindings match; project scope is required")
 	}
 	return matches[0], nil
 }
