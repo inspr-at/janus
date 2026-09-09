@@ -61,7 +61,7 @@ func (app *App) handleManagedDynamicValueAdmission(w http.ResponseWriter, r *htt
 			if recoverErr == nil && recovered.ValueAdmissionComplete {
 				w.Header().Set("Clear-Site-Data", `"cache", "storage"`)
 				app.audit(r, "managed_environment.value.admit", "allowed", session.Subject, "duplicate resolved to existing value-free custody state")
-				http.Redirect(w, r, "/managed-environment/setup?intent="+url.QueryEscape(proof.Target.IntentRef), http.StatusSeeOther)
+				http.Redirect(w, r, app.cfg.PublicHref("/managed-environment/setup?intent="+url.QueryEscape(proof.Target.IntentRef)), http.StatusSeeOther)
 				return
 			}
 			if recoverErr == nil && recovered.ValueAdmissionStarted {
@@ -69,7 +69,7 @@ func (app *App) handleManagedDynamicValueAdmission(w http.ResponseWriter, r *htt
 					app.completeManagedDynamicRemoval(r, proof.Target, proof.OperationRef) == nil {
 					w.Header().Set("Clear-Site-Data", `"cache", "storage"`)
 					app.audit(r, "managed_environment.remove.prepare", "allowed", session.Subject, "lost removal response recovered without a value")
-					http.Redirect(w, r, "/managed-environment/setup?intent="+url.QueryEscape(proof.Target.IntentRef), http.StatusSeeOther)
+					http.Redirect(w, r, app.cfg.PublicHref("/managed-environment/setup?intent="+url.QueryEscape(proof.Target.IntentRef)), http.StatusSeeOther)
 					return
 				}
 				custody, custodyErr := app.managedDynamicCustody.Recover(r.Context(), proof.Target, proof.OperationRef)
@@ -80,7 +80,7 @@ func (app *App) handleManagedDynamicValueAdmission(w http.ResponseWriter, r *htt
 						if completeErr == nil && completed.ValueAdmissionComplete && completed.BindingRef == custody.BindingRef && completed.SecretRef == custody.SecretRef && completed.GenerationRef == custody.GenerationRef && completed.PackageRef == delivery.PackageRef && completed.EnvelopeRef == delivery.EnvelopeRef {
 							w.Header().Set("Clear-Site-Data", `"cache", "storage"`)
 							app.audit(r, "managed_environment.value.admit", "allowed", session.Subject, "lost custody response recovered without reading submitted value")
-							http.Redirect(w, r, "/managed-environment/setup?intent="+url.QueryEscape(proof.Target.IntentRef), http.StatusSeeOther)
+							http.Redirect(w, r, app.cfg.PublicHref("/managed-environment/setup?intent="+url.QueryEscape(proof.Target.IntentRef)), http.StatusSeeOther)
 							return
 						}
 					}
@@ -109,7 +109,7 @@ func (app *App) handleManagedDynamicValueAdmission(w http.ResponseWriter, r *htt
 		}
 		w.Header().Set("Clear-Site-Data", `"cache", "storage"`)
 		app.audit(r, "managed_environment.remove.prepare", "allowed", session.Subject, "value-free host removal package prepared")
-		http.Redirect(w, r, "/managed-environment/setup?intent="+url.QueryEscape(proof.Target.IntentRef), http.StatusSeeOther)
+		http.Redirect(w, r, app.cfg.PublicHref("/managed-environment/setup?intent="+url.QueryEscape(proof.Target.IntentRef)), http.StatusSeeOther)
 		return
 	}
 
@@ -157,7 +157,7 @@ func (app *App) handleManagedDynamicValueAdmission(w http.ResponseWriter, r *htt
 	}
 	w.Header().Set("Clear-Site-Data", `"cache", "storage"`)
 	app.audit(r, "managed_environment.value.admit", "allowed", session.Subject, "one bounded value stored in custody and prepared as a host-bound package")
-	http.Redirect(w, r, "/managed-environment/setup?intent="+url.QueryEscape(proof.Target.IntentRef), http.StatusSeeOther)
+	http.Redirect(w, r, app.cfg.PublicHref("/managed-environment/setup?intent="+url.QueryEscape(proof.Target.IntentRef)), http.StatusSeeOther)
 }
 
 func (app *App) completeManagedDynamicRemoval(r *http.Request, target managedDynamicStepUpTarget, operationRef string) error {

@@ -56,7 +56,7 @@
         <div class="panel">
           <strong>Evidence</strong>
           <p class="lead">Copy-safe evidence pack with integrity hash{{ if .EvidenceHash }} — current pack <span class="mono">{{ .EvidenceHash }}…</span>{{ end }}.</p>
-          <a class="btn quiet" href="/api/evidence">Download evidence JSON</a>
+          <a class="btn quiet" href="{{ publicPath "/api/evidence" }}">Download evidence JSON</a>
         </div>
         {{ end }}
       </div>

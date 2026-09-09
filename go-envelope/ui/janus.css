@@ -202,7 +202,7 @@ a { color: var(--ink); }
   aspect-ratio: 210 / 390;
   transform: translateX(-50%);
   z-index: 0;
-  background: url("/static/janus-side-bg.png") center / contain no-repeat;
+  background: url("janus-side-bg.png") center / contain no-repeat;
   opacity: var(--janus-art-opacity);
   -webkit-mask-image:
     linear-gradient(to right, transparent 0, #000 var(--edge-fade-x), #000 calc(100% - var(--edge-fade-x)), transparent 100%),
@@ -302,7 +302,7 @@ a { color: var(--ink); }
   width: min(700px, calc(100% + 48px));
   aspect-ratio: 700 / 108;
   transform: translateY(-50%);
-  background: url("/static/janus-header-bg.png") right center / contain no-repeat;
+  background: url("janus-header-bg.png") right center / contain no-repeat;
   opacity: var(--janus-art-opacity);
   -webkit-mask-image:
     linear-gradient(to right, transparent 0, #000 var(--edge-fade-x), #000 calc(100% - var(--edge-fade-x)), transparent 100%),

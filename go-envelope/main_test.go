@@ -55,12 +55,13 @@ func newTestApp(t *testing.T) *App {
 	if err != nil {
 		t.Fatal(err)
 	}
+	cfg := testConfig()
 	return &App{
-		cfg:       testConfig(),
+		cfg:       cfg,
 		store:     store,
 		broker:    NewBroker(store),
 		permits:   permitStore,
-		templates: mustTemplates(),
+		templates: templatesFor(cfg.PublicBasePath),
 	}
 }
 
@@ -1563,6 +1564,11 @@ func TestSafeLoginReturnPathRejectsOpenRedirectAndUnsafeRoutes(t *testing.T) {
 	}{
 		{raw: "/auth/smoke", want: "/auth/smoke", ok: true},
 		{raw: "/auth/smoke?ref=secret-cookie-secret", want: "/auth/smoke", ok: true},
+		{raw: "/access?flow_project=17", want: "/access?flow_project=17", ok: true},
+		{raw: "/?flow_project=17", want: "/?flow_project=17", ok: true},
+		{raw: "/access?flow_project=17&ref=query-secret-sentinel", want: "/access?flow_project=17", ok: true},
+		{raw: "/access?flow_project=0", want: "/", ok: false},
+		{raw: "/access?flow_project=https://evil.example", want: "/", ok: false},
 		{raw: "/session-witness", want: "/session-witness", ok: true},
 		{raw: "/session-witness/verify", want: "/session-witness/verify", ok: true},
 		{raw: "/access?ref=query-secret-sentinel", want: "/access", ok: true},

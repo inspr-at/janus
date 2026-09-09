@@ -47,7 +47,7 @@ func TestVaultBrandUsesCenteredHorizontalLockup(t *testing.T) {
 	templateBody := string(templateBytes)
 	for _, want := range []string{
 		`<div class="brand">`,
-		`<span class="brand-mark-slot" aria-hidden="true"><img class="brand-mark" src="/static/janus-logo.svg" alt=""></span>`,
+		`<span class="brand-mark-slot" aria-hidden="true"><img class="brand-mark" src="{{ publicPath "/static/janus-logo.svg" }}" alt=""></span>`,
 		`<span class="brand-wordmark">JANUS</span>`,
 	} {
 		if !strings.Contains(templateBody, want) {
@@ -792,9 +792,9 @@ func TestBrandArtworkUsesIntendedScaleAlignmentAndCanonicalMark(t *testing.T) {
 		t.Fatalf("janus.css has unbalanced blocks: opens=%d closes=%d", strings.Count(css, "{"), strings.Count(css, "}"))
 	}
 	for _, want := range []string{
-		`url("/static/janus-header-bg.png") right center / contain no-repeat`,
+		`url("janus-header-bg.png") right center / contain no-repeat`,
 		`width: min(700px, calc(100% + 48px))`,
-		`url("/static/janus-side-bg.png") center / contain no-repeat`,
+		`url("janus-side-bg.png") center / contain no-repeat`,
 		`height: min(390px, 100%)`,
 		`mask-composite: intersect`,
 		`transparent 0`,
