@@ -169,7 +169,7 @@ def validate(workflows)
   require_gate(minimization_build["if"] == go_only_run_condition, "rust_minimization_build_condition_invalid")
   require_gate(
     minimization_build["uses"] ==
-      "docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8",
+      "docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a",
     "rust_minimization_build_action_invalid"
   )
   require_gate(
