@@ -46,10 +46,10 @@ func TestFlowVendorManifestMatchesEmbeddedAssets(t *testing.T) {
 	if json.Unmarshal(raw, &manifest) != nil {
 		t.Fatal("manifest json")
 	}
-	if manifest.Version != "0.1.4" || manifest.SourceCommit != "efc5e63a6a37cc9d1fd9aa437f8808b3a6536acf" {
+	if manifest.Version != "0.1.5" || manifest.SourceCommit != "4b10524cd2a22e136e750ebfef2bf12eb2b7db5a" {
 		t.Fatalf("unexpected pin version=%s commit=%s", manifest.Version, manifest.SourceCommit)
 	}
-	if manifest.RuntimeTGZSHA256 != "sha256:b5e773eeca6eff42432efe4c776e9079132ccaa58f65a48a64bbc5b6a18d55b0" {
+	if manifest.RuntimeTGZSHA256 != "sha256:17a56f0b2899c91847521672bc9b58b82e85e0259dd69f8e9f416949561641c7" {
 		t.Fatalf("unexpected tgz pin %s", manifest.RuntimeTGZSHA256)
 	}
 	for _, entry := range manifest.Files {
