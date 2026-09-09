@@ -1975,12 +1975,20 @@ blast_radius = "fixture-service"
                 ),
             )
             .expect("write profile manifest");
+            let validation_hook = temporary.path().join("fixture-validation-hook");
+            fs::write(&validation_hook, "#!/bin/sh\nexit 0\n")
+                .expect("write validation hook fixture");
+            fs::set_permissions(&validation_hook, fs::Permissions::from_mode(0o500))
+                .expect("protect validation hook fixture");
             fs::write(
                 &hooks,
-                r#"[validation."fixture-valid"]
-program = "/usr/bin/true"
+                format!(
+                    r#"[validation."fixture-valid"]
+program = "{}"
 timeout_seconds = 5
 "#,
+                    validation_hook.display(),
+                ),
             )
             .expect("write hook manifest");
 
