@@ -252,7 +252,27 @@ def validate(workflows)
     "rust_release_qemu_returned"
   )
 
+  # JANUS-462: release publication must override skipped PR-only classifier
+  # ancestors via always(), while refusing failed/cancelled/missing proof with
+  # explicit needs.result checks on every direct publication dependency.
+  rust_release_publication_condition =
+    "always() && github.event_name == 'release' && " \
+    "startsWith(github.event.release.tag_name, 'rust-engine-v') && !cancelled() && " \
+    "needs.check.result == 'success' && needs.image-amd64.result == 'success' && " \
+    "needs.image-arm64.result == 'success'"
+  rust_release_timing_condition =
+    "always() && github.event_name == 'release' && " \
+    "startsWith(github.event.release.tag_name, 'rust-engine-v') && !cancelled()"
+
   rust_image = job!(workflows.fetch(:rust), "image")
+  require_gate(
+    rust_image["needs"] == %w[check image-amd64 image-arm64],
+    "rust_publication_missing_direct_needs"
+  )
+  require_gate(
+    rust_image["if"] == rust_release_publication_condition,
+    "rust_publication_condition_invalid"
+  )
   active_step!(rust_image, "verify protected-main release ancestry")
   active_step!(rust_image, "verify installed release scanner version")
   rust_published_scan = active_step!(rust_image, "scan exact published candidate digest")
@@ -287,6 +307,11 @@ def validate(workflows)
     "upload mode-specific admission receipts"
   )
   rust_timing = job!(workflows.fetch(:rust), "release-timing")
+  require_gate(rust_timing["needs"] == "image", "rust_release_timing_missing_image_need")
+  require_gate(
+    rust_timing["if"] == rust_release_timing_condition,
+    "rust_release_timing_condition_invalid"
+  )
   timing = active_step!(rust_timing, "measure and enforce release latency")
   command!(timing, "for attempt in {1..6}")
   command!(timing, 'test "${image_conclusion}" = success')
@@ -537,6 +562,31 @@ def self_test(workflows)
   assurance_fan_in_missing_family = deep_copy(workflows)
   job!(assurance_fan_in_missing_family[:rust], "check-assurance")["needs"] = ["check-assurance-tests"]
   expect_denied(assurance_fan_in_missing_family, "assurance_fan_in_missing_family") {}
+
+  # JANUS-462: publication must not inherit skipped-classifier silence, and the
+  # terminal timing gate must not allow a false green when proof is absent.
+  publication_without_always = deep_copy(workflows)
+  job!(publication_without_always[:rust], "image")["if"] =
+    "github.event_name == 'release' && startsWith(github.event.release.tag_name, 'rust-engine-v')"
+  expect_denied(publication_without_always, "rust_publication_condition_invalid") {}
+
+  publication_without_proof_check = deep_copy(workflows)
+  job!(publication_without_proof_check[:rust], "image")["if"] =
+    "always() && github.event_name == 'release' && " \
+    "startsWith(github.event.release.tag_name, 'rust-engine-v') && !cancelled()"
+  expect_denied(publication_without_proof_check, "rust_publication_condition_invalid") {}
+
+  publication_missing_amd64_proof = deep_copy(workflows)
+  job!(publication_missing_amd64_proof[:rust], "image")["if"] =
+    "always() && github.event_name == 'release' && " \
+    "startsWith(github.event.release.tag_name, 'rust-engine-v') && !cancelled() && " \
+    "needs.check.result == 'success' && needs.image-arm64.result == 'success'"
+  expect_denied(publication_missing_amd64_proof, "rust_publication_condition_invalid") {}
+
+  release_timing_silent_skip = deep_copy(workflows)
+  job!(release_timing_silent_skip[:rust], "release-timing")["if"] =
+    "github.event_name == 'release' && startsWith(github.event.release.tag_name, 'rust-engine-v')"
+  expect_denied(release_timing_silent_skip, "rust_release_timing_condition_invalid") {}
 end
 
 workflows = {
