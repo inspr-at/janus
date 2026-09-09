@@ -81,6 +81,7 @@ zeroize = "1"
 
 [dev-dependencies]
 age = { version = "=0.12.1", default-features = false, features = ["ssh"] }
+janus-host = { path = "../janus-host", features = ["test-support"] }
 janus-mock = { path = "../janus-mock" }
 proptest = "=1.5.0"
 tempfile = "3"

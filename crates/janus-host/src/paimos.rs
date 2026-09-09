@@ -38,8 +38,10 @@ const MEDIA_TYPE: &str = "application/vnd.paimos.external-stage.v1+json";
 const HANDOFF_SECRET_HEADER: &str = "X-PAIMOS-Handoff-Secret";
 const CONFIG_SCHEMA: &str = "inspr.janus.paimos-dependency-reporter-config.v1";
 const BINDING_SCHEMA: &str = "inspr.janus.paimos-dependency-reporter-binding.v1";
+const MANAGED_CONFIG_SCHEMA: &str = "inspr.janus.paimos-managed-completion-reporter-config.v1";
+const MANAGED_BINDING_SCHEMA: &str = "inspr.janus.paimos-managed-completion-reporter-binding.v1";
 const JOURNAL_SCHEMA: &str = "inspr.janus.paimos-dependency-reporter-journal.v1";
-const SYSTEM_CONFIG_PATH: &str = "/run/janus-paimos-dependency-reporter/config.json";
+pub(crate) const SYSTEM_CONFIG_PATH: &str = "/run/janus-paimos-dependency-reporter/config.json";
 const MAX_CONFIG_BYTES: usize = 32 * 1024;
 const MAX_API_KEY_BYTES: usize = 4 * 1024;
 const MAX_RESPONSE_BYTES: usize = 64 * 1024;
@@ -85,6 +87,30 @@ struct ReporterConfigV1 {
     journal_directory: String,
     expected: ExpectedBindingV1,
     evidence: DependencyEvidenceV1,
+}
+
+/// Root-owned authority for the managed-transaction completion mode. Unlike
+/// the legacy static config, this never predicts an evidence timestamp. The
+/// timestamp is supplied later by the separately validated durable record.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ManagedReporterConfigV1 {
+    schema: String,
+    schema_version: u8,
+    paimos_origin: String,
+    handoff_id: String,
+    api_key_file: String,
+    handoff_secret_file: String,
+    journal_directory: String,
+    expected: ExpectedBindingV1,
+    evidence: ManagedEvidencePolicyV1,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct ManagedEvidencePolicyV1 {
+    kind: String,
+    source: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -286,6 +312,29 @@ pub struct PaimosReporterBindingV1 {
     evidence_observed_at: String,
 }
 
+/// Value-free fingerprint and exact Paimos tuple for one immutable managed
+/// completion configuration. It carries no timestamp and grants no Paimos
+/// authority without the protected config, credentials, and live handoff.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PaimosManagedCompletionBindingV1 {
+    pub(crate) schema: String,
+    pub(crate) schema_version: u8,
+    pub(crate) config_digest: String,
+    pub(crate) handoff_id: String,
+    pub(crate) dependency_key: String,
+    pub(crate) stage_key: String,
+    pub(crate) execution_number: i64,
+    pub(crate) plan_digest: String,
+    pub(crate) predecessor_digest: String,
+    pub(crate) authority_epoch: i64,
+    pub(crate) context_digest: String,
+    pub(crate) credential_epoch: i64,
+    pub(crate) expires_at: String,
+    pub(crate) evidence_kind: String,
+    pub(crate) evidence_source: String,
+}
+
 struct Credentials {
     authorization: Zeroizing<String>,
     handoff_header: Zeroizing<String>,
@@ -323,6 +372,17 @@ pub fn run_from_system_if_bound(binding: &PaimosReporterBindingV1) -> ReporterRe
     run_bound_config(config, binding, 0, false)
 }
 
+pub(crate) fn run_managed_completion_from_path(
+    path: &Path,
+    binding: &PaimosManagedCompletionBindingV1,
+    observed_at: String,
+    owner_uid: u32,
+    allow_loopback_http: bool,
+) -> ReporterResult<()> {
+    let config = load_managed_config(path, owner_uid)?;
+    run_managed_bound_config(config, binding, observed_at, owner_uid, allow_loopback_http)
+}
+
 fn load_system_config() -> ReporterResult<ReporterConfigV1> {
     let raw = read_private_regular(
         Path::new(SYSTEM_CONFIG_PATH),
@@ -332,6 +392,17 @@ fn load_system_config() -> ReporterResult<ReporterConfigV1> {
     )
     .map_err(|_| PaimosReporterError::new("paimos_reporter_config_unavailable"))?;
     decode_strict::<ReporterConfigV1>(&raw, "paimos_reporter_config_invalid")
+}
+
+fn load_managed_config(path: &Path, owner_uid: u32) -> ReporterResult<ManagedReporterConfigV1> {
+    let raw = read_private_regular(
+        path,
+        MAX_CONFIG_BYTES,
+        Some(owner_uid),
+        "paimos_reporter_config_unavailable",
+    )
+    .map_err(|_| PaimosReporterError::new("paimos_reporter_config_unavailable"))?;
+    decode_strict::<ManagedReporterConfigV1>(&raw, "paimos_reporter_config_invalid")
 }
 
 fn reporter_binding(
@@ -360,6 +431,125 @@ fn reporter_binding(
     })
 }
 
+pub(crate) fn managed_reporter_binding(
+    config: &ManagedReporterConfigV1,
+    allow_loopback_http: bool,
+) -> ReporterResult<PaimosManagedCompletionBindingV1> {
+    validate_managed_config(config, allow_loopback_http)?;
+    let canonical = canonical_json_bytes(config)?;
+    Ok(PaimosManagedCompletionBindingV1 {
+        schema: MANAGED_BINDING_SCHEMA.to_string(),
+        schema_version: 1,
+        config_digest: wire_digest(&canonical),
+        handoff_id: config.handoff_id.clone(),
+        dependency_key: config.expected.dependency_key.clone(),
+        stage_key: stage_key_name(config.expected.stage_key).to_string(),
+        execution_number: config.expected.execution_number,
+        plan_digest: config.expected.plan_digest.clone(),
+        predecessor_digest: config.expected.predecessor_digest.clone(),
+        authority_epoch: config.expected.authority_epoch,
+        context_digest: config.expected.context_digest.clone(),
+        credential_epoch: config.expected.credential_epoch,
+        expires_at: config.expected.expires_at.clone(),
+        evidence_kind: config.evidence.kind.clone(),
+        evidence_source: config.evidence.source.clone(),
+    })
+}
+
+/// Serialize the managed-completion authority with recursively sorted object
+/// keys and no insignificant whitespace. This is deliberately the same byte
+/// shape as Nix `builtins.toJSON` for this closed schema (strings, booleans,
+/// non-negative integers, arrays, objects, and null; no floating-point data).
+pub(crate) fn canonical_json_bytes<T: Serialize>(value: &T) -> ReporterResult<Vec<u8>> {
+    let value = serde_json::to_value(value)
+        .map_err(|_| PaimosReporterError::new("paimos_reporter_config_invalid"))?;
+    let mut output = Vec::new();
+    write_canonical_json(&value, &mut output)?;
+    Ok(output)
+}
+
+fn write_canonical_json(value: &serde_json::Value, output: &mut Vec<u8>) -> ReporterResult<()> {
+    match value {
+        serde_json::Value::Null => output.extend_from_slice(b"null"),
+        serde_json::Value::Bool(value) => {
+            output.extend_from_slice(if *value { &b"true"[..] } else { &b"false"[..] })
+        }
+        serde_json::Value::Number(value) => {
+            if !value.is_i64() && !value.is_u64() {
+                return Err(PaimosReporterError::new("paimos_reporter_config_invalid"));
+            }
+            output.extend_from_slice(value.to_string().as_bytes());
+        }
+        serde_json::Value::String(value) => {
+            let encoded = serde_json::to_string(value)
+                .map_err(|_| PaimosReporterError::new("paimos_reporter_config_invalid"))?;
+            output.extend_from_slice(encoded.as_bytes());
+        }
+        serde_json::Value::Array(values) => {
+            output.push(b'[');
+            for (index, value) in values.iter().enumerate() {
+                if index != 0 {
+                    output.push(b',');
+                }
+                write_canonical_json(value, output)?;
+            }
+            output.push(b']');
+        }
+        serde_json::Value::Object(values) => {
+            output.push(b'{');
+            let mut keys = values.keys().collect::<Vec<_>>();
+            keys.sort_unstable();
+            for (index, key) in keys.into_iter().enumerate() {
+                if index != 0 {
+                    output.push(b',');
+                }
+                let encoded = serde_json::to_string(key)
+                    .map_err(|_| PaimosReporterError::new("paimos_reporter_config_invalid"))?;
+                output.extend_from_slice(encoded.as_bytes());
+                output.push(b':');
+                write_canonical_json(&values[key], output)?;
+            }
+            output.push(b'}');
+        }
+    }
+    Ok(())
+}
+
+fn validate_managed_reporter_binding(
+    config: &ManagedReporterConfigV1,
+    binding: &PaimosManagedCompletionBindingV1,
+    allow_loopback_http: bool,
+) -> ReporterResult<()> {
+    if managed_reporter_binding(config, allow_loopback_http)? != *binding {
+        return Err(PaimosReporterError::new("paimos_reporter_binding_refused"));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_managed_reporter_binding_shape(
+    binding: &PaimosManagedCompletionBindingV1,
+) -> ReporterResult<()> {
+    if binding.schema != MANAGED_BINDING_SCHEMA
+        || binding.schema_version != 1
+        || !valid_wire_digest(&binding.config_digest)
+        || !valid_handoff_id(&binding.handoff_id)
+        || !valid_symbol(&binding.dependency_key)
+        || binding.stage_key != "deployment"
+        || binding.execution_number <= 0
+        || !valid_wire_digest(&binding.plan_digest)
+        || !valid_wire_digest(&binding.predecessor_digest)
+        || binding.authority_epoch <= 0
+        || !valid_wire_digest(&binding.context_digest)
+        || binding.credential_epoch <= 0
+        || !valid_timestamp(&binding.expires_at)
+        || binding.evidence_kind != "credential_handoff"
+        || binding.evidence_source != "managed_completion_record"
+    {
+        return Err(PaimosReporterError::new("paimos_reporter_binding_refused"));
+    }
+    Ok(())
+}
+
 fn validate_reporter_binding(
     config: &ReporterConfigV1,
     binding: &PaimosReporterBindingV1,
@@ -379,6 +569,31 @@ fn run_bound_config(
 ) -> ReporterResult<()> {
     validate_reporter_binding(&config, binding, allow_loopback_http)?;
     Reporter::new(config, owner_uid, allow_loopback_http)?.run()
+}
+
+fn run_managed_bound_config(
+    config: ManagedReporterConfigV1,
+    binding: &PaimosManagedCompletionBindingV1,
+    observed_at: String,
+    owner_uid: u32,
+    allow_loopback_http: bool,
+) -> ReporterResult<()> {
+    validate_managed_reporter_binding(&config, binding, allow_loopback_http)?;
+    if !valid_timestamp(&observed_at) {
+        return Err(PaimosReporterError::new("paimos_reporter_evidence_invalid"));
+    }
+    let runtime = ReporterConfigV1 {
+        schema: CONFIG_SCHEMA.to_string(),
+        schema_version: 1,
+        paimos_origin: config.paimos_origin,
+        handoff_id: config.handoff_id,
+        api_key_file: config.api_key_file,
+        handoff_secret_file: config.handoff_secret_file,
+        journal_directory: config.journal_directory,
+        expected: config.expected,
+        evidence: DependencyEvidenceV1::CredentialHandoff { observed_at },
+    };
+    Reporter::new(runtime, owner_uid, allow_loopback_http)?.run()
 }
 
 fn stage_key_name(stage: StageKey) -> &'static str {
@@ -701,6 +916,35 @@ fn validate_config(config: &ReporterConfigV1, allow_loopback_http: bool) -> Repo
     Ok(())
 }
 
+fn validate_managed_config(
+    config: &ManagedReporterConfigV1,
+    allow_loopback_http: bool,
+) -> ReporterResult<()> {
+    normalized_origin(&config.paimos_origin, allow_loopback_http)?;
+    if config.schema != MANAGED_CONFIG_SCHEMA
+        || config.schema_version != 1
+        || !valid_handoff_id(&config.handoff_id)
+        || config.api_key_file == config.handoff_secret_file
+        || !absolute_path(&config.api_key_file)
+        || !absolute_path(&config.handoff_secret_file)
+        || !absolute_path(&config.journal_directory)
+        || !valid_symbol(&config.expected.dependency_key)
+        || config.expected.stage_key != StageKey::Deployment
+        || config.expected.execution_number <= 0
+        || config.expected.authority_epoch <= 0
+        || config.expected.credential_epoch <= 0
+        || !valid_wire_digest(&config.expected.plan_digest)
+        || !valid_wire_digest(&config.expected.predecessor_digest)
+        || !valid_wire_digest(&config.expected.context_digest)
+        || !valid_timestamp(&config.expected.expires_at)
+        || config.evidence.kind != "credential_handoff"
+        || config.evidence.source != "managed_completion_record"
+    {
+        return Err(PaimosReporterError::new("paimos_reporter_config_invalid"));
+    }
+    Ok(())
+}
+
 fn normalized_origin(raw: &str, allow_loopback_http: bool) -> ReporterResult<String> {
     let parsed =
         Url::parse(raw).map_err(|_| PaimosReporterError::new("paimos_reporter_origin_refused"))?;
@@ -903,7 +1147,7 @@ fn decode_response<T: for<'de> Deserialize<'de>>(response: ureq::Response) -> Re
     decode_strict(&raw, "paimos_reporter_response_invalid")
 }
 
-fn decode_strict<T: for<'de> Deserialize<'de>>(
+pub(crate) fn decode_strict<T: for<'de> Deserialize<'de>>(
     raw: &[u8],
     reason: &'static str,
 ) -> ReporterResult<T> {

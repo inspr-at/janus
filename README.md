@@ -487,11 +487,14 @@ ordinary API. See the
 
 For one explicitly bound generated create, Rust can retain the already
 validated host activation evidence before lifecycle completion and notify the
-existing Paimos dependency reporter afterward. The optional binding is one
-root-owned fixed-path file; without it, managed transactions behave exactly as
-before. Reporting runs outside the request, never edits reporter config, and a
-report failure cannot undo a completed secret transaction. The exact binding,
-durability, restart, custody, and cycle-prevention rules are part of the
+existing Paimos dependency reporter afterward. The network-none transaction
+daemon writes only a fixed, private pending-to-ready evidence record as
+uid/gid `100:993`; a separate privileged no-argument one-shot validates the
+root-owned binding and performs reporting with the existing credentials and
+egress. Without the catalog capability, managed transactions behave exactly as
+before. Reporting never edits reporter config, and a report failure cannot
+undo a completed secret transaction. The exact binding, timestamp,
+durability, restart, custody, digest, and cycle-prevention rules are part of the
 [`typed transaction protocol`](docs/managed-web-transaction.md#optional-paimos-completion-producer).
 
 ### Paimos dependency evidence
@@ -584,7 +587,7 @@ are checked by `scripts/check-paimos-external-stage-pins.py`.
 | Local evidence assertion | Config carries one trusted positive `authorization` or `credential_handoff` timestamp from an already-reviewed Janus transaction; the reporter does not independently certify transaction or target readiness. |
 | Journal / crash replay | Accept and report bodies are journaled before send; ambiguous transport failures replay identical bytes and idempotency keys without a new pull. |
 | Server-side freshness | Paimos enforces registration, handoff validity, revocation, rotation, sequence, and expiry; stale, rotated, or revoked handoffs fail closed at pull or mutation. |
-| Narrow `janusd` producer | One optional fixed-path mapping may invoke this same reporter only after an exact generated-create journal reaches external-activation completion. Janus never writes reporter config, adds an executable selector, or turns approval into Paimos authority. |
+| Narrow `janusd` producer | One optional catalog capability lets the network-none daemon publish only an immutable value-free record after exact host evidence and external-activation completion. A separate privileged fixed-path one-shot invokes the reporter; the daemon never receives config, credentials, egress, or an executable selector. |
 
 **What this evidence proves:** one Janus dependency reporter, bound to one
 reviewed handoff, was configured with one asserted positive fact

@@ -66,56 +66,132 @@ and host executor all use the same operation and generation binding.
 
 ## Optional Paimos completion producer
 
-One generated create may opt into a completion-only producer by installing
-`/etc/janus/managed-completion-paimos-binding.json`. Absence of that fixed file
-preserves the previous behavior and emits no Paimos report. There is no argv,
-environment, executable, callback, URL, or reporter-config path selector.
+One generated create may opt in through an
+`inspr.janus.managed-completion-capability.v1` object on its existing reviewed
+catalog entry. The capability contains only the exact `op_` reference and the
+SHA-256 digest of one privileged binding. No capability, or more than one
+enabled capability, preserves the previous no-report behavior or fails closed
+as ambiguous. There is no URL, dependency, wait edge, executable, callback,
+credential, or path selector in the catalog or request schemas.
 
-The binding is strict schema
-`inspr.janus.managed-completion-paimos-binding.v1`: one exact operation,
-create/generated catalog key, secret and scope, delivery generation and
-revocation epoch, plan and target fingerprints, producer key ID, and one
-`inspr.janus.paimos-dependency-reporter-binding.v1` value. The nested reporter
-binding pins the canonical digest of the existing fixed reporter config plus
-its handoff ID, dependency/stage/execution, plan/predecessor/context digests,
-authority and credential epochs, expiry, evidence kind, and original reporter
-observation timestamp. A different current reporter config is refused; Janus
-never writes or replaces it.
+The network-none `janusd-web-transactiond` remains uid/gid `100:993`, without
+capabilities or a writable root filesystem. It owns only the existing state
+mount and the fixed private directory
+`/var/lib/janus-managed-central/completion-dispatch`. After the existing host
+evidence validator accepts the exact delivery generation, but before lifecycle
+activation, it fsyncs one bounded `inspr.janus.managed-completion-record.v2`
+as `pending.json`. The record retains the original heartbeat, process, and
+probe observation times, their acceptance time, preparation and preflight
+times, and the exact transaction/catalog fingerprints. It contains no value,
+ciphertext, packet, reporter configuration, Paimos credential, origin, or
+payload.
 
-Before lifecycle activation, and only after the existing generation-bound
-host evidence validation succeeds, Janus fsyncs one integrity-protected
-`completion.json` record in the fixed
-`/var/lib/janus/managed-completion-dispatch` directory. The record retains the
-original heartbeat, process, and probe timestamps, their accepted-at time,
-the preparation and preflight times, generation, and binding digest. It never
-contains the generated value, ciphertext, packet, credential, reporter URL,
-or reporter payload. A retry with the same evidence reuses the record and its
-original times; conflicting evidence or binding fails closed.
+The record schema is closed to: `schema`, `schema_version`, `binding_digest`,
+`operation_ref`, `operation_id`, `operation_kind`, `source`, `host_ref`,
+`service_ref`, `slot_ref`, `declaration_fingerprint`, `secret_ref`, `scope_ref`,
+`generation`, `revocation_epoch`, `plan_fingerprint`, `target_fingerprint`,
+`producer_key_id`, `prepared_at_unix_secs`, `preflighted_at_unix_secs`,
+`evidence_accepted_at_unix_secs`, `activation_evidence`, and `integrity_hash`.
+The nested activation evidence contains only `generation`, `materialized`,
+`process_state`, `probe_state`, and the heartbeat/process/probe observation
+seconds. There is no `value_returned` completion flag; readiness is represented
+only by the same inode's `pending.json` to `ready.json` rename.
 
-The background worker considers only that one binding-derived record and its
-exact integrity-checked lifecycle journal. It never scans completed journal
-history or stamps an old completion with the current time. Eligibility is
-exactly `completed` with reason `entry_external_activation_ok`, create,
-generated source, and matching operation, secret, generation, plan, target,
-and preflight receipt. Prepared, failed, rolled-back, local-hook completion,
-wrong-generation, wrong-target, or missing-record states cause no reporter
-mutation.
+Only an exact integrity-checked lifecycle receipt in phase `completed` with
+reason `entry_external_activation_ok` can atomically rename that same inode to
+`ready.json`. The producer does not rewrite the record during the transition.
+A crash after completion is reconciled by opening only the single
+capability-bound transaction journal; completed history is not searched and
+no observation is stamped with restart time. Prepared, failed, rolled-back,
+local-hook completion, wrong-generation, wrong-target, stale, future, or
+conflicting states never become ready.
 
-Dispatch is outside the Unix request, serialized by a private process lock,
-and retried at most three times per notification. It calls the existing fixed
-Paimos reporter in-process, which retains its own per-handoff lock, exact
-accept-1/terminal-2 request journal, and idempotency keys. A reporter failure
-does not roll back or change the successful secret transaction; restart or an
-idempotent duplicate finalize can notify it again. Because reporting begins
-only after durable Janus completion and the lifecycle transaction has no
-Paimos wait edge, the transaction cannot wait on the dependency it satisfies.
+The no-argument `janus-paimos-managed-completion-reporter` is a separate
+privileged one-shot. It reads only root-owned
+`/run/janus-paimos-dependency-reporter/managed-completion-binding.json`, the
+existing fixed reporter config, and the daemon-owned fixed `ready.json`. The
+strict `inspr.janus.managed-completion-paimos-binding.v2` pins the operation,
+catalog key, secret/scope, generation/revocation, local fingerprints, producer
+key, and an `inspr.janus.paimos-managed-completion-reporter-binding.v1` tuple.
+That nested tuple pins the immutable config digest and exact existing Paimos
+handoff/deployment/lineage/authority/credential/expiry values. Human approval
+cannot construct Paimos authority; the protected config, credentials, and live
+Paimos pull must still agree.
 
-The binding and reporter config must be root-owned mode `0600`, regular,
-single-link files. The completion record directory must already exist,
-root-owned mode `0700`, and may contain only `.completion.lock` and the single
-bounded record. The record and lock are mode `0600`, regular, single-link
-files. Symlinks, hardlinks, owner/mode changes, oversized input, extra files,
-duplicate/unknown JSON fields, or an ambiguous catalog match are refused.
+Managed reporter config uses
+`inspr.janus.paimos-managed-completion-reporter-config.v1`. It fixes
+`credential_handoff` from `managed_completion_record` but deliberately has no
+observation timestamp. The one-shot derives outgoing `observed_at` from the
+newest of the three original host observations. Every observation must be at
+or after preparation and at or before the original acceptance time; the oldest
+must be no more than 120 seconds old at acceptance. Retrying preserves those
+bytes. The legacy static reporter schema and behavior are unchanged.
+
+The managed config is this closed shape (all shown paths and values are
+synthetic):
+
+```json
+{
+  "schema": "inspr.janus.paimos-managed-completion-reporter-config.v1",
+  "schema_version": 1,
+  "paimos_origin": "https://paimos.example",
+  "handoff_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+  "api_key_file": "/run/credentials/paimos-api-key",
+  "handoff_secret_file": "/run/credentials/paimos-handoff-secret",
+  "journal_directory": "/var/lib/janus-paimos-dependency-reporter",
+  "expected": {
+    "dependency_key": "privileged-handoff",
+    "stage_key": "deployment",
+    "execution_number": 1,
+    "plan_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    "predecessor_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+    "authority_epoch": 1,
+    "context_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+    "credential_epoch": 1,
+    "expires_at": "2099-01-01T00:00:00Z"
+  },
+  "evidence": {
+    "kind": "credential_handoff",
+    "source": "managed_completion_record"
+  }
+}
+```
+
+The privileged one-shot invokes the existing reporter implementation and
+therefore keeps its per-handoff lock, fsynced request journal, exact accept-1
+and terminal-2 bodies, and idempotency keys. An ambiguous terminal response is
+replayed with identical bytes and key. Reporting occurs only after durable
+lifecycle completion and outside the transaction daemon; failure remains
+pending and never rolls back a successful secret transaction. Because neither
+capability nor binding admits an inbound dependency/wait selector, the
+evidencing transaction cannot wait on the dependency it satisfies.
+
+With no arguments, a missing binding or ready record exits successfully with
+no credential read or network call. Once both exist, a missing config,
+malformed or conflicting state, or an unsuccessful report exits nonzero with a
+fixed value-free reason. A completed reporter journal exits successfully
+without another mutation. The binary rejects every argument.
+
+The root binding and reporter config are mode `0600`, root-owned, regular,
+single-link files. The daemon directory is mode `0700`, owned by `100:993`,
+and contains only `.producer.lock` plus either `pending.json` or `ready.json`;
+producer files are mode `0600`, owner `100:993`, regular, and single-link.
+Both sides recheck opened inode identity and bounded size. Symlinks, hardlinks,
+owner/mode changes, extra files, duplicate/unknown JSON fields, missing or
+changed authority, and excess capacity are refused before transport.
+
+Binding digests use UTF-8 JSON with recursively lexicographically sorted object
+keys and no insignificant whitespace, matching `builtins.toJSON` for this
+closed integer/string/boolean/array/object/null schema. The independently
+readable golden fixture is
+[`managed-completion-binding.golden.json`](../examples/paimos-dependency-reporter/managed-completion-binding.golden.json),
+whose digest is
+`sha256:797bd2d85f95c3c5a09a87986526ca6695e5e1e34f2565293d6ae0bf314de757`.
+The Rust oracle is executable with
+`cargo test -p janus-host managed_completion_binding_digest_matches_cross_language_golden`;
+the Nix-side equivalent is `builtins.hashString "sha256"
+(builtins.toJSON (builtins.fromJSON (builtins.readFile fixture)))`, prefixed
+with `sha256:` when placed in the capability.
 
 ## Replacement safety
 
@@ -195,10 +271,11 @@ JANUS_MANAGED_WEB_TRANSACTION_ALLOWED_UID=65532
 JANUS_LIFECYCLE_TOMBSTONE_DIR=/var/lib/janus/tombstones
 ```
 
-The optional completion producer uses only the fixed binding path documented
-above and the reporter's existing fixed
-`/run/janus-paimos-dependency-reporter/config.json`; neither path is accepted
-from the web peer.
+The optional completion producer uses only its catalog capability and fixed
+daemon-owned state directory; it cannot read the root binding, reporter config,
+credentials, or network. The separate privileged one-shot uses the fixed
+binding and `/run/janus-paimos-dependency-reporter/config.json` paths described
+above. None is accepted from the web peer.
 
 It also uses the same exact-scope, Age backend, release-admission, migration,
 and scope-transfer environment as lifecycle entry. The socket parent and
@@ -246,6 +323,12 @@ The catalog is strict JSON:
         "generation": 1,
         "revocation_epoch": 1,
         "envelope_ttl_seconds": 900
+      },
+      "completion": {
+        "schema": "inspr.janus.managed-completion-capability.v1",
+        "schema_version": 1,
+        "operation_ref": "op_opaque00000001",
+        "binding_digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444"
       }
     }
   ]

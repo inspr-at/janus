@@ -1,59 +1,33 @@
-//! One exact managed-create completion to one existing Paimos reporter.
+//! Networkless producer for one managed-create completion.
 //!
-//! The optional root-owned binding is a closed capability: it names one
-//! reviewed transaction/catalog tuple and one value-free reporter tuple. The
-//! durable record is written before lifecycle completion and is the only
-//! record considered on restart; historical lifecycle journals are never
-//! scanned to manufacture evidence.
+//! This module never reads reporter configuration or credentials and never
+//! performs network I/O. It persists one immutable accepted-evidence record
+//! before lifecycle completion, then moves the same inode from `pending.json`
+//! to `ready.json` only after the exact bound completion receipt exists.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use super::{EntryCompletionReceipt, EntryPhase};
 use anyhow::{Context, Result};
 use fs2::FileExt;
-use janus_host::paimos::PaimosReporterBindingV1;
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use janus_host::paimos_completion::{
+    decode_record, AcceptedActivationEvidenceV1, ManagedCompletionCapabilityV1,
+    ManagedCompletionRecordV2, RECORD_SCHEMA,
+};
 
-use super::{EntryCompletionReceipt, EntryPhase};
-
-const BINDING_SCHEMA: &str = "inspr.janus.managed-completion-paimos-binding.v1";
-const RECORD_SCHEMA: &str = "inspr.janus.managed-completion-dispatch-record.v1";
-const MAX_BINDING_BYTES: usize = 64 * 1024;
+const SYSTEM_RECORD_DIRECTORY: &str = "/var/lib/janus-managed-central/completion-dispatch";
+const PENDING_FILE: &str = "pending.json";
+const READY_FILE: &str = "ready.json";
+const LOCK_FILE: &str = ".producer.lock";
 const MAX_RECORD_BYTES: usize = 64 * 1024;
 const MAX_DIRECTORY_ENTRIES: usize = 2;
-const ACTIVATION_FRESHNESS_SECONDS: u64 = 120;
-const ACTIVATION_CLOCK_SKEW_SECONDS: u64 = 30;
-const RECORD_FILE: &str = "completion.json";
-const LOCK_FILE: &str = ".completion.lock";
-const SYSTEM_BINDING_PATH: &str = "/etc/janus/managed-completion-paimos-binding.json";
-const SYSTEM_RECORD_DIRECTORY: &str = "/var/lib/janus/managed-completion-dispatch";
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-struct CompletionBindingV1 {
-    schema: String,
-    schema_version: u8,
-    operation_ref: String,
-    operation_kind: String,
-    source: String,
-    host_ref: String,
-    service_ref: String,
-    slot_ref: String,
-    declaration_fingerprint: String,
-    secret_ref: String,
-    scope_ref: String,
-    generation: u64,
-    revocation_epoch: u64,
-    plan_fingerprint: String,
-    target_fingerprint: String,
-    producer_key_id: String,
-    reporter: PaimosReporterBindingV1,
-}
+const PRODUCER_UID: u32 = 100;
+const PRODUCER_GID: u32 = 993;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct CompletionCandidate {
@@ -76,361 +50,277 @@ pub(super) struct CompletionCandidate {
     pub(super) preflighted_at_unix_secs: u64,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub(super) struct AcceptedActivationEvidence {
-    pub(super) generation: u64,
-    pub(super) materialized: bool,
-    pub(super) process_state: String,
-    pub(super) probe_state: String,
-    pub(super) heartbeat_observed_at_unix_secs: u64,
-    pub(super) process_observed_at_unix_secs: u64,
-    pub(super) probe_observed_at_unix_secs: u64,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-struct CompletionRecordV1 {
-    schema: String,
-    schema_version: u8,
-    binding_digest: String,
-    operation_ref: String,
-    operation_id: String,
-    generation: u64,
-    prepared_at_unix_secs: u64,
-    preflighted_at_unix_secs: u64,
-    evidence_accepted_at_unix_secs: u64,
-    activation_evidence: AcceptedActivationEvidence,
-    value_returned: bool,
-    integrity_hash: String,
-}
-
-pub(super) trait ReporterDispatch: Send + Sync {
-    fn validate(&self, binding: &PaimosReporterBindingV1) -> Result<()>;
-    fn run(&self, binding: &PaimosReporterBindingV1) -> Result<()>;
-}
-
-struct SystemReporterDispatch;
-
-impl ReporterDispatch for SystemReporterDispatch {
-    fn validate(&self, binding: &PaimosReporterBindingV1) -> Result<()> {
-        janus_host::paimos::validate_system_binding(binding)
-            .map_err(|error| anyhow::anyhow!(error.reason_code()))
-    }
-
-    fn run(&self, binding: &PaimosReporterBindingV1) -> Result<()> {
-        janus_host::paimos::run_from_system_if_bound(binding)
-            .map_err(|error| anyhow::anyhow!(error.reason_code()))
-    }
-}
-
 pub(super) struct CompletionProducer {
-    binding: CompletionBindingV1,
-    binding_digest: String,
-    record_path: PathBuf,
+    capability: ManagedCompletionCapabilityV1,
+    directory: PathBuf,
+    pending_path: PathBuf,
+    ready_path: PathBuf,
     owner_uid: u32,
-    reporter: Arc<dyn ReporterDispatch>,
+    owner_gid: u32,
     record_lock: Mutex<()>,
     _process_lock: File,
 }
 
 impl CompletionProducer {
-    pub(super) fn load_optional_system() -> Result<Option<Self>> {
-        let path = Path::new(SYSTEM_BINDING_PATH);
-        match fs::symlink_metadata(path) {
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(_) => anyhow::bail!("completion binding metadata unavailable"),
-            Ok(_) => Self::load(
-                path,
-                Path::new(SYSTEM_RECORD_DIRECTORY),
-                0,
-                Arc::new(SystemReporterDispatch),
-            )
-            .map(Some),
-        }
+    pub(super) fn load_system(capability: ManagedCompletionCapabilityV1) -> Result<Self> {
+        Self::load(
+            capability,
+            Path::new(SYSTEM_RECORD_DIRECTORY),
+            PRODUCER_UID,
+            PRODUCER_GID,
+        )
     }
 
     fn load(
-        path: &Path,
-        record_directory: &Path,
+        capability: ManagedCompletionCapabilityV1,
+        directory: &Path,
         owner_uid: u32,
-        reporter: Arc<dyn ReporterDispatch>,
+        owner_gid: u32,
     ) -> Result<Self> {
-        let raw = read_private_regular(path, MAX_BINDING_BYTES, owner_uid)
-            .context("completion binding unavailable")?;
-        let binding: CompletionBindingV1 =
-            decode_strict(&raw).context("completion binding invalid")?;
-        validate_binding(&binding)?;
-        validate_private_directory(record_directory, owner_uid)?;
-        enforce_directory_capacity(record_directory)?;
-        let process_lock = acquire_process_lock(record_directory, owner_uid)?;
-        reporter
-            .validate(&binding.reporter)
-            .context("completion reporter binding refused")?;
-        let canonical = serde_json::to_vec(&binding).context("completion binding invalid")?;
-        let binding_digest = format!("sha256:{:x}", Sha256::digest(canonical));
-        let record_path = record_directory.join(RECORD_FILE);
+        capability
+            .validate()
+            .map_err(|error| anyhow::anyhow!(error.reason_code()))?;
+        validate_private_directory(directory, owner_uid, owner_gid)?;
+        enforce_directory_capacity(directory)?;
+        let process_lock = acquire_process_lock(directory, owner_uid, owner_gid)?;
         Ok(Self {
-            binding,
-            binding_digest,
-            record_path,
+            capability,
+            directory: directory.to_path_buf(),
+            pending_path: directory.join(PENDING_FILE),
+            ready_path: directory.join(READY_FILE),
             owner_uid,
-            reporter,
+            owner_gid,
             record_lock: Mutex::new(()),
             _process_lock: process_lock,
         })
     }
 
-    pub(super) fn matches_candidate(&self, candidate: &CompletionCandidate) -> bool {
-        self.binding.operation_ref == candidate.operation_ref
-            && self.binding.operation_kind == candidate.operation_kind
-            && self.binding.source == candidate.source
-            && self.binding.host_ref == candidate.host_ref
-            && self.binding.service_ref == candidate.service_ref
-            && self.binding.slot_ref == candidate.slot_ref
-            && self.binding.declaration_fingerprint == candidate.declaration_fingerprint
-            && self.binding.secret_ref == candidate.secret_ref
-            && self.binding.scope_ref == candidate.scope_ref
-            && self.binding.generation == candidate.generation
-            && self.binding.revocation_epoch == candidate.revocation_epoch
-            && self.binding.plan_fingerprint == candidate.plan_fingerprint
-            && self.binding.target_fingerprint == candidate.target_fingerprint
-            && self.binding.producer_key_id == candidate.producer_key_id
-    }
-
-    pub(super) fn operation_ref(&self) -> &str {
-        &self.binding.operation_ref
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn matches_catalog_key(
-        &self,
-        operation_kind: &str,
-        source: &str,
-        host_ref: &str,
-        service_ref: &str,
-        slot_ref: &str,
-        declaration_fingerprint: &str,
-        secret_ref: &str,
-        scope_ref: &str,
-        generation: u64,
-        revocation_epoch: u64,
-        producer_key_id: &str,
-    ) -> bool {
-        self.binding.operation_kind == operation_kind
-            && self.binding.source == source
-            && self.binding.host_ref == host_ref
-            && self.binding.service_ref == service_ref
-            && self.binding.slot_ref == slot_ref
-            && self.binding.declaration_fingerprint == declaration_fingerprint
-            && self.binding.secret_ref == secret_ref
-            && self.binding.scope_ref == scope_ref
-            && self.binding.generation == generation
-            && self.binding.revocation_epoch == revocation_epoch
-            && self.binding.producer_key_id == producer_key_id
+    #[cfg(test)]
+    pub(super) fn load_for_test(
+        capability: ManagedCompletionCapabilityV1,
+        directory: &Path,
+        owner_uid: u32,
+        owner_gid: u32,
+    ) -> Result<Self> {
+        Self::load(capability, directory, owner_uid, owner_gid)
     }
 
     pub(super) fn persist_accepted(
         &self,
         candidate: &CompletionCandidate,
-        evidence: AcceptedActivationEvidence,
+        evidence: AcceptedActivationEvidenceV1,
         accepted_at: SystemTime,
     ) -> Result<bool> {
-        if self.binding.operation_ref != candidate.operation_ref {
-            return Ok(false);
+        if candidate.operation_ref != self.capability.operation_ref {
+            anyhow::bail!("completion operation conflicts with reviewed capability");
         }
-        if !self.matches_candidate(candidate) {
-            anyhow::bail!("completion transaction conflicts with protected binding");
-        }
-        self.reporter
-            .validate(&self.binding.reporter)
-            .context("completion reporter binding changed")?;
-        let accepted_at = unix_seconds(accepted_at)?;
-        if evidence.generation != candidate.generation
-            || candidate.prepared_at_unix_secs == 0
-            || candidate.preflighted_at_unix_secs == 0
-        {
-            anyhow::bail!("completion evidence binding invalid");
-        }
-        let mut record = CompletionRecordV1 {
-            schema: RECORD_SCHEMA.to_string(),
-            schema_version: 1,
-            binding_digest: self.binding_digest.clone(),
-            operation_ref: candidate.operation_ref.clone(),
-            operation_id: candidate.operation_id.clone(),
-            generation: candidate.generation,
-            prepared_at_unix_secs: candidate.prepared_at_unix_secs,
-            preflighted_at_unix_secs: candidate.preflighted_at_unix_secs,
-            evidence_accepted_at_unix_secs: accepted_at,
-            activation_evidence: evidence,
-            value_returned: false,
-            integrity_hash: String::new(),
-        };
-        if !record_evidence_is_valid(&record) {
-            anyhow::bail!("completion evidence is not positive and fresh");
-        }
-        record.integrity_hash = record_hash(&record)?;
+
         let _guard = self
             .record_lock
             .lock()
             .map_err(|_| anyhow::anyhow!("completion record lock poisoned"))?;
-        match read_record_if_present(&self.record_path, self.owner_uid)? {
-            Some(existing) if record_matches_candidate(&existing, candidate, &record) => Ok(true),
-            Some(_) => anyhow::bail!("completion record conflicts with existing binding"),
-            None => {
+        enforce_directory_capacity(&self.directory)?;
+        let pending = read_record_if_present(&self.pending_path, self.owner_uid, self.owner_gid)?;
+        let ready = read_record_if_present(&self.ready_path, self.owner_uid, self.owner_gid)?;
+        let accepted_at_unix_secs = match (&pending, &ready) {
+            (Some(existing), None) | (None, Some(existing)) => {
+                existing.evidence_accepted_at_unix_secs
+            }
+            (None, None) => unix_seconds(accepted_at)?,
+            (Some(_), Some(_)) => {
+                anyhow::bail!("completion record conflicts with existing evidence")
+            }
+        };
+        let mut proposed = ManagedCompletionRecordV2 {
+            schema: RECORD_SCHEMA.to_string(),
+            schema_version: 1,
+            binding_digest: self.capability.binding_digest.clone(),
+            operation_ref: candidate.operation_ref.clone(),
+            operation_id: candidate.operation_id.clone(),
+            operation_kind: candidate.operation_kind.clone(),
+            source: candidate.source.clone(),
+            host_ref: candidate.host_ref.clone(),
+            service_ref: candidate.service_ref.clone(),
+            slot_ref: candidate.slot_ref.clone(),
+            declaration_fingerprint: candidate.declaration_fingerprint.clone(),
+            secret_ref: candidate.secret_ref.clone(),
+            scope_ref: candidate.scope_ref.clone(),
+            generation: candidate.generation,
+            revocation_epoch: candidate.revocation_epoch,
+            plan_fingerprint: candidate.plan_fingerprint.clone(),
+            target_fingerprint: candidate.target_fingerprint.clone(),
+            producer_key_id: candidate.producer_key_id.clone(),
+            prepared_at_unix_secs: candidate.prepared_at_unix_secs,
+            preflighted_at_unix_secs: candidate.preflighted_at_unix_secs,
+            evidence_accepted_at_unix_secs: accepted_at_unix_secs,
+            activation_evidence: evidence,
+            integrity_hash: String::new(),
+        };
+        proposed
+            .seal()
+            .map_err(|error| anyhow::anyhow!(error.reason_code()))?;
+
+        match (pending, ready) {
+            (Some(existing), None) | (None, Some(existing))
+                if record_matches_proposed(&existing, &proposed) =>
+            {
+                Ok(true)
+            }
+            (None, None) => {
                 write_private_atomic_new(
-                    &self.record_path,
-                    &serde_json::to_vec(&record)?,
+                    &self.pending_path,
+                    &serde_json::to_vec(&proposed)?,
                     self.owner_uid,
+                    self.owner_gid,
                 )?;
                 Ok(true)
             }
+            _ => anyhow::bail!("completion record conflicts with existing evidence"),
         }
     }
 
-    pub(super) fn dispatch_if_eligible(&self, receipt: &EntryCompletionReceipt) -> Result<bool> {
+    pub(super) fn operation_ref(&self) -> &str {
+        &self.capability.operation_ref
+    }
+
+    pub(super) fn needs_reconciliation(&self) -> Result<bool> {
         let _guard = self
             .record_lock
             .lock()
             .map_err(|_| anyhow::anyhow!("completion record lock poisoned"))?;
-        let Some(record) = read_record_if_present(&self.record_path, self.owner_uid)? else {
-            return Ok(false);
-        };
-        if record.binding_digest != self.binding_digest
-            || record.operation_ref != self.binding.operation_ref
-            || record.operation_id != receipt.operation_id
-            || record.generation != receipt.generation
-            || record.preflighted_at_unix_secs != receipt.preflighted_at_unix_secs
-            || record.activation_evidence.generation != receipt.generation
-            || receipt.secret_ref != self.binding.secret_ref
-            || receipt.mode != "generated"
-            || receipt.operation_kind != "create"
-            || receipt.plan_fingerprint != self.binding.plan_fingerprint
-            || receipt.target_fingerprint != self.binding.target_fingerprint
-        {
-            anyhow::bail!("completion record no longer matches transaction");
-        }
+        enforce_directory_capacity(&self.directory)?;
+        Ok(read_record_if_present(&self.pending_path, self.owner_uid, self.owner_gid)?.is_some())
+    }
+
+    /// Publish eligibility by moving, never rewriting, the accepted record.
+    pub(super) fn mark_ready(&self, receipt: &EntryCompletionReceipt) -> Result<bool> {
+        let _guard = self
+            .record_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("completion record lock poisoned"))?;
+        enforce_directory_capacity(&self.directory)?;
         if receipt.phase != EntryPhase::Completed
             || receipt.reason_code != "entry_external_activation_ok"
         {
             return Ok(false);
         }
-        self.reporter
-            .run(&self.binding.reporter)
-            .context("completion reporter failed")?;
+        if let Some(ready) =
+            read_record_if_present(&self.ready_path, self.owner_uid, self.owner_gid)?
+        {
+            validate_completion_receipt(&ready, receipt)?;
+            return Ok(true);
+        }
+        let Some(pending) =
+            read_record_if_present(&self.pending_path, self.owner_uid, self.owner_gid)?
+        else {
+            return Ok(false);
+        };
+        validate_completion_receipt(&pending, receipt)?;
+        let before = fs::symlink_metadata(&self.pending_path)?;
+        if self.ready_path.exists() {
+            anyhow::bail!("completion ready record conflicts with pending evidence");
+        }
+        fs::rename(&self.pending_path, &self.ready_path)
+            .context("completion readiness persistence failed")?;
+        let after = fs::symlink_metadata(&self.ready_path)?;
+        if after.dev() != before.dev()
+            || after.ino() != before.ino()
+            || after.nlink() != 1
+            || after.uid() != self.owner_uid
+            || after.gid() != self.owner_gid
+            || after.mode() & 0o777 != 0o600
+        {
+            anyhow::bail!("completion ready record custody refused");
+        }
+        File::open(&self.directory)?.sync_all()?;
         Ok(true)
+    }
+
+    #[cfg(test)]
+    pub(super) fn pending_path(&self) -> &Path {
+        &self.pending_path
+    }
+
+    #[cfg(test)]
+    pub(super) fn ready_path(&self) -> &Path {
+        &self.ready_path
     }
 }
 
-fn record_matches_candidate(
-    existing: &CompletionRecordV1,
-    candidate: &CompletionCandidate,
-    proposed: &CompletionRecordV1,
+fn record_matches_proposed(
+    existing: &ManagedCompletionRecordV2,
+    proposed: &ManagedCompletionRecordV2,
 ) -> bool {
     existing.schema == proposed.schema
         && existing.schema_version == proposed.schema_version
         && existing.binding_digest == proposed.binding_digest
-        && existing.operation_ref == candidate.operation_ref
-        && existing.operation_id == candidate.operation_id
-        && existing.generation == candidate.generation
-        && existing.prepared_at_unix_secs == candidate.prepared_at_unix_secs
-        && existing.preflighted_at_unix_secs == candidate.preflighted_at_unix_secs
+        && existing.operation_ref == proposed.operation_ref
+        && existing.operation_id == proposed.operation_id
+        && existing.operation_kind == proposed.operation_kind
+        && existing.source == proposed.source
+        && existing.host_ref == proposed.host_ref
+        && existing.service_ref == proposed.service_ref
+        && existing.slot_ref == proposed.slot_ref
+        && existing.declaration_fingerprint == proposed.declaration_fingerprint
+        && existing.secret_ref == proposed.secret_ref
+        && existing.scope_ref == proposed.scope_ref
+        && existing.generation == proposed.generation
+        && existing.revocation_epoch == proposed.revocation_epoch
+        && existing.plan_fingerprint == proposed.plan_fingerprint
+        && existing.target_fingerprint == proposed.target_fingerprint
+        && existing.producer_key_id == proposed.producer_key_id
+        && existing.prepared_at_unix_secs == proposed.prepared_at_unix_secs
+        && existing.preflighted_at_unix_secs == proposed.preflighted_at_unix_secs
+        && existing.evidence_accepted_at_unix_secs == proposed.evidence_accepted_at_unix_secs
         && existing.activation_evidence == proposed.activation_evidence
-        && !existing.value_returned
+        && existing.integrity_hash == proposed.integrity_hash
 }
 
-fn validate_binding(binding: &CompletionBindingV1) -> Result<()> {
-    if binding.schema != BINDING_SCHEMA
-        || binding.schema_version != 1
-        || !valid_ref("op_", &binding.operation_ref)
-        || binding.operation_kind != "create"
-        || binding.source != "generated"
-        || !valid_ref("host_", &binding.host_ref)
-        || !valid_ref("svc_", &binding.service_ref)
-        || !valid_ref("slot_", &binding.slot_ref)
-        || !valid_ref("decl_", &binding.declaration_fingerprint)
-        || !valid_ref("sec_", &binding.secret_ref)
-        || !valid_ref("scp_", &binding.scope_ref)
-        || !valid_ref("key_", &binding.producer_key_id)
-        || binding.generation == 0
-        || binding.revocation_epoch == 0
-        || !valid_hex_digest(&binding.plan_fingerprint)
-        || !valid_hex_digest(&binding.target_fingerprint)
+fn validate_completion_receipt(
+    record: &ManagedCompletionRecordV2,
+    receipt: &EntryCompletionReceipt,
+) -> Result<()> {
+    if record.operation_id != receipt.operation_id
+        || record.secret_ref != receipt.secret_ref
+        || receipt.mode != "generated"
+        || receipt.operation_kind != "create"
+        || record.generation != receipt.generation
+        || record.plan_fingerprint != receipt.plan_fingerprint
+        || record.target_fingerprint != receipt.target_fingerprint
+        || record.preflighted_at_unix_secs != receipt.preflighted_at_unix_secs
     {
-        anyhow::bail!("completion binding contract invalid");
+        anyhow::bail!("completion record no longer matches transaction");
     }
     Ok(())
 }
 
-fn valid_ref(prefix: &str, value: &str) -> bool {
-    value.len() >= prefix.len() + 8
-        && value.len() <= 96
-        && value.starts_with(prefix)
-        && value.chars().all(|character| {
-            character.is_ascii_lowercase() || character.is_ascii_digit() || character == '_'
-        })
-}
-
-fn valid_hex_digest(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
-}
-
-fn record_hash(record: &CompletionRecordV1) -> Result<String> {
-    let mut unsigned = record.clone();
-    unsigned.integrity_hash.clear();
-    Ok(hex::encode(Sha256::digest(serde_json::to_vec(&unsigned)?)))
-}
-
-fn read_record_if_present(path: &Path, owner_uid: u32) -> Result<Option<CompletionRecordV1>> {
+fn read_record_if_present(
+    path: &Path,
+    owner_uid: u32,
+    owner_gid: u32,
+) -> Result<Option<ManagedCompletionRecordV2>> {
     match fs::symlink_metadata(path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(_) => anyhow::bail!("completion record metadata unavailable"),
         Ok(_) => {
-            let raw = read_private_regular(path, MAX_RECORD_BYTES, owner_uid)?;
-            let record: CompletionRecordV1 = decode_strict(&raw)?;
-            if record.schema != RECORD_SCHEMA
-                || record.schema_version != 1
-                || record.value_returned
-                || record.integrity_hash != record_hash(&record)?
-                || !record_evidence_is_valid(&record)
-            {
-                anyhow::bail!("completion record invalid");
-            }
+            let raw = read_private_regular(path, MAX_RECORD_BYTES, owner_uid, owner_gid)?;
+            let record =
+                decode_record(&raw).map_err(|error| anyhow::anyhow!(error.reason_code()))?;
             Ok(Some(record))
         }
     }
 }
 
-fn record_evidence_is_valid(record: &CompletionRecordV1) -> bool {
-    let evidence = &record.activation_evidence;
-    let oldest = evidence
-        .heartbeat_observed_at_unix_secs
-        .min(evidence.process_observed_at_unix_secs)
-        .min(evidence.probe_observed_at_unix_secs);
-    let newest = evidence
-        .heartbeat_observed_at_unix_secs
-        .max(evidence.process_observed_at_unix_secs)
-        .max(evidence.probe_observed_at_unix_secs);
-    evidence.generation == record.generation
-        && evidence.materialized
-        && evidence.process_state == "running"
-        && evidence.probe_state == "healthy"
-        && oldest >= record.prepared_at_unix_secs
-        && newest
-            <= record
-                .evidence_accepted_at_unix_secs
-                .saturating_add(ACTIVATION_CLOCK_SKEW_SECONDS)
-        && record.evidence_accepted_at_unix_secs.saturating_sub(oldest)
-            <= ACTIVATION_FRESHNESS_SECONDS
-}
-
-fn read_private_regular(path: &Path, maximum: usize, owner_uid: u32) -> Result<Vec<u8>> {
+fn read_private_regular(
+    path: &Path,
+    maximum: usize,
+    owner_uid: u32,
+    owner_gid: u32,
+) -> Result<Vec<u8>> {
     let metadata = fs::symlink_metadata(path).context("private file unavailable")?;
     if !metadata.file_type().is_file()
         || metadata.uid() != owner_uid
+        || metadata.gid() != owner_gid
         || metadata.nlink() != 1
         || metadata.mode() & 0o777 != 0o600
         || metadata.len() == 0
@@ -454,10 +344,11 @@ fn read_private_regular(path: &Path, maximum: usize, owner_uid: u32) -> Result<V
     Ok(raw)
 }
 
-fn validate_private_directory(path: &Path, owner_uid: u32) -> Result<()> {
+fn validate_private_directory(path: &Path, owner_uid: u32, owner_gid: u32) -> Result<()> {
     let metadata = fs::symlink_metadata(path).context("completion record directory unavailable")?;
     if !metadata.file_type().is_dir()
         || metadata.uid() != owner_uid
+        || metadata.gid() != owner_gid
         || metadata.mode() & 0o777 != 0o700
     {
         anyhow::bail!("completion record directory custody refused");
@@ -471,19 +362,26 @@ fn enforce_directory_capacity(path: &Path) -> Result<()> {
         let entry = entry.context("completion record directory unavailable")?;
         entries = entries.saturating_add(1);
         if entries > MAX_DIRECTORY_ENTRIES
-            || !matches!(entry.file_name().to_str(), Some(RECORD_FILE | LOCK_FILE))
+            || !matches!(
+                entry.file_name().to_str(),
+                Some(PENDING_FILE | READY_FILE | LOCK_FILE)
+            )
         {
             anyhow::bail!("completion record directory capacity refused");
         }
     }
+    if path.join(PENDING_FILE).exists() && path.join(READY_FILE).exists() {
+        anyhow::bail!("completion record directory contains conflicting states");
+    }
     Ok(())
 }
 
-fn acquire_process_lock(directory: &Path, owner_uid: u32) -> Result<File> {
+fn acquire_process_lock(directory: &Path, owner_uid: u32, owner_gid: u32) -> Result<File> {
     let path = directory.join(LOCK_FILE);
     if let Ok(metadata) = fs::symlink_metadata(&path) {
         if !metadata.file_type().is_file()
             || metadata.uid() != owner_uid
+            || metadata.gid() != owner_gid
             || metadata.nlink() != 1
             || metadata.mode() & 0o777 != 0o600
         {
@@ -498,7 +396,11 @@ fn acquire_process_lock(directory: &Path, owner_uid: u32) -> Result<File> {
         .mode(0o600)
         .open(path)?;
     let metadata = file.metadata()?;
-    if metadata.uid() != owner_uid || metadata.nlink() != 1 || metadata.mode() & 0o777 != 0o600 {
+    if metadata.uid() != owner_uid
+        || metadata.gid() != owner_gid
+        || metadata.nlink() != 1
+        || metadata.mode() & 0o777 != 0o600
+    {
         anyhow::bail!("completion process lock custody refused");
     }
     file.try_lock_exclusive()
@@ -506,12 +408,17 @@ fn acquire_process_lock(directory: &Path, owner_uid: u32) -> Result<File> {
     Ok(file)
 }
 
-fn write_private_atomic_new(path: &Path, bytes: &[u8], owner_uid: u32) -> Result<()> {
+fn write_private_atomic_new(
+    path: &Path,
+    bytes: &[u8],
+    owner_uid: u32,
+    owner_gid: u32,
+) -> Result<()> {
     if bytes.is_empty() || bytes.len() > MAX_RECORD_BYTES {
         anyhow::bail!("completion record size refused");
     }
     let parent = path.parent().context("completion record path invalid")?;
-    validate_private_directory(parent, owner_uid)?;
+    validate_private_directory(parent, owner_uid, owner_gid)?;
     if path.exists() {
         anyhow::bail!("completion record already exists");
     }
@@ -531,7 +438,10 @@ fn write_private_atomic_new(path: &Path, bytes: &[u8], owner_uid: u32) -> Result
             .open(&temp)
             .context("completion record temporary file unavailable")?;
         let metadata = file.metadata()?;
-        if metadata.uid() != owner_uid || metadata.nlink() != 1 || metadata.mode() & 0o777 != 0o600
+        if metadata.uid() != owner_uid
+            || metadata.gid() != owner_gid
+            || metadata.nlink() != 1
+            || metadata.mode() & 0o777 != 0o600
         {
             anyhow::bail!("completion record temporary custody refused");
         }
@@ -549,13 +459,6 @@ fn write_private_atomic_new(path: &Path, bytes: &[u8], owner_uid: u32) -> Result
     result
 }
 
-fn decode_strict<T: for<'de> Deserialize<'de>>(raw: &[u8]) -> Result<T> {
-    let mut decoder = serde_json::Deserializer::from_slice(raw);
-    let value = T::deserialize(&mut decoder).context("invalid JSON")?;
-    decoder.end().context("trailing JSON")?;
-    Ok(value)
-}
-
 fn unix_seconds(time: SystemTime) -> Result<u64> {
     Ok(time.duration_since(UNIX_EPOCH)?.as_secs())
 }
@@ -564,63 +467,14 @@ fn unix_seconds(time: SystemTime) -> Result<u64> {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    struct CountingReporter {
-        validations: AtomicUsize,
-        runs: AtomicUsize,
-    }
-
-    impl CountingReporter {
-        fn new() -> Self {
-            Self {
-                validations: AtomicUsize::new(0),
-                runs: AtomicUsize::new(0),
-            }
-        }
-    }
-
-    impl ReporterDispatch for CountingReporter {
-        fn validate(&self, _: &PaimosReporterBindingV1) -> Result<()> {
-            self.validations.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        }
-
-        fn run(&self, _: &PaimosReporterBindingV1) -> Result<()> {
-            self.runs.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        }
-    }
 
     struct Fixture {
         _temporary: tempfile::TempDir,
         producer: CompletionProducer,
-        reporter: Arc<CountingReporter>,
         candidate: CompletionCandidate,
-        evidence: AcceptedActivationEvidence,
+        evidence: AcceptedActivationEvidenceV1,
         owner_uid: u32,
-        binding_path: PathBuf,
-    }
-
-    fn reporter_binding() -> PaimosReporterBindingV1 {
-        serde_json::from_value(serde_json::json!({
-            "schema": "inspr.janus.paimos-dependency-reporter-binding.v1",
-            "schema_version": 1,
-            "config_digest": format!("sha256:{}", "a".repeat(64)),
-            "handoff_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
-            "dependency_key": "privileged-handoff",
-            "stage_key": "deployment",
-            "execution_number": 1,
-            "plan_digest": format!("sha256:{}", "1".repeat(64)),
-            "predecessor_digest": format!("sha256:{}", "2".repeat(64)),
-            "authority_epoch": 1,
-            "context_digest": format!("sha256:{}", "3".repeat(64)),
-            "credential_epoch": 1,
-            "expires_at": "2026-09-09T09:00:00Z",
-            "evidence_kind": "credential_handoff",
-            "evidence_observed_at": "2026-09-09T08:00:00Z"
-        }))
-        .unwrap()
+        owner_gid: u32,
     }
 
     fn fixture() -> Fixture {
@@ -629,15 +483,19 @@ mod tests {
             .tempdir_in("/tmp")
             .unwrap();
         let owner_uid = fs::metadata(temporary.path()).unwrap().uid();
+        let owner_gid = fs::metadata(temporary.path()).unwrap().gid();
         fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o700)).unwrap();
-        let record_directory = temporary.path().join("records");
-        fs::create_dir(&record_directory).unwrap();
-        fs::set_permissions(&record_directory, fs::Permissions::from_mode(0o700)).unwrap();
-        let binding_path = temporary.path().join("binding.json");
-        let binding = CompletionBindingV1 {
-            schema: BINDING_SCHEMA.to_string(),
+        let capability = ManagedCompletionCapabilityV1 {
+            schema: janus_host::paimos_completion::CAPABILITY_SCHEMA.to_string(),
             schema_version: 1,
             operation_ref: "op_0123456789abcdef".to_string(),
+            binding_digest: format!("sha256:{}", "a".repeat(64)),
+        };
+        let producer =
+            CompletionProducer::load(capability, temporary.path(), owner_uid, owner_gid).unwrap();
+        let candidate = CompletionCandidate {
+            operation_ref: "op_0123456789abcdef".to_string(),
+            operation_id: "webtx_0123456789abcdef".to_string(),
             operation_kind: "create".to_string(),
             source: "generated".to_string(),
             host_ref: "host_0123456789abcdef".to_string(),
@@ -651,54 +509,25 @@ mod tests {
             plan_fingerprint: "4".repeat(64),
             target_fingerprint: "5".repeat(64),
             producer_key_id: "key_0123456789abcdef".to_string(),
-            reporter: reporter_binding(),
+            preflighted_at_unix_secs: 1_800_000_000,
+            prepared_at_unix_secs: 1_800_000_005,
         };
-        fs::write(&binding_path, serde_json::to_vec(&binding).unwrap()).unwrap();
-        fs::set_permissions(&binding_path, fs::Permissions::from_mode(0o600)).unwrap();
-        let reporter = Arc::new(CountingReporter::new());
-        let producer = CompletionProducer::load(
-            &binding_path,
-            &record_directory,
-            owner_uid,
-            reporter.clone(),
-        )
-        .unwrap();
-        let candidate = CompletionCandidate {
-            operation_ref: binding.operation_ref,
-            operation_id: "webtx_0123456789abcdef".to_string(),
-            operation_kind: binding.operation_kind,
-            source: binding.source,
-            host_ref: binding.host_ref,
-            service_ref: binding.service_ref,
-            slot_ref: binding.slot_ref,
-            declaration_fingerprint: binding.declaration_fingerprint,
-            secret_ref: binding.secret_ref,
-            scope_ref: binding.scope_ref,
-            generation: binding.generation,
-            revocation_epoch: binding.revocation_epoch,
-            plan_fingerprint: binding.plan_fingerprint,
-            target_fingerprint: binding.target_fingerprint,
-            producer_key_id: binding.producer_key_id,
-            prepared_at_unix_secs: 1_800_000_000,
-            preflighted_at_unix_secs: 1_799_999_990,
-        };
-        let evidence = AcceptedActivationEvidence {
+        let evidence = AcceptedActivationEvidenceV1 {
             generation: 3,
             materialized: true,
             process_state: "running".to_string(),
             probe_state: "healthy".to_string(),
-            heartbeat_observed_at_unix_secs: 1_800_000_001,
-            process_observed_at_unix_secs: 1_800_000_002,
-            probe_observed_at_unix_secs: 1_800_000_003,
+            heartbeat_observed_at_unix_secs: 1_800_000_006,
+            process_observed_at_unix_secs: 1_800_000_007,
+            probe_observed_at_unix_secs: 1_800_000_008,
         };
         Fixture {
             _temporary: temporary,
             producer,
-            reporter,
             candidate,
             evidence,
             owner_uid,
-            binding_path,
+            owner_gid,
         }
     }
 
@@ -718,7 +547,7 @@ mod tests {
     }
 
     #[test]
-    fn only_exact_external_completion_can_dispatch_the_persisted_evidence() {
+    fn pending_record_is_immutable_until_exact_completion_moves_same_inode() {
         let fixture = fixture();
         fixture
             .producer
@@ -728,127 +557,96 @@ mod tests {
                 UNIX_EPOCH + std::time::Duration::from_secs(1_800_000_010),
             )
             .unwrap();
-        for (phase, reason) in [
-            (EntryPhase::Validated, "entry_validation_ok"),
-            (EntryPhase::Failed, "entry_activation_failed"),
-            (EntryPhase::RolledBack, "entry_rolled_back"),
-            (EntryPhase::Completed, "entry_activation_ok"),
-        ] {
-            assert!(!fixture
-                .producer
-                .dispatch_if_eligible(&receipt(&fixture, phase, reason))
-                .unwrap());
-        }
-        assert_eq!(fixture.reporter.runs.load(Ordering::SeqCst), 0);
-        let mut wrong_generation = receipt(
-            &fixture,
-            EntryPhase::Completed,
-            "entry_external_activation_ok",
+        let pending = fs::symlink_metadata(fixture.producer.pending_path()).unwrap();
+        let pending_bytes = fs::read(fixture.producer.pending_path()).unwrap();
+        assert!(fixture
+            .producer
+            .persist_accepted(
+                &fixture.candidate,
+                fixture.evidence.clone(),
+                UNIX_EPOCH + std::time::Duration::from_secs(1_800_001_010),
+            )
+            .unwrap());
+        assert_eq!(
+            pending_bytes,
+            fs::read(fixture.producer.pending_path()).unwrap()
         );
-        wrong_generation.generation += 1;
-        assert!(fixture
+        assert!(!fixture
             .producer
-            .dispatch_if_eligible(&wrong_generation)
-            .is_err());
-        let mut wrong_target = receipt(
-            &fixture,
-            EntryPhase::Completed,
-            "entry_external_activation_ok",
-        );
-        wrong_target.target_fingerprint = "6".repeat(64);
-        assert!(fixture
-            .producer
-            .dispatch_if_eligible(&wrong_target)
-            .is_err());
-        assert_eq!(fixture.reporter.runs.load(Ordering::SeqCst), 0);
-        assert!(fixture
-            .producer
-            .dispatch_if_eligible(&receipt(
+            .mark_ready(&receipt(
                 &fixture,
-                EntryPhase::Completed,
-                "entry_external_activation_ok",
+                EntryPhase::Validated,
+                "entry_validation_ok"
             ))
             .unwrap());
-        assert_eq!(fixture.reporter.runs.load(Ordering::SeqCst), 1);
-    }
-
-    #[test]
-    fn retry_preserves_original_observations_and_conflicting_evidence_fails_closed() {
-        let fixture = fixture();
-        let first_accept = UNIX_EPOCH + std::time::Duration::from_secs(1_800_000_010);
-        assert!(fixture
+        assert!(!fixture
             .producer
-            .persist_accepted(&fixture.candidate, fixture.evidence.clone(), first_accept)
+            .mark_ready(&receipt(
+                &fixture,
+                EntryPhase::Failed,
+                "entry_activation_failed"
+            ))
             .unwrap());
-        assert!(fixture
+        assert!(!fixture
             .producer
-            .persist_accepted(
-                &fixture.candidate,
-                fixture.evidence.clone(),
-                first_accept + std::time::Duration::from_secs(30),
-            )
+            .mark_ready(&receipt(
+                &fixture,
+                EntryPhase::RolledBack,
+                "entry_rollback_ok"
+            ))
             .unwrap());
-        let record = read_record_if_present(&fixture.producer.record_path, fixture.owner_uid)
-            .unwrap()
-            .unwrap();
-        assert_eq!(record.evidence_accepted_at_unix_secs, 1_800_000_010);
-        assert_eq!(record.activation_evidence, fixture.evidence);
-        let mut conflicting = fixture.evidence.clone();
-        conflicting.probe_observed_at_unix_secs += 1;
+        assert!(!fixture.producer.ready_path().exists());
         assert!(fixture
             .producer
-            .persist_accepted(&fixture.candidate, conflicting, first_accept)
-            .is_err());
-    }
-
-    #[test]
-    fn stale_durable_evidence_cannot_reach_the_reporter() {
-        let fixture = fixture();
-        let mut stale = fixture.evidence.clone();
-        stale.heartbeat_observed_at_unix_secs =
-            fixture.candidate.prepared_at_unix_secs.saturating_sub(1);
-        assert!(fixture
-            .producer
-            .persist_accepted(
-                &fixture.candidate,
-                stale,
-                UNIX_EPOCH + std::time::Duration::from_secs(1_800_000_010),
-            )
-            .is_err());
-        assert!(
-            read_record_if_present(&fixture.producer.record_path, fixture.owner_uid)
-                .unwrap()
-                .is_none()
+            .mark_ready(&receipt(
+                &fixture,
+                EntryPhase::Completed,
+                "entry_external_activation_ok"
+            ))
+            .unwrap());
+        let ready = fs::symlink_metadata(fixture.producer.ready_path()).unwrap();
+        assert_eq!((pending.dev(), pending.ino()), (ready.dev(), ready.ino()));
+        assert_eq!(
+            pending_bytes,
+            fs::read(fixture.producer.ready_path()).unwrap()
         );
-        assert_eq!(fixture.reporter.runs.load(Ordering::SeqCst), 0);
     }
 
     #[test]
-    fn binding_custody_rejects_symlinks_and_hardlinks() {
+    fn future_stale_and_conflicting_evidence_fail_closed() {
         let fixture = fixture();
-        let hardlink = fixture.binding_path.with_extension("hardlink");
-        fs::hard_link(&fixture.binding_path, &hardlink).unwrap();
-        assert!(CompletionProducer::load(
-            &fixture.binding_path,
-            fixture.producer.record_path.parent().unwrap(),
-            fixture.owner_uid,
-            fixture.reporter.clone(),
-        )
-        .is_err());
-        fs::remove_file(hardlink).unwrap();
-        let symlink = fixture.binding_path.with_extension("symlink");
-        std::os::unix::fs::symlink(&fixture.binding_path, &symlink).unwrap();
-        assert!(CompletionProducer::load(
-            &symlink,
-            fixture.producer.record_path.parent().unwrap(),
-            fixture.owner_uid,
-            fixture.reporter.clone(),
-        )
-        .is_err());
+        let accepted = UNIX_EPOCH + std::time::Duration::from_secs(1_800_000_010);
+        let mut future = fixture.evidence.clone();
+        future.probe_observed_at_unix_secs = 1_800_000_011;
+        assert!(fixture
+            .producer
+            .persist_accepted(&fixture.candidate, future, accepted)
+            .is_err());
+        let mut stale = fixture.evidence.clone();
+        stale.heartbeat_observed_at_unix_secs = 1_799_999_889;
+        let mut stale_candidate = fixture.candidate.clone();
+        stale_candidate.preflighted_at_unix_secs = 1_799_999_799;
+        stale_candidate.prepared_at_unix_secs = 1_799_999_800;
+        assert!(fixture
+            .producer
+            .persist_accepted(&stale_candidate, stale, accepted)
+            .is_err());
+        fixture
+            .producer
+            .persist_accepted(&fixture.candidate, fixture.evidence.clone(), accepted)
+            .unwrap();
+        let original = fs::read(fixture.producer.pending_path()).unwrap();
+        let mut conflicting = fixture.evidence.clone();
+        conflicting.process_observed_at_unix_secs += 1;
+        assert!(fixture
+            .producer
+            .persist_accepted(&fixture.candidate, conflicting, accepted)
+            .is_err());
+        assert_eq!(original, fs::read(fixture.producer.pending_path()).unwrap());
     }
 
     #[test]
-    fn durable_record_is_private_bounded_and_value_free() {
+    fn producer_custody_is_private_bounded_and_value_free() {
         let fixture = fixture();
         fixture
             .producer
@@ -858,16 +656,19 @@ mod tests {
                 UNIX_EPOCH + std::time::Duration::from_secs(1_800_000_010),
             )
             .unwrap();
-        let metadata = fs::metadata(&fixture.producer.record_path).unwrap();
+        let metadata = fs::metadata(fixture.producer.pending_path()).unwrap();
+        assert_eq!(metadata.uid(), fixture.owner_uid);
+        assert_eq!(metadata.gid(), fixture.owner_gid);
         assert_eq!(metadata.mode() & 0o777, 0o600);
         assert_eq!(metadata.nlink(), 1);
-        assert!(metadata.len() <= MAX_RECORD_BYTES as u64);
-        let raw = fs::read(&fixture.producer.record_path).unwrap();
-        let rendered = String::from_utf8(raw).unwrap();
+        let rendered = fs::read_to_string(fixture.producer.pending_path()).unwrap();
         for forbidden in [
             "SENSITIVE_TRANSACTION_CANARY",
             "ciphertext",
             "packet_base64",
+            "paimos_origin",
+            "api_key_file",
+            "handoff_secret_file",
         ] {
             assert!(!rendered.contains(forbidden));
         }
