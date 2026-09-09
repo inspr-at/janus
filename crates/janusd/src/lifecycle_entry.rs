@@ -265,12 +265,21 @@ impl EntryJournalSummary {
     }
 }
 
+#[cfg(test)]
+#[derive(Clone)]
+pub(super) struct EntryTestCustody {
+    identity_file: PathBuf,
+    recipient: String,
+}
+
 pub(super) struct EntryTransaction {
     plan: EntryPlan,
     release: ReleaseAdmission,
     principal: PrincipalChain,
     operation_kind: ManagedEntryOperationKind,
     generation_floor: u64,
+    #[cfg(test)]
+    test_custody: Option<EntryTestCustody>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -517,7 +526,20 @@ impl EntryTransaction {
             principal,
             operation_kind,
             generation_floor,
+            #[cfg(test)]
+            test_custody: None,
         })
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_test_custody(mut self, custody: EntryTestCustody) -> Self {
+        self.test_custody = Some(custody);
+        self
+    }
+
+    #[cfg(test)]
+    fn try_entry_lock(&self) -> Result<EntryLock> {
+        self.lock()
     }
 
     pub(super) async fn preflight(&self, now: SystemTime) -> Result<EntryStatus> {
@@ -1586,8 +1608,8 @@ impl EntryTransaction {
         reject_symlink(&self.plan.file.age_store_dir)?;
         let metadata = SecretMetadataOverlay::load_toml_file(&self.plan.file.metadata_file)
             .context("entry metadata denied")?;
-        let identities = super::age_identity_files_from_env()?;
-        let recipients = super::age_recipients_from_env()?;
+        let identities = self.entry_age_identity_files()?;
+        let recipients = self.entry_age_recipients()?;
         let mut backend_binding = identities
             .iter()
             .map(|path| path.to_string_lossy().to_string())
@@ -1615,8 +1637,11 @@ impl EntryTransaction {
         let descriptor = exact_descriptor(&descriptors, &self.secret_ref()?)?.clone();
         self.validate_descriptor(&descriptor, expected_presence, expected_lifecycles)?;
 
-        let profiles = super::ManagedCommandProfileCatalog::load(&self.plan.file.profile_manifest)
-            .context("entry profile manifest denied")?;
+        let profiles = super::ManagedCommandProfileCatalog::load_with_scope(
+            &self.plan.file.profile_manifest,
+            &self.principal.scope,
+        )
+        .context("entry profile manifest denied")?;
         let profile_id = self.profile_id()?;
         let consumer = if let Some(profile) = profiles.profile(&profile_id) {
             profile.consumer().clone()
@@ -2021,6 +2046,22 @@ impl EntryTransaction {
             .with_evidence(SafeLabel::new(consumer.as_str())?),
         )?;
         Ok(())
+    }
+
+    fn entry_age_identity_files(&self) -> Result<Vec<PathBuf>> {
+        #[cfg(test)]
+        if let Some(custody) = &self.test_custody {
+            return Ok(vec![custody.identity_file.clone()]);
+        }
+        super::age_identity_files_from_env()
+    }
+
+    fn entry_age_recipients(&self) -> Result<Vec<String>> {
+        #[cfg(test)]
+        if let Some(custody) = &self.test_custody {
+            return Ok(vec![custody.recipient.clone()]);
+        }
+        super::age_recipients_from_env()
     }
 
     fn lock(&self) -> Result<EntryLock> {

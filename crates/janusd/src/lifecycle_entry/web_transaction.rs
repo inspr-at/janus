@@ -1243,6 +1243,20 @@ fn transaction_for(
     operation_ref: &str,
     release: ReleaseAdmission,
 ) -> Result<EntryTransaction> {
+    transaction_for_principal(
+        entry,
+        operation_ref,
+        release,
+        super::entry_principal_from_env()?,
+    )
+}
+
+fn transaction_for_principal(
+    entry: &TransactionCatalogEntry,
+    operation_ref: &str,
+    release: ReleaseAdmission,
+    principal: janus_core::PrincipalChain,
+) -> Result<EntryTransaction> {
     if !valid_ref("op_", operation_ref) {
         anyhow::bail!("web transaction operation reference is invalid");
     }
@@ -1261,7 +1275,7 @@ fn transaction_for(
     EntryTransaction::new_managed(
         plan,
         release,
-        super::entry_principal_from_env()?,
+        principal,
         ManagedEntryOperationKind::parse(&entry.operation_kind)?,
         entry.delivery.generation,
     )
@@ -1837,10 +1851,14 @@ mod tests {
 
 #[cfg(test)]
 mod managed_completion_integration_tests {
+    use super::super::EntryTestCustody;
     use super::*;
     use age::secrecy::ExposeSecret;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-    use janus_core::{ProductMode, ScopePathV1, SecretName, SecretRef};
+    use janus_core::{
+        Principal, PrincipalChain, PrincipalId, PrincipalKind, ProductMode, ScopePathV1,
+        SecretName, SecretRef,
+    };
     use janus_host::paimos_completion::{
         test_support, ManagedCompletionBindingV2, BINDING_SCHEMA, CAPABILITY_SCHEMA,
     };
@@ -1849,48 +1867,18 @@ mod managed_completion_integration_tests {
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::os::unix::fs::MetadataExt;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
     use std::thread;
 
     const HANDOFF_ID: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
     const MEDIA_TYPE: &str = "application/vnd.paimos.external-stage.v1+json";
-    static LIFECYCLE_ENVIRONMENT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-    struct EnvironmentGuard {
-        identity: Option<std::ffi::OsString>,
-        recipient: Option<std::ffi::OsString>,
-    }
-
-    impl EnvironmentGuard {
-        fn install(identity: &Path, recipient: &str) -> Self {
-            let guard = Self {
-                identity: std::env::var_os("JANUS_AGE_IDENTITY_FILE"),
-                recipient: std::env::var_os("JANUS_AGE_RECIPIENT"),
-            };
-            std::env::set_var("JANUS_AGE_IDENTITY_FILE", identity);
-            std::env::set_var("JANUS_AGE_RECIPIENT", recipient);
-            guard
-        }
-    }
-
-    impl Drop for EnvironmentGuard {
-        fn drop(&mut self) {
-            if let Some(value) = self.identity.take() {
-                std::env::set_var("JANUS_AGE_IDENTITY_FILE", value);
-            } else {
-                std::env::remove_var("JANUS_AGE_IDENTITY_FILE");
-            }
-            if let Some(value) = self.recipient.take() {
-                std::env::set_var("JANUS_AGE_RECIPIENT", value);
-            } else {
-                std::env::remove_var("JANUS_AGE_RECIPIENT");
-            }
-        }
-    }
+    static FIXTURE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
     struct LifecycleFixture {
         _temporary: tempfile::TempDir,
-        _environment: EnvironmentGuard,
+        principal: PrincipalChain,
+        test_custody: EntryTestCustody,
         entry: TransactionCatalogEntry,
         release: ReleaseAdmission,
         completion_directory: PathBuf,
@@ -1918,11 +1906,22 @@ mod managed_completion_integration_tests {
             .expect("write synthetic age identity");
             protect_file(&age_identity_path);
             let age_recipient = age_identity.to_public().to_string();
-            let environment = EnvironmentGuard::install(&age_identity_path, &age_recipient);
-
-            let scope = ScopePathV1::for_repository("fixture-org", "janus", "janus", "dev")
+            let test_custody = EntryTestCustody {
+                identity_file: age_identity_path.clone(),
+                recipient: age_recipient.clone(),
+            };
+            let fixture_sequence = FIXTURE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let organization = format!("fixture-org-{}", fixture_sequence);
+            let scope = ScopePathV1::for_repository(&organization, "janus", "janus", "dev")
                 .expect("fixture scope")
                 .scope_ref();
+            let principal = PrincipalChain::new(
+                Principal::new(
+                    PrincipalKind::Executor,
+                    PrincipalId::new("janusd-lifecycle-entry").expect("fixture executor"),
+                ),
+                scope.clone(),
+            );
             let secret_name = SecretName::new("CANARY").expect("fixture secret name");
             let secret_ref = SecretRef::for_manifest_entry(&scope, &secret_name);
             let secretspec = temporary.path().join("secretspec.toml");
@@ -2107,7 +2106,8 @@ timeout_seconds = 5
             let metadata = fs::metadata(temporary.path()).expect("temporary root metadata");
             Self {
                 _temporary: temporary,
-                _environment: environment,
+                principal,
+                test_custody,
                 entry,
                 release: ReleaseAdmission::not_required(ProductMode::SelfHosted),
                 completion_directory,
@@ -2129,8 +2129,14 @@ timeout_seconds = 5
         }
 
         fn transaction(&self, operation_ref: &str) -> EntryTransaction {
-            transaction_for(&self.entry, operation_ref, self.release.clone())
-                .expect("construct fixture transaction")
+            transaction_for_principal(
+                &self.entry,
+                operation_ref,
+                self.release.clone(),
+                self.principal.clone(),
+            )
+            .expect("construct fixture transaction")
+            .with_test_custody(self.test_custody.clone())
         }
 
         fn request(
@@ -2366,7 +2372,6 @@ timeout_seconds = 5
 
     #[tokio::test]
     async fn generated_create_real_lifecycle_publishes_ready_before_reporter_io() {
-        let _environment_lock = LIFECYCLE_ENVIRONMENT_LOCK.lock().await;
         let mut fixture = LifecycleFixture::new("http://127.0.0.1:9");
         fs::remove_dir(&fixture.completion_directory).expect("remove optional producer state");
         let catalog = ReviewedCatalog {
@@ -2495,9 +2500,52 @@ timeout_seconds = 5
             .exists());
     }
 
+    #[test]
+    fn parallel_fixture_entry_locks_stay_independent() {
+        let handles = [0_u64, 1].map(|index| {
+            thread::spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("parallel fixture runtime");
+                runtime.block_on(async {
+                    let fixture = LifecycleFixture::new("http://127.0.0.1:9");
+                    let operation_ref = if index == 0 {
+                        "op_parallel012345678a"
+                    } else {
+                        "op_parallel012345678b"
+                    };
+                    let transaction = fixture.transaction(operation_ref);
+                    let base = SystemTime::now();
+                    transaction
+                        .preflight(base)
+                        .await
+                        .expect("parallel fixture preflight");
+                    transaction
+                        .apply_generated(base + Duration::from_secs(1))
+                        .await
+                        .expect("parallel fixture apply");
+                });
+            })
+        });
+        for handle in handles {
+            handle.join().expect("parallel fixture thread");
+        }
+    }
+
+    #[tokio::test]
+    async fn same_fixture_context_rejects_overlapping_entry_lock() {
+        let fixture = LifecycleFixture::new("http://127.0.0.1:9");
+        let first = fixture.transaction("op_samectx012345678a");
+        let second = fixture.transaction("op_samectx012345678b");
+        let held = first.try_entry_lock().expect("acquire first entry lock");
+        assert!(second.try_entry_lock().is_err());
+        drop(held);
+        second.try_entry_lock().expect("release first entry lock");
+    }
+
     #[tokio::test]
     async fn generated_create_completion_reaches_real_paimos_reporter() {
-        let _environment_lock = LIFECYCLE_ENVIRONMENT_LOCK.lock().await;
         let mut fake = FakePaimos::bind();
         let mut fixture = LifecycleFixture::new(&fake.origin);
         fake.start();
