@@ -1854,6 +1854,8 @@ mod managed_completion_integration_tests {
 
     const HANDOFF_ID: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
     const MEDIA_TYPE: &str = "application/vnd.paimos.external-stage.v1+json";
+    static LIFECYCLE_ENVIRONMENT_LOCK: tokio::sync::Mutex<()> =
+        tokio::sync::Mutex::const_new(());
 
     struct EnvironmentGuard {
         identity: Option<std::ffi::OsString>,
@@ -2357,6 +2359,7 @@ timeout_seconds = 5
 
     #[tokio::test]
     async fn generated_create_real_lifecycle_publishes_ready_before_reporter_io() {
+        let _environment_lock = LIFECYCLE_ENVIRONMENT_LOCK.lock().await;
         let mut fixture = LifecycleFixture::new("http://127.0.0.1:9");
         fs::remove_dir(&fixture.completion_directory).expect("remove optional producer state");
         let catalog = ReviewedCatalog {
@@ -2487,6 +2490,7 @@ timeout_seconds = 5
 
     #[tokio::test]
     async fn generated_create_completion_reaches_real_paimos_reporter() {
+        let _environment_lock = LIFECYCLE_ENVIRONMENT_LOCK.lock().await;
         let mut fake = FakePaimos::bind();
         let mut fixture = LifecycleFixture::new(&fake.origin);
         fake.start();
