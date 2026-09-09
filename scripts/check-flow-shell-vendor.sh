@@ -18,9 +18,9 @@ import sys
 manifest_path = pathlib.Path(sys.argv[1])
 vendor_dir = pathlib.Path(sys.argv[2])
 manifest = json.loads(manifest_path.read_text())
-expected_tgz = "sha256:b5e773eeca6eff42432efe4c776e9079132ccaa58f65a48a64bbc5b6a18d55b0"
-expected_commit = "efc5e63a6a37cc9d1fd9aa437f8808b3a6536acf"
-if manifest.get("version") != "0.1.4":
+expected_tgz = "sha256:17a56f0b2899c91847521672bc9b58b82e85e0259dd69f8e9f416949561641c7"
+expected_commit = "4b10524cd2a22e136e750ebfef2bf12eb2b7db5a"
+if manifest.get("version") != "0.1.5":
     raise SystemExit("unexpected flow-shell version pin")
 if manifest.get("source_commit") != expected_commit:
     raise SystemExit("unexpected flow-shell source commit pin")

@@ -15,6 +15,7 @@ const DEFAULT_EXECUTION_MODES = ['manual', 'assisted', 'automatic'];
 export const CONFIRMATION_TTL_MS = 5 * 60 * 1000;
 export const EVALUATION_MAX_AGE_MS = 15 * 60 * 1000;
 export const CLOCK_SKEW_MS = 60 * 1000;
+export const CLOCK_AGING_MIN_INTERVAL_MS = 10 * 60 * 1000;
 
 const READINESS = ['preliminary', 'ready', 'live', 'blocked', 'unknown'];
 const STAGE_EVIDENCE = ['performed', 'not_in_batch', 'unknown'];
@@ -247,6 +248,67 @@ export function isEvaluatedAtUsable(evaluatedAt, now = Date.now()) {
   if (parsed > now + CLOCK_SKEW_MS) return false;
   if (now - parsed > EVALUATION_MAX_AGE_MS) return false;
   return true;
+}
+
+function parseBoundaryMs(value) {
+  if (!value) return null;
+  const parsed = Date.parse(value);
+  return Number.isNaN(parsed) ? null : parsed;
+}
+
+function freshUntilMs(entry) {
+  if (!entry || typeof entry !== 'object') return null;
+  return parseBoundaryMs(entry.freshUntil ?? entry.fresh_until);
+}
+
+function collectIdentityBoundaries(identity, boundaries) {
+  if (identity?.status !== 'present' || !identity.value) return;
+  const value = identity.value;
+  for (const field of [value.freshUntil, value.expiresAt]) {
+    const parsed = parseBoundaryMs(field);
+    if (parsed != null) boundaries.push({ instant: parsed, inclusive: true });
+  }
+}
+
+function pushExclusiveBoundary(boundaries, boundaryMs) {
+  if (boundaryMs == null) return;
+  boundaries.push({ instant: boundaryMs + 1, inclusive: false });
+}
+
+function collectProgressWakeBoundaries(progressState, boundaries) {
+  for (const snapshot of [progressState?.task, progressState?.overall]) {
+    pushExclusiveBoundary(boundaries, freshUntilMs(snapshot?.progress));
+    pushExclusiveBoundary(boundaries, parseBoundaryMs(snapshot?.forecast?.estimated_finish));
+  }
+}
+
+function collectGateWakeBoundaries(prerequisites, boundaries) {
+  for (const gate of Object.values(prerequisites ?? {})) {
+    pushExclusiveBoundary(boundaries, freshUntilMs(gate));
+  }
+}
+
+export function collectClockAgingBoundaries(shellState, { now = Date.now(), extraBoundaries = [] } = {}) {
+  const boundaries = [];
+  const evaluatedAt = parseBoundaryMs(shellState?.evaluatedAt);
+  if (evaluatedAt != null) pushExclusiveBoundary(boundaries, evaluatedAt + EVALUATION_MAX_AGE_MS);
+  collectProgressWakeBoundaries(shellState?.progress, boundaries);
+  collectGateWakeBoundaries(shellState?.prerequisites, boundaries);
+  collectIdentityBoundaries(shellState?.identity, boundaries);
+  for (const boundary of extraBoundaries) {
+    pushExclusiveBoundary(boundaries, parseBoundaryMs(boundary));
+  }
+  return boundaries
+    .map((entry) => entry.instant)
+    .filter((instant) => instant > now);
+}
+
+export function nextClockAgingDelayMs(shellState, { now = Date.now(), extraBoundaries = [] } = {}) {
+  const upcoming = collectClockAgingBoundaries(shellState, { now, extraBoundaries });
+  if (upcoming.length === 0) return CLOCK_AGING_MIN_INTERVAL_MS;
+  const delay = Math.min(...upcoming) - now;
+  if (delay <= 0) return 0;
+  return Math.min(delay, CLOCK_AGING_MIN_INTERVAL_MS);
 }
 
 export function withViewedStage(shellState, stageIndex) {

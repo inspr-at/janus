@@ -1,10 +1,10 @@
 {
   "schema": "inspr.janus.flow-shell-vendor/1",
   "package": "@inspr/flow-shell",
-  "version": "0.1.4",
-  "source_commit": "efc5e63a6a37cc9d1fd9aa437f8808b3a6536acf",
-  "runtime_tgz_sha256": "sha256:b5e773eeca6eff42432efe4c776e9079132ccaa58f65a48a64bbc5b6a18d55b0",
-  "runtime_tgz_url": "https://github.com/inspr-at/flow-shell/releases/download/v0.1.4/inspr-flow-shell-0.1.4.tgz",
+  "version": "0.1.5",
+  "source_commit": "4b10524cd2a22e136e750ebfef2bf12eb2b7db5a",
+  "runtime_tgz_sha256": "sha256:17a56f0b2899c91847521672bc9b58b82e85e0259dd69f8e9f416949561641c7",
+  "runtime_tgz_url": "https://github.com/inspr-at/flow-shell/releases/download/v0.1.5/inspr-flow-shell-0.1.5.tgz",
   "license": "AGPL-3.0-only",
   "notices_path": "NOTICES.json",
   "files": [
@@ -15,7 +15,7 @@
     },
     {
       "path": "NOTICES.json",
-      "sha256": "sha256:e085f63c966cabbf67fcc1eff1c0381b9847a86d497a91a867c7ee36cfea6e61",
+      "sha256": "sha256:bc6517e0f2434867d58ed7087d96a2deded45a5ac99b1226de6ce8613bacabfe",
       "bytes": 982
     },
     {
@@ -55,8 +55,8 @@
     },
     {
       "path": "src/inspr-flow-shell.js",
-      "sha256": "sha256:e30d6916745cab38cbd732c6664514bcb7131217c13d5d8fa32562100f264a68",
-      "bytes": 30455
+      "sha256": "sha256:c65b080d348202b9aa9fad28aec5156ee2ef03528d920e3e7b16d3dc5f6a4b52",
+      "bytes": 34737
     },
     {
       "path": "src/intents.js",
@@ -75,8 +75,8 @@
     },
     {
       "path": "src/state.js",
-      "sha256": "sha256:703740a9efcbfd2eedff7cd27baaeb7ba4e50d04eed0c87542bb1195b0a38e0c",
-      "bytes": 11152
+      "sha256": "sha256:770b2216ab0bdf85f14c5f913d51871eb691c63755871ef82075018ba55d64f2",
+      "bytes": 13613
     }
   ]
 }
