@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
-version="0.1.4"
-source_commit="efc5e63a6a37cc9d1fd9aa437f8808b3a6536acf"
-tgz_sha256="b5e773eeca6eff42432efe4c776e9079132ccaa58f65a48a64bbc5b6a18d55b0"
+version="0.1.5"
+source_commit="4b10524cd2a22e136e750ebfef2bf12eb2b7db5a"
+tgz_sha256="17a56f0b2899c91847521672bc9b58b82e85e0259dd69f8e9f416949561641c7"
 tgz_url="https://github.com/inspr-at/flow-shell/releases/download/v${version}/inspr-flow-shell-${version}.tgz"
 vendor_dir="${repo_root}/go-envelope/ui/vendor/flow-shell"
 work=$(mktemp -d)
