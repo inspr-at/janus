@@ -9,6 +9,7 @@
 pub mod agent;
 mod dynamic;
 pub mod paimos;
+pub mod paimos_completion;
 
 pub use dynamic::{
     DynamicHostExecutorOutcome, DynamicHostRemovalControlV1, DynamicHostReplacementControlV1,

@@ -66,3 +66,14 @@ go-envelope/managed_operation_bridge_test.go:generic-api-key:51
 go-envelope/managed_operation_bridge_test.go:generic-api-key:63
 go-envelope/managed_operation_bridge_test.go:generic-api-key:75
 go-envelope/managed_operation_bridge_test.go:generic-api-key:334
+
+# Reviewed JANUS-461 synthetic completion-dispatch fixtures. Historical entries
+# bind only the exact commits reported by CI; commit-less entries bind only the
+# current tracked-tree lines needed by the separate directory scan.
+1e6353ed197385fdccebf06ec874a9e117a1ac0a:examples/paimos-dependency-reporter/managed-completion-binding.golden.json:generic-api-key:11
+270ad6214e1c6d1d662242c3c9b78f6f6cefd52c:crates/janusd/src/lifecycle_entry/web_transaction.rs:generic-api-key:1653
+270ad6214e1c6d1d662242c3c9b78f6f6cefd52c:crates/janusd/src/lifecycle_entry/completion_dispatch.rs:generic-api-key:647
+examples/paimos-dependency-reporter/managed-completion-binding.golden.json:generic-api-key:11
+crates/janusd/src/lifecycle_entry/completion_dispatch.rs:generic-api-key:505
+crates/janusd/src/lifecycle_entry/web_transaction.rs:generic-api-key:1629
+crates/janusd/src/lifecycle_entry/web_transaction.rs:generic-api-key:1657

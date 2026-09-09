@@ -51,6 +51,7 @@
               install -Dm755 "$release_dir/janus-host-executor" "$out/bin/janus-host-executor"
               install -Dm755 "$release_dir/janus-managed-host-agent" "$out/bin/janus-managed-host-agent"
               install -Dm755 "$release_dir/janus-paimos-dependency-reporter" "$out/bin/janus-paimos-dependency-reporter"
+              install -Dm755 "$release_dir/janus-paimos-managed-completion-reporter" "$out/bin/janus-paimos-managed-completion-reporter"
               install -Dm755 "$release_dir/janus-warden" "$out/bin/janus-warden"
               install -Dm755 "$release_dir/janus-agenix-import" "$out/bin/janus-agenix-import"
               runHook postInstall

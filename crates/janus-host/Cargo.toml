@@ -11,6 +11,9 @@ license.workspace = true
 [lints]
 workspace = true
 
+[features]
+test-support = []
+
 [[bin]]
 name = "janus-host-executor"
 path = "src/bin/janus-host-executor.rs"
@@ -24,6 +27,11 @@ test = false
 [[bin]]
 name = "janus-paimos-dependency-reporter"
 path = "src/bin/janus-paimos-dependency-reporter.rs"
+test = false
+
+[[bin]]
+name = "janus-paimos-managed-completion-reporter"
+path = "src/bin/janus-paimos-managed-completion-reporter.rs"
 test = false
 
 [dependencies]

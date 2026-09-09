@@ -15,6 +15,7 @@ use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine as _};
 use ed25519_dalek::SigningKey;
 use janus_core::ReleaseAdmission;
+use janus_host::paimos_completion::{AcceptedActivationEvidenceV1, ManagedCompletionCapabilityV1};
 use janus_host::{seal_host_envelope, HostEnvelopeBindingV1, HostEnvelopeSealRequest};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -24,10 +25,11 @@ use tokio::sync::Semaphore;
 use tokio::time::{timeout, Duration};
 use zeroize::Zeroize;
 
+use super::completion_dispatch::{CompletionCandidate, CompletionProducer};
 use super::{
     read_regular_bounded, scan_journal_summaries, stable_error_reason, validate_plan,
-    EntryJournalSummary, EntryPhase, EntryPlan, EntryPlanFile, EntrySource, EntryStatus,
-    EntryTransaction, ManagedEntryOperationKind,
+    EntryCompletionReceipt, EntryJournalSummary, EntryPhase, EntryPlan, EntryPlanFile, EntrySource,
+    EntryStatus, EntryTransaction, ManagedEntryOperationKind,
 };
 
 const CATALOG_SCHEMA: &str = "inspr.janus.managed-web-transaction-catalog.v2";
@@ -71,6 +73,8 @@ struct TransactionCatalogEntry {
     operation_kind: String,
     plan: EntryPlanFile,
     delivery: HostDeliveryPlan,
+    #[serde(default)]
+    completion: Option<ManagedCompletionCapabilityV1>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -184,6 +188,13 @@ struct ReviewedCatalog {
     entries: BTreeMap<CatalogKey, TransactionCatalogEntry>,
 }
 
+#[derive(Clone)]
+struct CompletionContext {
+    producer: Arc<CompletionProducer>,
+    entry: TransactionCatalogEntry,
+    release: ReleaseAdmission,
+}
+
 struct SecretBuffer(Vec<u8>);
 
 #[derive(Debug)]
@@ -209,6 +220,83 @@ impl Drop for SecretBuffer {
     }
 }
 
+impl CompletionContext {
+    fn applies(&self, entry: &TransactionCatalogEntry, request: &TransactionRequest) -> bool {
+        self.producer.operation_ref() == request.operation_ref
+            && request.operation_kind == "create"
+            && request.source == "generated"
+            && request.host_ref == self.entry.host_ref
+            && request.service_ref == self.entry.service_ref
+            && request.slot_ref == self.entry.slot_ref
+            && request.declaration_fingerprint == self.entry.declaration_fingerprint
+            && entry.host_ref == self.entry.host_ref
+            && entry.service_ref == self.entry.service_ref
+            && entry.slot_ref == self.entry.slot_ref
+            && entry.declaration_fingerprint == self.entry.declaration_fingerprint
+            && entry.operation_kind == self.entry.operation_kind
+            && entry.plan.secret_ref == self.entry.plan.secret_ref
+            && entry.plan.expected_scope_ref == self.entry.plan.expected_scope_ref
+            && entry.delivery.generation == self.entry.delivery.generation
+            && entry.delivery.revocation_epoch == self.entry.delivery.revocation_epoch
+            && entry.delivery.producer_key_id == self.entry.delivery.producer_key_id
+    }
+
+    fn persist_accepted(
+        &self,
+        candidate: &CompletionCandidate,
+        evidence: AcceptedActivationEvidenceV1,
+        accepted_at: SystemTime,
+    ) -> Result<bool> {
+        self.producer
+            .persist_accepted(candidate, evidence, accepted_at)
+    }
+
+    fn mark_ready(&self, receipt: &EntryCompletionReceipt) -> Result<bool> {
+        self.producer.mark_ready(receipt)
+    }
+
+    async fn reconcile(&self) -> Result<()> {
+        if !self.producer.needs_reconciliation()? {
+            return Ok(());
+        }
+        let receipt = transaction_for(
+            &self.entry,
+            self.producer.operation_ref(),
+            self.release.clone(),
+        )?
+        .completion_receipt()?;
+        self.producer.mark_ready(&receipt)?;
+        Ok(())
+    }
+}
+
+fn load_completion_context(
+    catalog: &ReviewedCatalog,
+    release: &ReleaseAdmission,
+) -> Result<Option<CompletionContext>> {
+    let mut configured = catalog.entries.values().filter_map(|entry| {
+        entry
+            .completion
+            .clone()
+            .map(|capability| (entry, capability))
+    });
+    let Some((entry, capability)) = configured.next() else {
+        return Ok(None);
+    };
+    if configured.next().is_some() {
+        anyhow::bail!("web transaction completion binding is ambiguous");
+    }
+    if entry.operation_kind != "create" || entry.plan.source.mode() != "generated" {
+        anyhow::bail!("web transaction completion capability is not generated create");
+    }
+    let producer = Arc::new(CompletionProducer::load_system(capability)?);
+    Ok(Some(CompletionContext {
+        producer,
+        entry: entry.clone(),
+        release: release.clone(),
+    }))
+}
+
 pub(crate) async fn run_from_env() -> Result<()> {
     let socket_path = required_absolute_path(SOCKET_ENV)?;
     let catalog_path = required_absolute_path(CATALOG_ENV)?;
@@ -227,6 +315,13 @@ pub(crate) async fn run_from_env() -> Result<()> {
     reconcile_catalog(&catalog, &release)
         .await
         .context("web transaction startup reconciliation denied")?;
+    let completion = load_completion_context(&catalog, &release)?;
+    if let Some(completion) = completion.as_ref() {
+        completion
+            .reconcile()
+            .await
+            .context("web transaction completion reconciliation denied")?;
+    }
     let listener = bind_private_socket(&socket_path)?;
     let connections = Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
 
@@ -253,9 +348,10 @@ pub(crate) async fn run_from_env() -> Result<()> {
         }
         let catalog = Arc::clone(&catalog);
         let release = release.clone();
+        let completion = completion.clone();
         tokio::spawn(async move {
             let _permit = permit;
-            handle_connection(stream, &catalog, release).await;
+            handle_connection(stream, &catalog, release, completion.as_ref()).await;
         });
     }
 }
@@ -264,6 +360,7 @@ async fn handle_connection(
     mut stream: UnixStream,
     catalog: &ReviewedCatalog,
     release: ReleaseAdmission,
+    completion: Option<&CompletionContext>,
 ) {
     if super::super::enforce_daemon_runtime_authority(janus_core::RuntimeAction::WebTransaction)
         .await
@@ -323,7 +420,14 @@ async fn handle_connection(
         let response = if request.operation_kind == "remove" {
             finalize_prepared_removal(&transaction, &request, SystemTime::now()).await
         } else {
-            finalize_prepared_operation(&transaction, entry, &request, SystemTime::now()).await
+            finalize_prepared_operation(
+                &transaction,
+                entry,
+                &request,
+                SystemTime::now(),
+                completion,
+            )
+            .await
         }
         .unwrap_or_else(|error| denied_response(operation_ref, stable_web_error_reason(&error)));
         let _ = write_response(&mut stream, &response).await;
@@ -633,6 +737,14 @@ fn validate_catalog_entry(entry: &TransactionCatalogEntry) -> Result<()> {
     {
         anyhow::bail!("web transaction catalog entry is invalid");
     }
+    if let Some(capability) = entry.completion.as_ref() {
+        capability
+            .validate()
+            .map_err(|error| anyhow::anyhow!(error.reason_code()))?;
+        if entry.operation_kind != "create" || entry.plan.source.mode() != "generated" {
+            anyhow::bail!("web transaction completion capability is not generated create");
+        }
+    }
     validate_delivery_plan(&entry.delivery)?;
     let mut plan = entry.plan.clone();
     if entry.operation_kind == "remove" {
@@ -807,6 +919,7 @@ async fn finalize_prepared_operation(
     entry: &TransactionCatalogEntry,
     request: &TransactionRequest,
     now: SystemTime,
+    completion: Option<&CompletionContext>,
 ) -> Result<TransactionResponse> {
     let status = transaction.status().await?;
     if status.operation_kind != request.operation_kind || status.generation == 0 {
@@ -815,6 +928,17 @@ async fn finalize_prepared_operation(
     if status.phase == EntryPhase::Completed {
         let status = transaction.finish_completed_cleanup().await?;
         remove_outbox_if_present(entry, request, status.generation)?;
+        if let Some(completion) = completion.filter(|value| value.applies(entry, request)) {
+            if transaction
+                .completion_receipt()
+                .and_then(|receipt| completion.mark_ready(&receipt))
+                .is_err()
+            {
+                eprintln!(
+                    "janusd-web-transactiond completion readiness pending reason_code=web_transaction_completion_ready_pending value_returned=false"
+                );
+            }
+        }
         return Ok(response_from_status(
             &request.operation_ref,
             &status,
@@ -834,10 +958,43 @@ async fn finalize_prepared_operation(
         &record,
         now,
     )?;
+    let completion_recorded =
+        if let Some(completion) = completion.filter(|value| value.applies(entry, request)) {
+            let receipt = transaction.completion_receipt()?;
+            let candidate = completion_candidate(entry, request, &record, &receipt);
+            // Persistence is intentionally performed before lifecycle completion.
+            completion.persist_accepted(
+                &candidate,
+                accepted_evidence(
+                    request
+                        .external_evidence
+                        .as_ref()
+                        .ok_or(WebTransactionError("web_transaction_evidence_invalid"))?,
+                ),
+                now,
+            )?
+        } else {
+            false
+        };
     let completed = transaction
         .activate_after_external_verification(now)
         .await?;
     remove_outbox_if_present(entry, request, record.generation)?;
+    if completion_recorded {
+        if let Some(completion) = completion.filter(|value| value.applies(entry, request)) {
+            if transaction
+                .completion_receipt()
+                .and_then(|receipt| completion.mark_ready(&receipt))
+                .is_err()
+            {
+                // The successful secret transaction remains successful. The
+                // exact startup reconciliation will retry only this operation.
+                eprintln!(
+                    "janusd-web-transactiond completion readiness pending reason_code=web_transaction_completion_ready_pending value_returned=false"
+                );
+            }
+        }
+    }
     Ok(response_from_status(
         &request.operation_ref,
         &completed,
@@ -985,6 +1142,45 @@ fn validate_external_evidence(
         return Err(WebTransactionError("web_transaction_evidence_invalid").into());
     }
     Ok(())
+}
+
+fn completion_candidate(
+    entry: &TransactionCatalogEntry,
+    request: &TransactionRequest,
+    record: &HostEnvelopeOutboxRecord,
+    receipt: &EntryCompletionReceipt,
+) -> CompletionCandidate {
+    CompletionCandidate {
+        operation_ref: request.operation_ref.clone(),
+        operation_id: receipt.operation_id.clone(),
+        operation_kind: request.operation_kind.clone(),
+        source: request.source.clone(),
+        host_ref: request.host_ref.clone(),
+        service_ref: request.service_ref.clone(),
+        slot_ref: request.slot_ref.clone(),
+        declaration_fingerprint: request.declaration_fingerprint.clone(),
+        secret_ref: receipt.secret_ref.clone(),
+        scope_ref: entry.plan.expected_scope_ref.clone(),
+        generation: receipt.generation,
+        revocation_epoch: record.revocation_epoch,
+        plan_fingerprint: receipt.plan_fingerprint.clone(),
+        target_fingerprint: receipt.target_fingerprint.clone(),
+        producer_key_id: entry.delivery.producer_key_id.clone(),
+        prepared_at_unix_secs: record.prepared_at_unix_secs,
+        preflighted_at_unix_secs: receipt.preflighted_at_unix_secs,
+    }
+}
+
+fn accepted_evidence(evidence: &ExternalActivationEvidence) -> AcceptedActivationEvidenceV1 {
+    AcceptedActivationEvidenceV1 {
+        generation: evidence.generation,
+        materialized: evidence.materialized,
+        process_state: evidence.process_state.clone(),
+        probe_state: evidence.probe_state.clone(),
+        heartbeat_observed_at_unix_secs: evidence.heartbeat_observed_at_unix_secs,
+        process_observed_at_unix_secs: evidence.process_observed_at_unix_secs,
+        probe_observed_at_unix_secs: evidence.probe_observed_at_unix_secs,
+    }
 }
 
 fn outbox_path(entry: &TransactionCatalogEntry, operation_ref: &str) -> Result<PathBuf> {
@@ -1449,6 +1645,53 @@ mod tests {
     }
 
     #[test]
+    fn activation_evidence_is_exact_generation_positive_and_fresh() {
+        let record = HostEnvelopeOutboxRecord {
+            schema: OUTBOX_SCHEMA.to_string(),
+            schema_version: DELIVERY_SCHEMA_VERSION,
+            operation_ref: "op_0123456789abcdef".to_string(),
+            operation_kind: "create".to_string(),
+            host_ref: "host_0123456789abcdef".to_string(),
+            service_ref: "svc_0123456789abcdef".to_string(),
+            slot_ref: "slot_0123456789abcdef".to_string(),
+            secret_ref: "sec_0123456789abcdef".to_string(),
+            scope_ref: "scp_0123456789abcdef0123456789abcdef01234567".to_string(),
+            declaration_fingerprint: "decl_0123456789abcdef".to_string(),
+            envelope_ref: "env_0123456789abcdef".to_string(),
+            generation: 3,
+            revocation_epoch: 7,
+            prepared_at_unix_secs: 1_800_000_000,
+            expires_at_unix_secs: 1_800_000_900,
+            packet_base64: "cGFja2V0".to_string(),
+            value_returned: false,
+            integrity_hash: String::new(),
+        };
+        let now = UNIX_EPOCH + std::time::Duration::from_secs(1_800_000_100);
+        let evidence = ExternalActivationEvidence {
+            generation: 3,
+            materialized: true,
+            process_state: "running".to_string(),
+            probe_state: "healthy".to_string(),
+            heartbeat_observed_at_unix_secs: 1_800_000_090,
+            process_observed_at_unix_secs: 1_800_000_091,
+            probe_observed_at_unix_secs: 1_800_000_092,
+        };
+        validate_external_evidence(&evidence, &record, now).unwrap();
+        let mut wrong_generation = evidence.clone();
+        wrong_generation.generation += 1;
+        assert!(validate_external_evidence(&wrong_generation, &record, now).is_err());
+        let mut stale = evidence.clone();
+        stale.heartbeat_observed_at_unix_secs = 1_799_999_900;
+        assert!(validate_external_evidence(&stale, &record, now).is_err());
+        let mut failed = evidence.clone();
+        failed.probe_state = "failed".to_string();
+        assert!(validate_external_evidence(&failed, &record, now).is_err());
+        let mut rolled_back = evidence;
+        rolled_back.process_state = "rolled_back".to_string();
+        assert!(validate_external_evidence(&rolled_back, &record, now).is_err());
+    }
+
+    #[test]
     fn resolver_accepts_only_an_exact_reviewed_key() {
         let mut request = request();
         let key = CatalogKey {
@@ -1480,6 +1723,7 @@ mod tests {
                         revocation_epoch: 1,
                         envelope_ttl_seconds: 3600,
                     },
+                    completion: None,
                 },
             )]),
         };
@@ -1588,5 +1832,990 @@ mod tests {
             .unwrap()
             .insert("plan_path".to_string(), serde_json::json!("/tmp/plan"));
         assert!(serde_json::from_value::<TransactionRequest>(encoded).is_err());
+    }
+}
+
+#[cfg(test)]
+mod managed_completion_integration_tests {
+    use super::*;
+    use age::secrecy::ExposeSecret;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use janus_core::{ProductMode, ScopePathV1, SecretName, SecretRef};
+    use janus_host::paimos_completion::{
+        test_support, ManagedCompletionBindingV2, BINDING_SCHEMA, CAPABILITY_SCHEMA,
+    };
+    use serde_json::{json, Value};
+    use std::collections::BTreeMap;
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::os::unix::fs::MetadataExt;
+    use std::sync::{Arc, Mutex};
+    use std::thread;
+
+    const HANDOFF_ID: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+    const MEDIA_TYPE: &str = "application/vnd.paimos.external-stage.v1+json";
+    static LIFECYCLE_ENVIRONMENT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    struct EnvironmentGuard {
+        identity: Option<std::ffi::OsString>,
+        recipient: Option<std::ffi::OsString>,
+    }
+
+    impl EnvironmentGuard {
+        fn install(identity: &Path, recipient: &str) -> Self {
+            let guard = Self {
+                identity: std::env::var_os("JANUS_AGE_IDENTITY_FILE"),
+                recipient: std::env::var_os("JANUS_AGE_RECIPIENT"),
+            };
+            std::env::set_var("JANUS_AGE_IDENTITY_FILE", identity);
+            std::env::set_var("JANUS_AGE_RECIPIENT", recipient);
+            guard
+        }
+    }
+
+    impl Drop for EnvironmentGuard {
+        fn drop(&mut self) {
+            if let Some(value) = self.identity.take() {
+                std::env::set_var("JANUS_AGE_IDENTITY_FILE", value);
+            } else {
+                std::env::remove_var("JANUS_AGE_IDENTITY_FILE");
+            }
+            if let Some(value) = self.recipient.take() {
+                std::env::set_var("JANUS_AGE_RECIPIENT", value);
+            } else {
+                std::env::remove_var("JANUS_AGE_RECIPIENT");
+            }
+        }
+    }
+
+    struct LifecycleFixture {
+        _temporary: tempfile::TempDir,
+        _environment: EnvironmentGuard,
+        entry: TransactionCatalogEntry,
+        release: ReleaseAdmission,
+        completion_directory: PathBuf,
+        binding_path: PathBuf,
+        reporter_config_path: PathBuf,
+        reporter_journal: PathBuf,
+        owner_uid: u32,
+        owner_gid: u32,
+    }
+
+    impl LifecycleFixture {
+        fn new(origin: &str) -> Self {
+            let temporary = tempfile::Builder::new()
+                .prefix("janus-461-lifecycle.")
+                .tempdir_in("/tmp")
+                .expect("temporary lifecycle root");
+            private_directory(temporary.path());
+
+            let age_identity = age::x25519::Identity::generate();
+            let age_identity_path = temporary.path().join("age.identity");
+            fs::write(
+                &age_identity_path,
+                age_identity.to_string().expose_secret().as_bytes(),
+            )
+            .expect("write synthetic age identity");
+            protect_file(&age_identity_path);
+            let age_recipient = age_identity.to_public().to_string();
+            let environment = EnvironmentGuard::install(&age_identity_path, &age_recipient);
+
+            let scope = ScopePathV1::for_repository("fixture-org", "janus", "janus", "dev")
+                .expect("fixture scope")
+                .scope_ref();
+            let secret_name = SecretName::new("CANARY").expect("fixture secret name");
+            let secret_ref = SecretRef::for_manifest_entry(&scope, &secret_name);
+            let secretspec = temporary.path().join("secretspec.toml");
+            let metadata = temporary.path().join("metadata.toml");
+            let profiles = temporary.path().join("profiles.toml");
+            let hooks = temporary.path().join("hooks.toml");
+            fs::write(
+                &secretspec,
+                r#"[project]
+name = "janus"
+revision = "1.0"
+
+[profiles.default]
+CANARY = { description = "Fixture service token", required = true }
+"#,
+            )
+            .expect("write secretspec");
+            fs::write(
+                &metadata,
+                r#"[defaults]
+owner = "fixture-owner"
+classification = "normal"
+lifecycle = "draft"
+"#,
+            )
+            .expect("write metadata");
+            fs::write(
+                &profiles,
+                format!(
+                    r#"[[env_files]]
+id = "profile.CANARY"
+secret_ref = "{}"
+executor = "janus-run@fixture"
+destination = "fixture-service"
+env = "SERVICE_TOKEN"
+output = "{}"
+
+[env_files.consumer]
+consumer_ref = "consumer.fixture_service"
+kind = "service"
+owner = "fixture-owner"
+environment = "test"
+reload = "none"
+validation = ["fixture-valid"]
+supports_dual_value = false
+blast_radius = "fixture-service"
+"#,
+                    secret_ref.as_str(),
+                    temporary.path().join("unused.env").display(),
+                ),
+            )
+            .expect("write profile manifest");
+            let validation_hook = temporary.path().join("fixture-validation-hook");
+            fs::write(&validation_hook, "#!/bin/sh\nexit 0\n")
+                .expect("write validation hook fixture");
+            fs::set_permissions(&validation_hook, fs::Permissions::from_mode(0o500))
+                .expect("protect validation hook fixture");
+            fs::write(
+                &hooks,
+                format!(
+                    r#"[validation."fixture-valid"]
+program = "{}"
+timeout_seconds = 5
+"#,
+                    validation_hook.display(),
+                ),
+            )
+            .expect("write hook manifest");
+
+            let signing_key_path = temporary.path().join("host-signing-key.json");
+            fs::write(
+                &signing_key_path,
+                serde_json::to_vec(&json!({
+                    "schema": "inspr.janus.host-envelope-signing-key.v1",
+                    "schema_version": 1,
+                    "key_id": "key_0123456789abcdef",
+                    "private_key_base64": STANDARD_NO_PAD.encode([17_u8; 32]),
+                }))
+                .expect("encode signing key fixture"),
+            )
+            .expect("write signing key fixture");
+            protect_file(&signing_key_path);
+
+            let host_identity = age::x25519::Identity::generate();
+            let now = unix_seconds(SystemTime::now()).expect("fixture time");
+            let plan = EntryPlanFile {
+                schema_version: 1,
+                operation_id: "webtx_replaced_by_transaction".to_string(),
+                secret_ref: secret_ref.as_str().to_string(),
+                expected_scope_ref: scope.as_str().to_string(),
+                expected_label: "Fixture service token".to_string(),
+                expected_owner: "fixture-owner".to_string(),
+                expected_classification: "normal".to_string(),
+                profile_id: "profile.CANARY".to_string(),
+                consumer_ref: "consumer.fixture_service".to_string(),
+                rotation_strategy: "generated".to_string(),
+                validation_probes: vec!["fixture-valid".to_string()],
+                reload_strategy: "none".to_string(),
+                input_max_bytes: 4096,
+                preflight_max_age_seconds: 900,
+                secretspec_manifest: secretspec,
+                secretspec_profile: "default".to_string(),
+                age_store_dir: temporary.path().join("age-store"),
+                metadata_file: metadata,
+                profile_manifest: profiles,
+                hook_manifest: hooks,
+                state_dir: temporary.path().join("lifecycle-state"),
+                audit_path: temporary.path().join("audit/events.jsonl"),
+                reviewed_by: "janus-security".to_string(),
+                reviewed_at_unix_secs: now,
+                activation_reason: "Reviewed managed completion fixture".to_string(),
+                source: EntrySource::Generated {
+                    alphabet: "url_safe".to_string(),
+                    length: 48,
+                },
+            };
+            let entry = TransactionCatalogEntry {
+                host_ref: "host_0123456789abcdef".to_string(),
+                service_ref: "svc_0123456789abcdef".to_string(),
+                slot_ref: "slot_0123456789abcdef".to_string(),
+                declaration_fingerprint: "decl_0123456789abcdef".to_string(),
+                operation_kind: "create".to_string(),
+                plan,
+                delivery: HostDeliveryPlan {
+                    schema: DELIVERY_PLAN_SCHEMA.to_string(),
+                    schema_version: DELIVERY_SCHEMA_VERSION,
+                    host_recipient: host_identity.to_public().to_string(),
+                    producer_key_id: "key_0123456789abcdef".to_string(),
+                    producer_signing_key_file: signing_key_path,
+                    outbox_dir: temporary.path().join("host-outbox"),
+                    generation: 1,
+                    revocation_epoch: 7,
+                    envelope_ttl_seconds: 900,
+                },
+                completion: None,
+            };
+
+            let completion_directory = temporary.path().join("completion-dispatch");
+            let reporter_journal = temporary.path().join("reporter-journal");
+            private_directory(&completion_directory);
+            private_directory(&reporter_journal);
+            let credentials = temporary.path().join("paimos-api-key");
+            let handoff_secret = temporary.path().join("paimos-handoff-secret");
+            fs::write(&credentials, format!("paimos_{}", "a".repeat(40)))
+                .expect("write synthetic API key");
+            fs::write(&handoff_secret, (0_u8..32).collect::<Vec<_>>())
+                .expect("write synthetic handoff secret");
+            protect_file(&credentials);
+            protect_file(&handoff_secret);
+            let reporter_config_path = temporary.path().join("managed-reporter-config.json");
+            let reporter_config = json!({
+                "schema": "inspr.janus.paimos-managed-completion-reporter-config.v1",
+                "schema_version": 1,
+                "paimos_origin": origin,
+                "handoff_id": HANDOFF_ID,
+                "api_key_file": credentials,
+                "handoff_secret_file": handoff_secret,
+                "journal_directory": reporter_journal,
+                "expected": {
+                    "dependency_key": "privileged-handoff",
+                    "stage_key": "deployment",
+                    "execution_number": 1,
+                    "plan_digest": format!("sha256:{}", "1".repeat(64)),
+                    "predecessor_digest": format!("sha256:{}", "2".repeat(64)),
+                    "authority_epoch": 3,
+                    "context_digest": format!("sha256:{}", "3".repeat(64)),
+                    "credential_epoch": 1,
+                    "expires_at": "2099-09-09T20:00:00Z"
+                },
+                "evidence": {
+                    "kind": "credential_handoff",
+                    "source": "managed_completion_record"
+                }
+            });
+            fs::write(
+                &reporter_config_path,
+                serde_json::to_vec_pretty(&reporter_config).expect("encode reporter config"),
+            )
+            .expect("write reporter config");
+            protect_file(&reporter_config_path);
+
+            let metadata = fs::metadata(temporary.path()).expect("temporary root metadata");
+            Self {
+                _temporary: temporary,
+                _environment: environment,
+                entry,
+                release: ReleaseAdmission::not_required(ProductMode::SelfHosted),
+                completion_directory,
+                binding_path: PathBuf::new(),
+                reporter_config_path,
+                reporter_journal,
+                owner_uid: metadata.uid(),
+                owner_gid: metadata.gid(),
+            }
+            .with_binding_path()
+        }
+
+        fn with_binding_path(mut self) -> Self {
+            self.binding_path = self
+                ._temporary
+                .path()
+                .join("managed-completion-binding.json");
+            self
+        }
+
+        fn transaction(&self, operation_ref: &str) -> EntryTransaction {
+            transaction_for(&self.entry, operation_ref, self.release.clone())
+                .expect("construct fixture transaction")
+        }
+
+        fn request(
+            &self,
+            operation_ref: &str,
+            action: &str,
+            evidence: Option<ExternalActivationEvidence>,
+        ) -> TransactionRequest {
+            request_for_entry(&self.entry, operation_ref, action, evidence)
+        }
+
+        fn configure_completion(
+            &mut self,
+            operation_ref: &str,
+            receipt: &EntryCompletionReceipt,
+        ) -> (CompletionContext, ManagedCompletionBindingV2) {
+            let reporter_config_raw =
+                fs::read(&self.reporter_config_path).expect("read reporter config");
+            let reporter = test_support::reporter_binding_from_config(&reporter_config_raw)
+                .expect("derive immutable reporter binding");
+            let binding = ManagedCompletionBindingV2 {
+                schema: BINDING_SCHEMA.to_string(),
+                schema_version: 1,
+                operation_ref: operation_ref.to_string(),
+                operation_kind: "create".to_string(),
+                source: "generated".to_string(),
+                host_ref: self.entry.host_ref.clone(),
+                service_ref: self.entry.service_ref.clone(),
+                slot_ref: self.entry.slot_ref.clone(),
+                declaration_fingerprint: self.entry.declaration_fingerprint.clone(),
+                secret_ref: receipt.secret_ref.clone(),
+                scope_ref: self.entry.plan.expected_scope_ref.clone(),
+                generation: receipt.generation,
+                revocation_epoch: self.entry.delivery.revocation_epoch,
+                plan_fingerprint: receipt.plan_fingerprint.clone(),
+                target_fingerprint: receipt.target_fingerprint.clone(),
+                producer_key_id: self.entry.delivery.producer_key_id.clone(),
+                reporter,
+            };
+            let capability = ManagedCompletionCapabilityV1 {
+                schema: CAPABILITY_SCHEMA.to_string(),
+                schema_version: 1,
+                operation_ref: operation_ref.to_string(),
+                binding_digest: binding.digest().expect("digest protected binding"),
+            };
+            write_binding(&self.binding_path, &binding);
+            self.entry.completion = Some(capability.clone());
+            let producer = Arc::new(
+                CompletionProducer::load_for_test(
+                    capability,
+                    &self.completion_directory,
+                    self.owner_uid,
+                    self.owner_gid,
+                )
+                .expect("load nonroot producer fixture"),
+            );
+            (
+                CompletionContext {
+                    producer,
+                    entry: self.entry.clone(),
+                    release: self.release.clone(),
+                },
+                binding,
+            )
+        }
+    }
+
+    fn private_directory(path: &Path) {
+        fs::create_dir_all(path).expect("create private fixture directory");
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+            .expect("protect fixture directory");
+    }
+
+    fn protect_file(path: &Path) {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).expect("protect fixture file");
+    }
+
+    #[derive(Clone, Debug)]
+    struct CapturedRequest {
+        method: String,
+        path: String,
+        headers: BTreeMap<String, Vec<String>>,
+        body: Vec<u8>,
+    }
+
+    struct FakePaimos {
+        origin: String,
+        listener: Option<TcpListener>,
+        captured: Arc<Mutex<Vec<CapturedRequest>>>,
+        handle: Option<thread::JoinHandle<()>>,
+    }
+
+    impl FakePaimos {
+        fn bind() -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake Paimos");
+            Self {
+                origin: format!("http://{}", listener.local_addr().expect("fake address")),
+                listener: Some(listener),
+                captured: Arc::new(Mutex::new(Vec::new())),
+                handle: None,
+            }
+        }
+
+        fn start(&mut self) {
+            let listener = self.listener.take().expect("fake listener");
+            let captured = Arc::clone(&self.captured);
+            self.handle = Some(thread::spawn(move || {
+                for step in 0..4 {
+                    let (stream, _) = listener.accept().expect("accept fake Paimos request");
+                    let request = read_request(stream.try_clone().expect("clone fake stream"));
+                    let expected_path = match step {
+                        0 => format!("/api/external-stage/handoffs/{HANDOFF_ID}"),
+                        1 => format!("/api/external-stage/handoffs/{HANDOFF_ID}/accept"),
+                        2 | 3 => format!("/api/external-stage/handoffs/{HANDOFF_ID}/reports"),
+                        _ => unreachable!(),
+                    };
+                    assert_eq!(request.path, expected_path);
+                    assert_eq!(request.method, if step == 0 { "GET" } else { "POST" });
+                    captured.lock().expect("capture lock").push(request);
+                    if step == 2 {
+                        continue;
+                    }
+                    let body = match step {
+                        0 => json!({
+                            "handoff_id": HANDOFF_ID,
+                            "contract_major": janus_host::paimos::PAIMOS_EXTERNAL_STAGE_SCHEMA_MAJOR,
+                            "fixture_digest": janus_host::paimos::PAIMOS_EXTERNAL_STAGE_FIXTURE_DIGEST,
+                            "credential_epoch": 1,
+                            "expires_at": "2099-09-09T20:00:00Z",
+                            "state": "issued",
+                            "reporter_class": "janus",
+                            "reporter_role": "dependency",
+                            "dependency_key": "privileged-handoff",
+                            "evidence_ceiling": ["credential_handoff"],
+                            "stage_key": "deployment",
+                            "execution_number": 1,
+                            "plan_digest": format!("sha256:{}", "1".repeat(64)),
+                            "predecessor_digest": format!("sha256:{}", "2".repeat(64)),
+                            "authority_epoch": 3,
+                            "context_digest": format!("sha256:{}", "3".repeat(64)),
+                        }),
+                        1 => receipt(1, "accepted", false),
+                        3 => receipt(2, "succeeded", true),
+                        _ => unreachable!(),
+                    };
+                    write_response(stream, if step == 1 { 201 } else { 200 }, &body);
+                }
+            }));
+        }
+
+        fn captured_len(&self) -> usize {
+            self.captured.lock().expect("capture lock").len()
+        }
+
+        fn finish(mut self) -> Vec<CapturedRequest> {
+            self.handle
+                .take()
+                .expect("fake server started")
+                .join()
+                .expect("fake Paimos thread");
+            Arc::try_unwrap(self.captured)
+                .expect("capture owner")
+                .into_inner()
+                .expect("capture mutex")
+        }
+    }
+
+    fn receipt(sequence: i64, state: &str, duplicate: bool) -> Value {
+        json!({
+            "handoff_id": HANDOFF_ID,
+            "sequence": sequence,
+            "state": state,
+            "credential_epoch": 1,
+            "duplicate": duplicate,
+            "server_received_at": "2099-09-09T19:00:01Z"
+        })
+    }
+
+    fn read_request(stream: TcpStream) -> CapturedRequest {
+        let mut reader = BufReader::new(stream);
+        let mut first = String::new();
+        reader.read_line(&mut first).expect("read request line");
+        let mut first = first.split_whitespace();
+        let method = first.next().expect("request method").to_string();
+        let path = first.next().expect("request path").to_string();
+        let mut headers = BTreeMap::<String, Vec<String>>::new();
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).expect("read request header");
+            if line == "\r\n" {
+                break;
+            }
+            let (name, value) = line.split_once(':').expect("request header shape");
+            headers
+                .entry(name.to_ascii_lowercase())
+                .or_default()
+                .push(value.trim().to_string());
+        }
+        let length = headers
+            .get("content-length")
+            .and_then(|values| values.first())
+            .map_or(0, |value| value.parse::<usize>().expect("content length"));
+        let mut body = vec![0_u8; length];
+        reader.read_exact(&mut body).expect("read request body");
+        CapturedRequest {
+            method,
+            path,
+            headers,
+            body,
+        }
+    }
+
+    fn write_response(mut stream: TcpStream, status: u16, body: &Value) {
+        let body = serde_json::to_string(body).expect("encode response");
+        let reason = if status == 201 { "Created" } else { "OK" };
+        write!(
+            stream,
+            "HTTP/1.1 {status} {reason}\r\nContent-Type: {MEDIA_TYPE}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .expect("write response");
+        stream.flush().expect("flush response");
+    }
+
+    fn write_binding(path: &Path, binding: &ManagedCompletionBindingV2) {
+        fs::write(
+            path,
+            serde_json::to_vec_pretty(binding).expect("encode completion binding"),
+        )
+        .expect("write completion binding");
+        protect_file(path);
+    }
+
+    #[tokio::test]
+    async fn generated_create_real_lifecycle_publishes_ready_before_reporter_io() {
+        let _environment_lock = LIFECYCLE_ENVIRONMENT_LOCK.lock().await;
+        let mut fixture = LifecycleFixture::new("http://127.0.0.1:9");
+        fs::remove_dir(&fixture.completion_directory).expect("remove optional producer state");
+        let catalog = ReviewedCatalog {
+            entries: BTreeMap::from([(
+                CatalogKey {
+                    host_ref: fixture.entry.host_ref.clone(),
+                    service_ref: fixture.entry.service_ref.clone(),
+                    slot_ref: fixture.entry.slot_ref.clone(),
+                    declaration_fingerprint: fixture.entry.declaration_fingerprint.clone(),
+                    operation_kind: fixture.entry.operation_kind.clone(),
+                    source: fixture.entry.plan.source.mode().to_string(),
+                },
+                fixture.entry.clone(),
+            )]),
+        };
+        assert!(load_completion_context(&catalog, &fixture.release)
+            .expect("disabled completion configuration")
+            .is_none());
+        let capability = ManagedCompletionCapabilityV1 {
+            schema: CAPABILITY_SCHEMA.to_string(),
+            schema_version: 1,
+            operation_ref: "op_ambiguous01234567".to_string(),
+            binding_digest: format!("sha256:{}", "a".repeat(64)),
+        };
+        let mut first = fixture.entry.clone();
+        first.completion = Some(capability.clone());
+        let mut second = first.clone();
+        second.host_ref = "host_ambiguous01234567".to_string();
+        let ambiguous = ReviewedCatalog {
+            entries: BTreeMap::from([
+                (
+                    CatalogKey {
+                        host_ref: first.host_ref.clone(),
+                        service_ref: first.service_ref.clone(),
+                        slot_ref: first.slot_ref.clone(),
+                        declaration_fingerprint: first.declaration_fingerprint.clone(),
+                        operation_kind: first.operation_kind.clone(),
+                        source: first.plan.source.mode().to_string(),
+                    },
+                    first,
+                ),
+                (
+                    CatalogKey {
+                        host_ref: second.host_ref.clone(),
+                        service_ref: second.service_ref.clone(),
+                        slot_ref: second.slot_ref.clone(),
+                        declaration_fingerprint: second.declaration_fingerprint.clone(),
+                        operation_kind: second.operation_kind.clone(),
+                        source: second.plan.source.mode().to_string(),
+                    },
+                    second,
+                ),
+            ]),
+        };
+        assert!(load_completion_context(&ambiguous, &fixture.release).is_err());
+        private_directory(&fixture.completion_directory);
+        let operation_ref = "op_localproof01234567";
+        let transaction = fixture.transaction(operation_ref);
+        let base = SystemTime::now();
+        transaction.preflight(base).await.expect("real preflight");
+        transaction
+            .apply_generated(base + Duration::from_secs(1))
+            .await
+            .expect("real generated apply");
+        let prepare_request = fixture.request(operation_ref, "prepare", None);
+        prepare_host_delivery(
+            &transaction,
+            &fixture.entry,
+            &prepare_request,
+            base + Duration::from_secs(2),
+        )
+        .await
+        .expect("real host preparation");
+        let receipt = transaction
+            .completion_receipt()
+            .expect("validated lifecycle receipt");
+        let outbox = load_bound_outbox(
+            &fixture.entry,
+            &prepare_request,
+            receipt.generation,
+            base + Duration::from_secs(2),
+        )
+        .expect("bound outbox");
+        let (completion, _) = fixture.configure_completion(operation_ref, &receipt);
+        let accepted_at = base + Duration::from_secs(5);
+        let accepted_secs = unix_seconds(accepted_at).expect("accepted time");
+        let evidence = ExternalActivationEvidence {
+            generation: receipt.generation,
+            materialized: true,
+            process_state: "running".to_string(),
+            probe_state: "healthy".to_string(),
+            heartbeat_observed_at_unix_secs: accepted_secs - 2,
+            process_observed_at_unix_secs: accepted_secs - 1,
+            probe_observed_at_unix_secs: accepted_secs,
+        };
+        let finalize_request = fixture.request(operation_ref, "finalize", Some(evidence.clone()));
+        let candidate = completion_candidate(&fixture.entry, &finalize_request, &outbox, &receipt);
+        completion
+            .persist_accepted(&candidate, accepted_evidence(&evidence), accepted_at)
+            .expect("durable pending evidence");
+        let pending = fs::read(completion.producer.pending_path()).expect("pending bytes");
+        assert_eq!(
+            transaction.status().await.expect("validated status").phase,
+            EntryPhase::Validated
+        );
+
+        let response = finalize_prepared_operation(
+            &transaction,
+            &fixture.entry,
+            &finalize_request,
+            accepted_at,
+            Some(&completion),
+        )
+        .await
+        .expect("real external activation completion");
+        assert_eq!(response.phase, "completed");
+        assert_eq!(response.reason_code, "entry_external_activation_ok");
+        assert!(!response.value_returned);
+        assert_eq!(
+            pending,
+            fs::read(completion.producer.ready_path()).expect("ready bytes")
+        );
+        assert!(!fixture
+            .reporter_journal
+            .join(format!("{HANDOFF_ID}.json"))
+            .exists());
+    }
+
+    #[tokio::test]
+    async fn generated_create_completion_reaches_real_paimos_reporter() {
+        let _environment_lock = LIFECYCLE_ENVIRONMENT_LOCK.lock().await;
+        let mut fake = FakePaimos::bind();
+        let mut fixture = LifecycleFixture::new(&fake.origin);
+        fake.start();
+
+        // A real prepared operation that is explicitly rolled back never
+        // creates producer evidence and cannot reach the reporter.
+        let rollback_ref = "op_rollback0123456789";
+        let rollback = fixture.transaction(rollback_ref);
+        let base = SystemTime::now();
+        rollback.preflight(base).await.expect("rollback preflight");
+        rollback
+            .apply_generated(base + Duration::from_secs(1))
+            .await
+            .expect("rollback generated apply");
+        let rollback_request = fixture.request(rollback_ref, "prepare", None);
+        prepare_host_delivery(
+            &rollback,
+            &fixture.entry,
+            &rollback_request,
+            base + Duration::from_secs(2),
+        )
+        .await
+        .expect("rollback host preparation");
+        let rolled_back = rollback_prepared_operation(
+            &rollback,
+            &fixture.entry,
+            &fixture.request(rollback_ref, "rollback", None),
+        )
+        .await
+        .expect("actual lifecycle rollback");
+        assert_eq!(rolled_back.phase, "rolled_back");
+        assert_eq!(fake.captured_len(), 0);
+
+        let operation_ref = "op_generated012345678";
+        let transaction = fixture.transaction(operation_ref);
+        let preflight_at = base + Duration::from_secs(10);
+        transaction
+            .preflight(preflight_at)
+            .await
+            .expect("generated-create preflight");
+        transaction
+            .apply_generated(preflight_at + Duration::from_secs(1))
+            .await
+            .expect("generated-create apply");
+        let prepare_request = fixture.request(operation_ref, "prepare", None);
+        prepare_host_delivery(
+            &transaction,
+            &fixture.entry,
+            &prepare_request,
+            preflight_at + Duration::from_secs(2),
+        )
+        .await
+        .expect("host envelope preparation");
+        let prepared_receipt = transaction
+            .completion_receipt()
+            .expect("prepared lifecycle receipt");
+        assert_eq!(prepared_receipt.phase, EntryPhase::Validated);
+        let outbox = load_bound_outbox(
+            &fixture.entry,
+            &prepare_request,
+            prepared_receipt.generation,
+            preflight_at + Duration::from_secs(2),
+        )
+        .expect("load prepared host delivery");
+
+        let (completion, mut binding) =
+            fixture.configure_completion(operation_ref, &prepared_receipt);
+
+        // Prepared, wrong-generation, failed-health, and stale observations
+        // are all rejected before durable evidence or network mutation.
+        test_support::run_optional_from_paths_for_test(
+            &fixture.binding_path,
+            completion.producer.ready_path(),
+            &fixture.reporter_config_path,
+            fixture.owner_uid,
+            fixture.owner_gid,
+        )
+        .expect("missing ready state is inert");
+        let observation_at = preflight_at + Duration::from_secs(5);
+        let observation_secs = unix_seconds(observation_at).expect("observation time");
+        let evidence = ExternalActivationEvidence {
+            generation: prepared_receipt.generation,
+            materialized: true,
+            process_state: "running".to_string(),
+            probe_state: "healthy".to_string(),
+            heartbeat_observed_at_unix_secs: observation_secs - 2,
+            process_observed_at_unix_secs: observation_secs - 1,
+            probe_observed_at_unix_secs: observation_secs,
+        };
+        for rejected in [
+            ExternalActivationEvidence {
+                generation: evidence.generation + 1,
+                ..evidence.clone()
+            },
+            ExternalActivationEvidence {
+                probe_state: "failed".to_string(),
+                ..evidence.clone()
+            },
+            ExternalActivationEvidence {
+                heartbeat_observed_at_unix_secs: observation_secs - 121,
+                ..evidence.clone()
+            },
+        ] {
+            assert!(finalize_prepared_operation(
+                &transaction,
+                &fixture.entry,
+                &fixture.request(operation_ref, "finalize", Some(rejected)),
+                observation_at,
+                Some(&completion),
+            )
+            .await
+            .is_err());
+            assert!(!completion.producer.pending_path().exists());
+            assert_eq!(fake.captured_len(), 0);
+        }
+
+        // Simulate the exact crash point after accepted evidence is fsynced
+        // but before lifecycle completion. The normal finalize path must reuse
+        // these original timestamps rather than stamping the retry.
+        let candidate = completion_candidate(
+            &fixture.entry,
+            &fixture.request(operation_ref, "finalize", Some(evidence.clone())),
+            &outbox,
+            &prepared_receipt,
+        );
+        completion
+            .persist_accepted(&candidate, accepted_evidence(&evidence), observation_at)
+            .expect("persist accepted activation evidence");
+        let pending_bytes = fs::read(completion.producer.pending_path()).expect("pending evidence");
+        assert_eq!(
+            transaction.status().await.expect("prepared status").phase,
+            EntryPhase::Validated
+        );
+        assert_eq!(fake.captured_len(), 0);
+
+        let response = finalize_prepared_operation(
+            &transaction,
+            &fixture.entry,
+            &fixture.request(operation_ref, "finalize", Some(evidence.clone())),
+            observation_at,
+            Some(&completion),
+        )
+        .await
+        .expect("complete generated-create lifecycle");
+        assert_eq!(response.phase, "completed");
+        assert_eq!(response.reason_code, "entry_external_activation_ok");
+        assert!(!response.value_returned);
+        assert_eq!(
+            pending_bytes,
+            fs::read(completion.producer.ready_path()).expect("ready evidence")
+        );
+        assert_eq!(fake.captured_len(), 0);
+
+        let absent_binding = fixture.binding_path.with_extension("absent");
+        fs::rename(&fixture.binding_path, &absent_binding).expect("hide operator binding");
+        test_support::run_optional_from_paths_for_test(
+            &fixture.binding_path,
+            completion.producer.ready_path(),
+            &fixture.reporter_config_path,
+            fixture.owner_uid,
+            fixture.owner_gid,
+        )
+        .expect("missing binding is inert");
+        fs::rename(&absent_binding, &fixture.binding_path).expect("restore operator binding");
+        let absent_config = fixture.reporter_config_path.with_extension("absent");
+        fs::rename(&fixture.reporter_config_path, &absent_config).expect("hide reporter config");
+        assert!(test_support::run_optional_from_paths_for_test(
+            &fixture.binding_path,
+            completion.producer.ready_path(),
+            &fixture.reporter_config_path,
+            fixture.owner_uid,
+            fixture.owner_gid,
+        )
+        .is_err());
+        fs::rename(&absent_config, &fixture.reporter_config_path).expect("restore reporter config");
+        assert_eq!(fake.captured_len(), 0);
+
+        // Wrong target or generation epoch in privileged authority fails
+        // before credentials or transport are touched.
+        let correct_binding = binding.clone();
+        binding.target_fingerprint = "9".repeat(64);
+        write_binding(&fixture.binding_path, &binding);
+        assert!(test_support::run_from_paths_for_test(
+            &fixture.binding_path,
+            completion.producer.ready_path(),
+            &fixture.reporter_config_path,
+            fixture.owner_uid,
+            fixture.owner_gid,
+        )
+        .is_err());
+        binding = correct_binding.clone();
+        binding.revocation_epoch += 1;
+        write_binding(&fixture.binding_path, &binding);
+        assert!(test_support::run_from_paths_for_test(
+            &fixture.binding_path,
+            completion.producer.ready_path(),
+            &fixture.reporter_config_path,
+            fixture.owner_uid,
+            fixture.owner_gid,
+        )
+        .is_err());
+        assert_eq!(fake.captured_len(), 0);
+        write_binding(&fixture.binding_path, &correct_binding);
+
+        // The first networked attempt loses the terminal response after the
+        // fake endpoint has observed it. Concurrent retries serialize through
+        // the real reporter journal and replay the exact same bytes/key.
+        assert!(test_support::run_from_paths_for_test(
+            &fixture.binding_path,
+            completion.producer.ready_path(),
+            &fixture.reporter_config_path,
+            fixture.owner_uid,
+            fixture.owner_gid,
+        )
+        .is_err());
+        let paths = (
+            fixture.binding_path.clone(),
+            completion.producer.ready_path().to_path_buf(),
+            fixture.reporter_config_path.clone(),
+        );
+        let first_paths = paths.clone();
+        let owner = (fixture.owner_uid, fixture.owner_gid);
+        let first = thread::spawn(move || {
+            test_support::run_from_paths_for_test(
+                &first_paths.0,
+                &first_paths.1,
+                &first_paths.2,
+                owner.0,
+                owner.1,
+            )
+        });
+        let second = thread::spawn(move || {
+            test_support::run_from_paths_for_test(&paths.0, &paths.1, &paths.2, owner.0, owner.1)
+        });
+        let outcomes = [
+            first.join().expect("first retry"),
+            second.join().expect("second retry"),
+        ];
+        assert!(outcomes.iter().any(Result::is_ok));
+        test_support::run_from_paths_for_test(
+            &fixture.binding_path,
+            completion.producer.ready_path(),
+            &fixture.reporter_config_path,
+            fixture.owner_uid,
+            fixture.owner_gid,
+        )
+        .expect("completed report is idempotent");
+
+        let requests = fake.finish();
+        assert_eq!(requests.len(), 4);
+        let expected_handoff_header = URL_SAFE_NO_PAD.encode((0_u8..32).collect::<Vec<_>>());
+        for (index, request) in requests.iter().enumerate() {
+            assert_eq!(
+                request.headers.get("accept"),
+                Some(&vec![MEDIA_TYPE.to_string()])
+            );
+            assert_eq!(
+                request.headers.get("authorization"),
+                Some(&vec![format!("Bearer paimos_{}", "a".repeat(40))])
+            );
+            assert_eq!(
+                request.headers.get("x-paimos-handoff-secret"),
+                Some(&vec![expected_handoff_header.clone()])
+            );
+            if index == 0 {
+                assert!(!request.headers.contains_key("content-type"));
+            } else {
+                assert_eq!(
+                    request.headers.get("content-type"),
+                    Some(&vec![MEDIA_TYPE.to_string()])
+                );
+            }
+        }
+        assert_eq!(requests[2].body, requests[3].body);
+        assert_eq!(
+            requests[2].headers.get("idempotency-key"),
+            requests[3].headers.get("idempotency-key")
+        );
+        let observed_at = janus_core::MaterialTimestamp::from_unix_seconds(
+            i64::try_from(observation_secs).expect("timestamp range"),
+        )
+        .to_utc_string();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&requests[1].body).expect("accept body"),
+            json!({"sequence": 1, "observed_at": observed_at})
+        );
+        let terminal: Value = serde_json::from_slice(&requests[2].body).expect("terminal body");
+        assert_eq!(terminal["sequence"], 2);
+        assert_eq!(terminal["state"], "succeeded");
+        assert_eq!(terminal["observed_at"], observed_at);
+        assert_eq!(terminal["heartbeat"], false);
+        assert_eq!(terminal["janus_evidence"]["kind"], "credential_handoff");
+        assert_eq!(terminal["janus_evidence"]["credential_ready"], true);
+        let outbound = requests
+            .iter()
+            .flat_map(|request| request.body.iter().copied())
+            .collect::<Vec<_>>();
+        let outbound = String::from_utf8(outbound).expect("outbound UTF-8");
+        for forbidden in [
+            "SENSITIVE_TRANSACTION_CANARY",
+            "packet_base64",
+            "ciphertext",
+            operation_ref,
+            prepared_receipt.secret_ref.as_str(),
+            fixture.entry.plan.expected_scope_ref.as_str(),
+            prepared_receipt.plan_fingerprint.as_str(),
+            prepared_receipt.target_fingerprint.as_str(),
+            fixture.entry.delivery.producer_key_id.as_str(),
+        ] {
+            assert!(
+                !outbound.contains(forbidden),
+                "outbound report leaked local material"
+            );
+        }
+        let journal =
+            fs::read_to_string(fixture.reporter_journal.join(format!("{HANDOFF_ID}.json")))
+                .expect("real reporter journal");
+        assert!(journal.contains("\"sequence\":2"));
+        assert!(!journal.contains("SENSITIVE_TRANSACTION_CANARY"));
     }
 }

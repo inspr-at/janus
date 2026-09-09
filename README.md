@@ -13,11 +13,11 @@ agents - without making raw credentials part of prompts, command arguments,
 logs, or application code.
 
 [![License: AGPL-3.0-only](https://img.shields.io/badge/license-AGPL--3.0--only-1f7a72.svg)](LICENSE)
-[![Rust engine](https://img.shields.io/badge/Rust_engine-v0.1.33-cb7c28.svg)](https://github.com/inspr-at/janus/releases/tag/rust-engine-v0.1.33)
+[![Rust engine](https://img.shields.io/badge/Rust_engine-v0.1.34-cb7c28.svg)](https://github.com/inspr-at/janus/releases/tag/rust-engine-v0.1.34)
 
 [Product site](https://janus.inspr.at/) ·
 [Deutsch](https://janus.inspr.at/de/) ·
-[Rust engine v0.1.33](https://github.com/inspr-at/janus/releases/tag/rust-engine-v0.1.33) ·
+[Rust engine v0.1.34](https://github.com/inspr-at/janus/releases/tag/rust-engine-v0.1.34) ·
 [INSPR](https://www.inspr.at)
 
 Janus is part of the open INSPR product family and is authored and published
@@ -96,7 +96,7 @@ Janus has two layers with different histories:
 
 | Layer | Role | Language | Status |
 |---|---|---|---|
-| **Rust engine** | Secret store contracts, Warden, permits, approved-use execution, rotation, lifecycle, and operator CLI | Rust | Active and released. Current tag: `rust-engine-v0.1.33`. |
+| **Rust engine** | Secret store contracts, Warden, permits, approved-use execution, rotation, lifecycle, and operator CLI | Rust | Active and released. Current tag: `rust-engine-v0.1.34`. |
 | **Go envelope** | Existing governance, audit, evidence, and oversight surface | Go | Shipped, operational, and transitional. New core capability work lands in Rust. |
 
 The Rust engine is no longer a skeleton. Core execution paths ship with unit,
@@ -485,6 +485,18 @@ ordinary API. See the
 [`web ingress boundary`](docs/managed-secret-ingress.md), and
 [`typed transaction protocol`](docs/managed-web-transaction.md).
 
+For one explicitly bound generated create, Rust can retain the already
+validated host activation evidence before lifecycle completion and notify the
+existing Paimos dependency reporter afterward. The network-none transaction
+daemon writes only a fixed, private pending-to-ready evidence record as
+uid/gid `100:993`; a separate privileged no-argument one-shot validates the
+root-owned binding and performs reporting with the existing credentials and
+egress. Without the catalog capability, managed transactions behave exactly as
+before. Reporting never edits reporter config, and a report failure cannot
+undo a completed secret transaction. The exact binding, timestamp,
+durability, restart, custody, digest, and cycle-prevention rules are part of the
+[`typed transaction protocol`](docs/managed-web-transaction.md#optional-paimos-completion-producer).
+
 ### Paimos dependency evidence
 
 `janus-paimos-dependency-reporter` is a one-shot adapter for the Paimos
@@ -575,7 +587,7 @@ are checked by `scripts/check-paimos-external-stage-pins.py`.
 | Local evidence assertion | Config carries one trusted positive `authorization` or `credential_handoff` timestamp from an already-reviewed Janus transaction; the reporter does not independently certify transaction or target readiness. |
 | Journal / crash replay | Accept and report bodies are journaled before send; ambiguous transport failures replay identical bytes and idempotency keys without a new pull. |
 | Server-side freshness | Paimos enforces registration, handoff validity, revocation, rotation, sequence, and expiry; stale, rotated, or revoked handoffs fail closed at pull or mutation. |
-| No `janusd` wiring yet | Nothing in `janusd`, Warden, or the executor writes reporter config or execs the binary; orchestration remains external (systemd, operator script, future worker). |
+| Narrow `janusd` producer | One optional catalog capability lets the network-none daemon publish only an immutable value-free record after exact host evidence and external-activation completion. A separate privileged fixed-path one-shot invokes the reporter; the daemon never receives config, credentials, egress, or an executable selector. |
 
 **What this evidence proves:** one Janus dependency reporter, bound to one
 reviewed handoff, was configured with one asserted positive fact

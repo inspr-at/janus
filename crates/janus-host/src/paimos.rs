@@ -37,8 +37,11 @@ pub const PAIMOS_EXTERNAL_STAGE_FIXTURE_DIGEST: &str =
 const MEDIA_TYPE: &str = "application/vnd.paimos.external-stage.v1+json";
 const HANDOFF_SECRET_HEADER: &str = "X-PAIMOS-Handoff-Secret";
 const CONFIG_SCHEMA: &str = "inspr.janus.paimos-dependency-reporter-config.v1";
+const BINDING_SCHEMA: &str = "inspr.janus.paimos-dependency-reporter-binding.v1";
+const MANAGED_CONFIG_SCHEMA: &str = "inspr.janus.paimos-managed-completion-reporter-config.v1";
+const MANAGED_BINDING_SCHEMA: &str = "inspr.janus.paimos-managed-completion-reporter-binding.v1";
 const JOURNAL_SCHEMA: &str = "inspr.janus.paimos-dependency-reporter-journal.v1";
-const SYSTEM_CONFIG_PATH: &str = "/run/janus-paimos-dependency-reporter/config.json";
+pub(crate) const SYSTEM_CONFIG_PATH: &str = "/run/janus-paimos-dependency-reporter/config.json";
 const MAX_CONFIG_BYTES: usize = 32 * 1024;
 const MAX_API_KEY_BYTES: usize = 4 * 1024;
 const MAX_RESPONSE_BYTES: usize = 64 * 1024;
@@ -84,6 +87,30 @@ struct ReporterConfigV1 {
     journal_directory: String,
     expected: ExpectedBindingV1,
     evidence: DependencyEvidenceV1,
+}
+
+/// Root-owned authority for the managed-transaction completion mode. Unlike
+/// the legacy static config, this never predicts an evidence timestamp. The
+/// timestamp is supplied later by the separately validated durable record.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ManagedReporterConfigV1 {
+    schema: String,
+    schema_version: u8,
+    paimos_origin: String,
+    handoff_id: String,
+    api_key_file: String,
+    handoff_secret_file: String,
+    journal_directory: String,
+    expected: ExpectedBindingV1,
+    evidence: ManagedEvidencePolicyV1,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct ManagedEvidencePolicyV1 {
+    kind: String,
+    source: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -262,6 +289,52 @@ struct ReporterJournalV1 {
     completed: Option<ReportReceiptV1>,
 }
 
+/// Value-free fingerprint and expected tuple for one already-installed
+/// reporter configuration. This grants no Paimos authority: execution still
+/// reads the fixed root-owned config and Paimos validates the live handoff.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PaimosReporterBindingV1 {
+    schema: String,
+    schema_version: u8,
+    config_digest: String,
+    handoff_id: String,
+    dependency_key: String,
+    stage_key: String,
+    execution_number: i64,
+    plan_digest: String,
+    predecessor_digest: String,
+    authority_epoch: i64,
+    context_digest: String,
+    credential_epoch: i64,
+    expires_at: String,
+    evidence_kind: String,
+    evidence_observed_at: String,
+}
+
+/// Value-free fingerprint and exact Paimos tuple for one immutable managed
+/// completion configuration. It carries no timestamp and grants no Paimos
+/// authority without the protected config, credentials, and live handoff.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PaimosManagedCompletionBindingV1 {
+    pub(crate) schema: String,
+    pub(crate) schema_version: u8,
+    pub(crate) config_digest: String,
+    pub(crate) handoff_id: String,
+    pub(crate) dependency_key: String,
+    pub(crate) stage_key: String,
+    pub(crate) execution_number: i64,
+    pub(crate) plan_digest: String,
+    pub(crate) predecessor_digest: String,
+    pub(crate) authority_epoch: i64,
+    pub(crate) context_digest: String,
+    pub(crate) credential_epoch: i64,
+    pub(crate) expires_at: String,
+    pub(crate) evidence_kind: String,
+    pub(crate) evidence_source: String,
+}
+
 struct Credentials {
     authorization: Zeroizing<String>,
     handoff_header: Zeroizing<String>,
@@ -280,6 +353,37 @@ struct Reporter {
 
 /// Read the fixed root-owned request and execute at most one dependency report.
 pub fn run_from_system() -> ReporterResult<()> {
+    let config = load_system_config()?;
+    Reporter::new(config, 0, false)?.run()
+}
+
+/// Confirm that the fixed root-owned reporter config is exactly the reviewed
+/// value-free binding. Credentials are not opened and no network call occurs.
+pub fn validate_system_binding(binding: &PaimosReporterBindingV1) -> ReporterResult<()> {
+    let config = load_system_config()?;
+    validate_config(&config, false)?;
+    validate_reporter_binding(&config, binding, false)
+}
+
+/// Run the existing one-shot reporter only if its fixed root-owned config is
+/// byte-semantically identical to the reviewed value-free binding.
+pub fn run_from_system_if_bound(binding: &PaimosReporterBindingV1) -> ReporterResult<()> {
+    let config = load_system_config()?;
+    run_bound_config(config, binding, 0, false)
+}
+
+pub(crate) fn run_managed_completion_from_path(
+    path: &Path,
+    binding: &PaimosManagedCompletionBindingV1,
+    observed_at: String,
+    owner_uid: u32,
+    allow_loopback_http: bool,
+) -> ReporterResult<()> {
+    let config = load_managed_config(path, owner_uid)?;
+    run_managed_bound_config(config, binding, observed_at, owner_uid, allow_loopback_http)
+}
+
+fn load_system_config() -> ReporterResult<ReporterConfigV1> {
     let raw = read_private_regular(
         Path::new(SYSTEM_CONFIG_PATH),
         MAX_CONFIG_BYTES,
@@ -287,8 +391,228 @@ pub fn run_from_system() -> ReporterResult<()> {
         "paimos_reporter_config_unavailable",
     )
     .map_err(|_| PaimosReporterError::new("paimos_reporter_config_unavailable"))?;
-    let config = decode_strict::<ReporterConfigV1>(&raw, "paimos_reporter_config_invalid")?;
-    Reporter::new(config, 0, false)?.run()
+    decode_strict::<ReporterConfigV1>(&raw, "paimos_reporter_config_invalid")
+}
+
+fn load_managed_config(path: &Path, owner_uid: u32) -> ReporterResult<ManagedReporterConfigV1> {
+    let raw = read_private_regular(
+        path,
+        MAX_CONFIG_BYTES,
+        Some(owner_uid),
+        "paimos_reporter_config_unavailable",
+    )
+    .map_err(|_| PaimosReporterError::new("paimos_reporter_config_unavailable"))?;
+    decode_strict::<ManagedReporterConfigV1>(&raw, "paimos_reporter_config_invalid")
+}
+
+fn reporter_binding(
+    config: &ReporterConfigV1,
+    allow_loopback_http: bool,
+) -> ReporterResult<PaimosReporterBindingV1> {
+    validate_config(config, allow_loopback_http)?;
+    let canonical = serde_json::to_vec(config)
+        .map_err(|_| PaimosReporterError::new("paimos_reporter_config_invalid"))?;
+    Ok(PaimosReporterBindingV1 {
+        schema: BINDING_SCHEMA.to_string(),
+        schema_version: 1,
+        config_digest: wire_digest(&canonical),
+        handoff_id: config.handoff_id.clone(),
+        dependency_key: config.expected.dependency_key.clone(),
+        stage_key: stage_key_name(config.expected.stage_key).to_string(),
+        execution_number: config.expected.execution_number,
+        plan_digest: config.expected.plan_digest.clone(),
+        predecessor_digest: config.expected.predecessor_digest.clone(),
+        authority_epoch: config.expected.authority_epoch,
+        context_digest: config.expected.context_digest.clone(),
+        credential_epoch: config.expected.credential_epoch,
+        expires_at: config.expected.expires_at.clone(),
+        evidence_kind: evidence_kind_name(config.evidence.kind()).to_string(),
+        evidence_observed_at: config.evidence.observed_at().to_string(),
+    })
+}
+
+pub(crate) fn managed_reporter_binding(
+    config: &ManagedReporterConfigV1,
+    allow_loopback_http: bool,
+) -> ReporterResult<PaimosManagedCompletionBindingV1> {
+    validate_managed_config(config, allow_loopback_http)?;
+    let canonical = canonical_json_bytes(config)?;
+    Ok(PaimosManagedCompletionBindingV1 {
+        schema: MANAGED_BINDING_SCHEMA.to_string(),
+        schema_version: 1,
+        config_digest: wire_digest(&canonical),
+        handoff_id: config.handoff_id.clone(),
+        dependency_key: config.expected.dependency_key.clone(),
+        stage_key: stage_key_name(config.expected.stage_key).to_string(),
+        execution_number: config.expected.execution_number,
+        plan_digest: config.expected.plan_digest.clone(),
+        predecessor_digest: config.expected.predecessor_digest.clone(),
+        authority_epoch: config.expected.authority_epoch,
+        context_digest: config.expected.context_digest.clone(),
+        credential_epoch: config.expected.credential_epoch,
+        expires_at: config.expected.expires_at.clone(),
+        evidence_kind: config.evidence.kind.clone(),
+        evidence_source: config.evidence.source.clone(),
+    })
+}
+
+/// Serialize the managed-completion authority with recursively sorted object
+/// keys and no insignificant whitespace. This is deliberately the same byte
+/// shape as Nix `builtins.toJSON` for this closed schema (strings, booleans,
+/// non-negative integers, arrays, objects, and null; no floating-point data).
+pub(crate) fn canonical_json_bytes<T: Serialize>(value: &T) -> ReporterResult<Vec<u8>> {
+    let value = serde_json::to_value(value)
+        .map_err(|_| PaimosReporterError::new("paimos_reporter_config_invalid"))?;
+    let mut output = Vec::new();
+    write_canonical_json(&value, &mut output)?;
+    Ok(output)
+}
+
+fn write_canonical_json(value: &serde_json::Value, output: &mut Vec<u8>) -> ReporterResult<()> {
+    match value {
+        serde_json::Value::Null => output.extend_from_slice(b"null"),
+        serde_json::Value::Bool(value) => {
+            output.extend_from_slice(if *value { &b"true"[..] } else { &b"false"[..] })
+        }
+        serde_json::Value::Number(value) => {
+            if !value.is_i64() && !value.is_u64() {
+                return Err(PaimosReporterError::new("paimos_reporter_config_invalid"));
+            }
+            output.extend_from_slice(value.to_string().as_bytes());
+        }
+        serde_json::Value::String(value) => {
+            let encoded = serde_json::to_string(value)
+                .map_err(|_| PaimosReporterError::new("paimos_reporter_config_invalid"))?;
+            output.extend_from_slice(encoded.as_bytes());
+        }
+        serde_json::Value::Array(values) => {
+            output.push(b'[');
+            for (index, value) in values.iter().enumerate() {
+                if index != 0 {
+                    output.push(b',');
+                }
+                write_canonical_json(value, output)?;
+            }
+            output.push(b']');
+        }
+        serde_json::Value::Object(values) => {
+            output.push(b'{');
+            let mut keys = values.keys().collect::<Vec<_>>();
+            keys.sort_unstable();
+            for (index, key) in keys.into_iter().enumerate() {
+                if index != 0 {
+                    output.push(b',');
+                }
+                let encoded = serde_json::to_string(key)
+                    .map_err(|_| PaimosReporterError::new("paimos_reporter_config_invalid"))?;
+                output.extend_from_slice(encoded.as_bytes());
+                output.push(b':');
+                write_canonical_json(&values[key], output)?;
+            }
+            output.push(b'}');
+        }
+    }
+    Ok(())
+}
+
+fn validate_managed_reporter_binding(
+    config: &ManagedReporterConfigV1,
+    binding: &PaimosManagedCompletionBindingV1,
+    allow_loopback_http: bool,
+) -> ReporterResult<()> {
+    if managed_reporter_binding(config, allow_loopback_http)? != *binding {
+        return Err(PaimosReporterError::new("paimos_reporter_binding_refused"));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_managed_reporter_binding_shape(
+    binding: &PaimosManagedCompletionBindingV1,
+) -> ReporterResult<()> {
+    if binding.schema != MANAGED_BINDING_SCHEMA
+        || binding.schema_version != 1
+        || !valid_wire_digest(&binding.config_digest)
+        || !valid_handoff_id(&binding.handoff_id)
+        || !valid_symbol(&binding.dependency_key)
+        || binding.stage_key != "deployment"
+        || binding.execution_number <= 0
+        || !valid_wire_digest(&binding.plan_digest)
+        || !valid_wire_digest(&binding.predecessor_digest)
+        || binding.authority_epoch <= 0
+        || !valid_wire_digest(&binding.context_digest)
+        || binding.credential_epoch <= 0
+        || !valid_timestamp(&binding.expires_at)
+        || binding.evidence_kind != "credential_handoff"
+        || binding.evidence_source != "managed_completion_record"
+    {
+        return Err(PaimosReporterError::new("paimos_reporter_binding_refused"));
+    }
+    Ok(())
+}
+
+fn validate_reporter_binding(
+    config: &ReporterConfigV1,
+    binding: &PaimosReporterBindingV1,
+    allow_loopback_http: bool,
+) -> ReporterResult<()> {
+    if reporter_binding(config, allow_loopback_http)? != *binding {
+        return Err(PaimosReporterError::new("paimos_reporter_binding_refused"));
+    }
+    Ok(())
+}
+
+fn run_bound_config(
+    config: ReporterConfigV1,
+    binding: &PaimosReporterBindingV1,
+    owner_uid: u32,
+    allow_loopback_http: bool,
+) -> ReporterResult<()> {
+    validate_reporter_binding(&config, binding, allow_loopback_http)?;
+    Reporter::new(config, owner_uid, allow_loopback_http)?.run()
+}
+
+fn run_managed_bound_config(
+    config: ManagedReporterConfigV1,
+    binding: &PaimosManagedCompletionBindingV1,
+    observed_at: String,
+    owner_uid: u32,
+    allow_loopback_http: bool,
+) -> ReporterResult<()> {
+    validate_managed_reporter_binding(&config, binding, allow_loopback_http)?;
+    if !valid_timestamp(&observed_at) {
+        return Err(PaimosReporterError::new("paimos_reporter_evidence_invalid"));
+    }
+    let runtime = ReporterConfigV1 {
+        schema: CONFIG_SCHEMA.to_string(),
+        schema_version: 1,
+        paimos_origin: config.paimos_origin,
+        handoff_id: config.handoff_id,
+        api_key_file: config.api_key_file,
+        handoff_secret_file: config.handoff_secret_file,
+        journal_directory: config.journal_directory,
+        expected: config.expected,
+        evidence: DependencyEvidenceV1::CredentialHandoff { observed_at },
+    };
+    Reporter::new(runtime, owner_uid, allow_loopback_http)?.run()
+}
+
+fn stage_key_name(stage: StageKey) -> &'static str {
+    match stage {
+        StageKey::Specification => "specification",
+        StageKey::Implementation => "implementation",
+        StageKey::Qa => "qa",
+        StageKey::Deployment => "deployment",
+        StageKey::Verification => "verification",
+    }
+}
+
+fn evidence_kind_name(kind: EvidenceKind) -> &'static str {
+    match kind {
+        EvidenceKind::Deployment => "deployment",
+        EvidenceKind::Verification => "verification",
+        EvidenceKind::Authorization => "authorization",
+        EvidenceKind::CredentialHandoff => "credential_handoff",
+    }
 }
 
 impl Reporter {
@@ -592,6 +916,35 @@ fn validate_config(config: &ReporterConfigV1, allow_loopback_http: bool) -> Repo
     Ok(())
 }
 
+fn validate_managed_config(
+    config: &ManagedReporterConfigV1,
+    allow_loopback_http: bool,
+) -> ReporterResult<()> {
+    normalized_origin(&config.paimos_origin, allow_loopback_http)?;
+    if config.schema != MANAGED_CONFIG_SCHEMA
+        || config.schema_version != 1
+        || !valid_handoff_id(&config.handoff_id)
+        || config.api_key_file == config.handoff_secret_file
+        || !absolute_path(&config.api_key_file)
+        || !absolute_path(&config.handoff_secret_file)
+        || !absolute_path(&config.journal_directory)
+        || !valid_symbol(&config.expected.dependency_key)
+        || config.expected.stage_key != StageKey::Deployment
+        || config.expected.execution_number <= 0
+        || config.expected.authority_epoch <= 0
+        || config.expected.credential_epoch <= 0
+        || !valid_wire_digest(&config.expected.plan_digest)
+        || !valid_wire_digest(&config.expected.predecessor_digest)
+        || !valid_wire_digest(&config.expected.context_digest)
+        || !valid_timestamp(&config.expected.expires_at)
+        || config.evidence.kind != "credential_handoff"
+        || config.evidence.source != "managed_completion_record"
+    {
+        return Err(PaimosReporterError::new("paimos_reporter_config_invalid"));
+    }
+    Ok(())
+}
+
 fn normalized_origin(raw: &str, allow_loopback_http: bool) -> ReporterResult<String> {
     let parsed =
         Url::parse(raw).map_err(|_| PaimosReporterError::new("paimos_reporter_origin_refused"))?;
@@ -794,7 +1147,7 @@ fn decode_response<T: for<'de> Deserialize<'de>>(response: ureq::Response) -> Re
     decode_strict(&raw, "paimos_reporter_response_invalid")
 }
 
-fn decode_strict<T: for<'de> Deserialize<'de>>(
+pub(crate) fn decode_strict<T: for<'de> Deserialize<'de>>(
     raw: &[u8],
     reason: &'static str,
 ) -> ReporterResult<T> {
@@ -1396,6 +1749,85 @@ mod tests {
         assert!(report.get("pharos_evidence").is_none());
         assert_eq!(report["sequence"], 2);
         assert_eq!(report["heartbeat"], false);
+    }
+
+    #[test]
+    fn protected_binding_is_value_free_and_rejects_any_config_change_before_io() {
+        let mut fixture = fixture(DependencyEvidenceV1::CredentialHandoff {
+            observed_at: OBSERVED_AT.to_string(),
+        });
+        fixture.config.paimos_origin = "https://paimos.example".to_string();
+        let binding = reporter_binding(&fixture.config, false).expect("derive protected binding");
+        validate_reporter_binding(&fixture.config, &binding, false).expect("exact binding");
+        let encoded = serde_json::to_string(&binding).unwrap();
+        for forbidden in [
+            "paimos_origin",
+            "api_key_file",
+            "handoff_secret_file",
+            "journal_directory",
+            "ciphertext",
+        ] {
+            assert!(!encoded.contains(forbidden));
+        }
+        let mut changed = fixture.config;
+        changed.expected.authority_epoch += 1;
+        assert_eq!(
+            validate_reporter_binding(&changed, &binding, false)
+                .expect_err("changed config must fail")
+                .reason_code(),
+            "paimos_reporter_binding_refused"
+        );
+    }
+
+    #[test]
+    fn protected_binding_runs_real_reporter_once_under_concurrent_dispatch() {
+        let mut fixture = fixture(DependencyEvidenceV1::CredentialHandoff {
+            observed_at: OBSERVED_AT.to_string(),
+        });
+        let fake = FakeServer::start(
+            success_steps(&fixture.config),
+            fixture.authorization.clone(),
+            fixture.handoff_header.clone(),
+        );
+        fixture.config.paimos_origin = fake.origin.clone();
+        let binding = reporter_binding(&fixture.config, true).expect("derive protected binding");
+        let first_config = fixture.config.clone();
+        let second_config = fixture.config.clone();
+        let first_binding = binding.clone();
+        let second_binding = binding.clone();
+        let owner_uid = fixture.owner_uid;
+        let first = std::thread::spawn(move || {
+            run_bound_config(first_config, &first_binding, owner_uid, true)
+        });
+        let second = std::thread::spawn(move || {
+            run_bound_config(second_config, &second_binding, owner_uid, true)
+        });
+        let results = [first.join().unwrap(), second.join().unwrap()];
+        assert!(results.iter().any(Result::is_ok));
+        assert!(results.iter().all(|result| {
+            result.is_ok()
+                || result
+                    .as_ref()
+                    .is_err_and(|error| error.reason_code() == "paimos_reporter_busy")
+        }));
+        run_bound_config(fixture.config.clone(), &binding, owner_uid, true)
+            .expect("completed journal is a no-op");
+        let requests = fake.finish();
+        assert_transport_contract(&requests);
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.path.ends_with("/reports"))
+                .count(),
+            1,
+            "concurrent dispatch emitted a duplicate terminal sequence"
+        );
+
+        let mut conflicting = binding;
+        conflicting.config_digest = format!("sha256:{}", "f".repeat(64));
+        let error = run_bound_config(fixture.config, &conflicting, owner_uid, true)
+            .expect_err("changed reporter config must fail closed");
+        assert_eq!(error.reason_code(), "paimos_reporter_binding_refused");
     }
 
     #[test]
