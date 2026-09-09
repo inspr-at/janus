@@ -30,6 +30,8 @@ func TestNormalizePublicBasePath(t *testing.T) {
 		"/janus#frag",
 		"janus",
 		"//janus",
+		"/\\janus",
+		"/\\",
 		"/janus\\x",
 		"/janus foo",
 		"/janus%2fextra",
@@ -56,6 +58,96 @@ func TestJoinPublicPath(t *testing.T) {
 	}
 	if _, err := JoinPublicPath("/janus", "/janus/login"); err == nil {
 		t.Fatal("double join must fail")
+	}
+	unsafe := []string{"//evil.example", "/\\evil.example", "/%5cevil.example", "/%5Cevil.example", "/%2fevil.example"}
+	for _, base := range []string{"", "/janus"} {
+		for _, endpoint := range unsafe {
+			if _, err := JoinPublicPath(base, endpoint); err == nil {
+				t.Fatalf("JoinPublicPath(%q, %q) accepted", base, endpoint)
+			}
+		}
+	}
+}
+
+func TestPublicPathAndHrefKeepPrefixQueryAndExternalPolicy(t *testing.T) {
+	unsafe := []string{"/\\evil.example", "/%5cevil.example", "/%5Cevil.example"}
+	for _, base := range []string{"", "/janus"} {
+		cfg := Config{PublicBasePath: base, PublicURL: "https://vault.barta.cm"}
+		mount := "/"
+		if base != "" {
+			mount = base
+		}
+		for _, endpoint := range unsafe {
+			got := cfg.PublicPath(endpoint)
+			if got != mount || strings.Contains(strings.ToLower(got), "evil.example") {
+				t.Fatalf("PublicPath(%q) under %q got %q", endpoint, base, got)
+			}
+			href := cfg.PublicHref(endpoint)
+			if href != mount || strings.Contains(strings.ToLower(href), "evil.example") || strings.HasPrefix(href, "/\\") {
+				t.Fatalf("PublicHref(%q) under %q got %q", endpoint, base, href)
+			}
+		}
+		if got := cfg.PublicHref("https://evil.example/x"); got != "https://evil.example/x" {
+			t.Fatalf("absolute href must pass through under %q: %q", base, got)
+		}
+		if got := cfg.PublicHref("//evil.example/x"); got != "//evil.example/x" {
+			t.Fatalf("protocol-relative href must pass through under %q: %q", base, got)
+		}
+	}
+	prefixed := Config{PublicBasePath: "/janus", PublicURL: "https://vault.barta.cm"}
+	if got := prefixed.PublicHref("/access?flow_project=17"); got != "/janus/access?flow_project=17" {
+		t.Fatalf("query must survive prefix join: %q", got)
+	}
+	if got := prefixed.PublicHref("/janus/login"); got != "/janus/login" {
+		t.Fatalf("already-prefixed href must stay: %q", got)
+	}
+	if got := prefixed.PublicPath("/janus/login"); got != "/janus/login" {
+		t.Fatalf("already-prefixed path must stay: %q", got)
+	}
+}
+
+func TestLoginAndLogoutRedirectStayLocalForSlashEscape(t *testing.T) {
+	for _, base := range []string{"", "/janus"} {
+		app := newTestApp(t)
+		if base != "" {
+			app = withPublicBase(t, app, base)
+		}
+		app.oauth = testOAuthConfig()
+		loginPath := "/login"
+		logoutPath := "/logout"
+		wantLogout := "/"
+		if base != "" {
+			loginPath = base + "/login"
+			logoutPath = base + "/logout"
+			wantLogout = base
+		}
+		for _, next := range []string{"//evil.example", "/\\evil.example", "/%5cevil.example"} {
+			req := httptest.NewRequest(http.MethodGet, loginPath+"?next="+url.QueryEscape(next), nil)
+			out := httptest.NewRecorder()
+			app.routes().ServeHTTP(out, req)
+			if out.Code != http.StatusFound {
+				t.Fatalf("base=%q next=%q status=%d body=%s", base, next, out.Code, out.Body.String())
+			}
+			location := out.Header().Get("Location")
+			if strings.Contains(strings.ToLower(location), "evil.example") || strings.Contains(location, "/\\") || strings.HasPrefix(location, "//") {
+				t.Fatalf("base=%q next=%q leaked location=%q", base, next, location)
+			}
+		}
+
+		session := Session{Subject: "user-1", Roles: []string{RoleViewer}, Expiry: time.Now().UTC().Add(time.Hour)}
+		cookieWriter := httptest.NewRecorder()
+		app.writeSession(cookieWriter, session)
+		sessionCookie := cookieWriter.Result().Cookies()[0]
+		csrf := app.csrfToken(session)
+		okReq := httptest.NewRequest(http.MethodPost, logoutPath, strings.NewReader("csrf_token="+url.QueryEscape(csrf)))
+		okReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		okReq.Header.Set("Origin", app.cfg.PublicURL)
+		okReq.AddCookie(sessionCookie)
+		okOut := httptest.NewRecorder()
+		app.routes().ServeHTTP(okOut, okReq)
+		if okOut.Code != http.StatusFound || okOut.Header().Get("Location") != wantLogout {
+			t.Fatalf("base=%q logout status=%d location=%q want=%q", base, okOut.Code, okOut.Header().Get("Location"), wantLogout)
+		}
 	}
 }
 

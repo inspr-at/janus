@@ -34,10 +34,7 @@ func NormalizePublicBasePath(value string) (string, error) {
 	if strings.ContainsAny(value, `%\#?`) || strings.Contains(value, "\\") {
 		return "", errPublicBasePath
 	}
-	if strings.HasPrefix(value, "//") {
-		return "", errPublicBasePath
-	}
-	if !strings.HasPrefix(value, "/") {
+	if !strings.HasPrefix(value, "/") || strings.HasPrefix(value, "//") || strings.HasPrefix(value, "/\\") {
 		return "", errPublicBasePath
 	}
 	if strings.HasSuffix(value, "/") {
@@ -78,10 +75,14 @@ func JoinPublicPath(base, endpoint string) (string, error) {
 }
 
 func validateAppRelativePath(endpoint string) error {
-	if endpoint == "" || !strings.HasPrefix(endpoint, "/") {
+	if endpoint == "" || !strings.HasPrefix(endpoint, "/") || strings.HasPrefix(endpoint, "//") || strings.HasPrefix(endpoint, "/\\") {
 		return errPublicJoin
 	}
 	if strings.ContainsAny(endpoint, "?#") || strings.Contains(endpoint, "\\") || strings.Contains(endpoint, "//") {
+		return errPublicJoin
+	}
+	decoded, err := url.PathUnescape(endpoint)
+	if err != nil || strings.Contains(decoded, "\\") || !localAbsolutePath(decoded) {
 		return errPublicJoin
 	}
 	if strings.Contains(endpoint, "/.") || encodedDotSegment.FindStringIndex(endpoint) != nil {
@@ -91,6 +92,12 @@ func validateAppRelativePath(endpoint string) error {
 		return errPublicJoin
 	}
 	return nil
+}
+
+// localAbsolutePath is the CodeQL-recognized local redirect guard: a leading
+// slash that is not "//" or "/\".
+func localAbsolutePath(path string) bool {
+	return strings.HasPrefix(path, "/") && !strings.HasPrefix(path, "//") && !strings.HasPrefix(path, "/\\")
 }
 
 // PublicBaseCovers reports whether requestPath is exactly the configured mount
@@ -137,9 +144,19 @@ func parsePublicOrigin(raw string) (string, error) {
 	return parsed.Scheme + "://" + parsed.Host, nil
 }
 
+func (c Config) publicMountPath() string {
+	if c.PublicBasePath == "" {
+		return "/"
+	}
+	return c.PublicBasePath
+}
+
 func (c Config) PublicPath(endpoint string) string {
 	joined, err := JoinPublicPath(c.PublicBasePath, endpoint)
 	if err != nil {
+		if validateAppRelativePath(endpoint) != nil {
+			return c.publicMountPath()
+		}
 		return endpoint
 	}
 	return joined
@@ -162,6 +179,9 @@ func (c Config) PublicHref(href string) string {
 	}
 	joined, err := JoinPublicPath(c.PublicBasePath, parsed.Path)
 	if err != nil {
+		if validateAppRelativePath(parsed.Path) != nil {
+			return c.publicMountPath()
+		}
 		return href
 	}
 	parsed.Path = joined
