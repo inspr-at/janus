@@ -20,14 +20,17 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::Semaphore;
+use tokio::sync::{mpsc, Semaphore};
 use tokio::time::{timeout, Duration};
 use zeroize::Zeroize;
 
+use super::completion_dispatch::{
+    AcceptedActivationEvidence, CompletionCandidate, CompletionProducer,
+};
 use super::{
     read_regular_bounded, scan_journal_summaries, stable_error_reason, validate_plan,
-    EntryJournalSummary, EntryPhase, EntryPlan, EntryPlanFile, EntrySource, EntryStatus,
-    EntryTransaction, ManagedEntryOperationKind,
+    EntryCompletionReceipt, EntryJournalSummary, EntryPhase, EntryPlan, EntryPlanFile, EntrySource,
+    EntryStatus, EntryTransaction, ManagedEntryOperationKind,
 };
 
 const CATALOG_SCHEMA: &str = "inspr.janus.managed-web-transaction-catalog.v2";
@@ -52,6 +55,8 @@ const EXTERNAL_CLOCK_SKEW_SECONDS: u64 = 30;
 const SOCKET_ENV: &str = "JANUS_MANAGED_WEB_TRANSACTION_SOCKET";
 const CATALOG_ENV: &str = "JANUS_MANAGED_WEB_TRANSACTION_CATALOG_FILE";
 const PEER_UID_ENV: &str = "JANUS_MANAGED_WEB_TRANSACTION_ALLOWED_UID";
+const COMPLETION_RETRY_ATTEMPTS: usize = 3;
+const COMPLETION_RETRY_DELAY: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -184,6 +189,12 @@ struct ReviewedCatalog {
     entries: BTreeMap<CatalogKey, TransactionCatalogEntry>,
 }
 
+#[derive(Clone)]
+struct CompletionWorker {
+    sender: mpsc::Sender<()>,
+    producer: Arc<CompletionProducer>,
+}
+
 struct SecretBuffer(Vec<u8>);
 
 #[derive(Debug)]
@@ -209,6 +220,111 @@ impl Drop for SecretBuffer {
     }
 }
 
+impl CompletionWorker {
+    fn start(
+        producer: Arc<CompletionProducer>,
+        entry: TransactionCatalogEntry,
+        release: ReleaseAdmission,
+    ) -> Self {
+        let (sender, mut receiver) = mpsc::channel(1);
+        let startup_sender = sender.clone();
+        let startup_producer = Arc::clone(&producer);
+        tokio::spawn(async move {
+            while receiver.recv().await.is_some() {
+                for attempt in 0..COMPLETION_RETRY_ATTEMPTS {
+                    let receipt =
+                        transaction_for(&entry, producer.operation_ref(), release.clone())
+                            .and_then(|transaction| transaction.completion_receipt())
+                            .context("completion transaction receipt unavailable");
+                    let result = match receipt {
+                        Ok(receipt) => {
+                            let producer = Arc::clone(&producer);
+                            tokio::task::spawn_blocking(move || {
+                                producer.dispatch_if_eligible(&receipt)
+                            })
+                            .await
+                            .context("completion reporter task unavailable")
+                            .and_then(|result| result)
+                        }
+                        Err(error) => Err(error),
+                    };
+                    match result {
+                        Ok(_) => break,
+                        Err(_) if attempt + 1 < COMPLETION_RETRY_ATTEMPTS => {
+                            tokio::time::sleep(COMPLETION_RETRY_DELAY).await;
+                        }
+                        Err(_) => {
+                            eprintln!(
+                                "janusd-web-transactiond completion dispatch pending reason_code=web_transaction_completion_report_pending value_returned=false"
+                            );
+                        }
+                    }
+                }
+            }
+        });
+        let _ = startup_sender.try_send(());
+        Self {
+            sender,
+            producer: startup_producer,
+        }
+    }
+
+    fn notify(&self) {
+        let _ = self.sender.try_send(());
+    }
+
+    fn persist_accepted(
+        &self,
+        candidate: &CompletionCandidate,
+        evidence: AcceptedActivationEvidence,
+        accepted_at: SystemTime,
+    ) -> Result<bool> {
+        self.producer
+            .persist_accepted(candidate, evidence, accepted_at)
+    }
+}
+
+fn load_completion_worker(
+    catalog: &ReviewedCatalog,
+    release: &ReleaseAdmission,
+) -> Result<Option<CompletionWorker>> {
+    let Some(producer) = CompletionProducer::load_optional_system()? else {
+        return Ok(None);
+    };
+    let producer = Arc::new(producer);
+    let mut matching = catalog.entries.values().filter(|entry| {
+        producer.matches_catalog_key(
+            &entry.operation_kind,
+            if entry.operation_kind == "remove" {
+                "remove"
+            } else {
+                entry.plan.source.mode()
+            },
+            &entry.host_ref,
+            &entry.service_ref,
+            &entry.slot_ref,
+            &entry.declaration_fingerprint,
+            &entry.plan.secret_ref,
+            &entry.plan.expected_scope_ref,
+            entry.delivery.generation,
+            entry.delivery.revocation_epoch,
+            &entry.delivery.producer_key_id,
+        )
+    });
+    let entry = matching
+        .next()
+        .context("web transaction completion binding has no reviewed catalog entry")?
+        .clone();
+    if matching.next().is_some() {
+        anyhow::bail!("web transaction completion binding is ambiguous");
+    }
+    Ok(Some(CompletionWorker::start(
+        producer,
+        entry,
+        release.clone(),
+    )))
+}
+
 pub(crate) async fn run_from_env() -> Result<()> {
     let socket_path = required_absolute_path(SOCKET_ENV)?;
     let catalog_path = required_absolute_path(CATALOG_ENV)?;
@@ -227,6 +343,7 @@ pub(crate) async fn run_from_env() -> Result<()> {
     reconcile_catalog(&catalog, &release)
         .await
         .context("web transaction startup reconciliation denied")?;
+    let completion = load_completion_worker(&catalog, &release)?;
     let listener = bind_private_socket(&socket_path)?;
     let connections = Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
 
@@ -253,9 +370,10 @@ pub(crate) async fn run_from_env() -> Result<()> {
         }
         let catalog = Arc::clone(&catalog);
         let release = release.clone();
+        let completion = completion.clone();
         tokio::spawn(async move {
             let _permit = permit;
-            handle_connection(stream, &catalog, release).await;
+            handle_connection(stream, &catalog, release, completion.as_ref()).await;
         });
     }
 }
@@ -264,6 +382,7 @@ async fn handle_connection(
     mut stream: UnixStream,
     catalog: &ReviewedCatalog,
     release: ReleaseAdmission,
+    completion: Option<&CompletionWorker>,
 ) {
     if super::super::enforce_daemon_runtime_authority(janus_core::RuntimeAction::WebTransaction)
         .await
@@ -323,7 +442,14 @@ async fn handle_connection(
         let response = if request.operation_kind == "remove" {
             finalize_prepared_removal(&transaction, &request, SystemTime::now()).await
         } else {
-            finalize_prepared_operation(&transaction, entry, &request, SystemTime::now()).await
+            finalize_prepared_operation(
+                &transaction,
+                entry,
+                &request,
+                SystemTime::now(),
+                completion,
+            )
+            .await
         }
         .unwrap_or_else(|error| denied_response(operation_ref, stable_web_error_reason(&error)));
         let _ = write_response(&mut stream, &response).await;
@@ -807,6 +933,7 @@ async fn finalize_prepared_operation(
     entry: &TransactionCatalogEntry,
     request: &TransactionRequest,
     now: SystemTime,
+    completion: Option<&CompletionWorker>,
 ) -> Result<TransactionResponse> {
     let status = transaction.status().await?;
     if status.operation_kind != request.operation_kind || status.generation == 0 {
@@ -815,6 +942,9 @@ async fn finalize_prepared_operation(
     if status.phase == EntryPhase::Completed {
         let status = transaction.finish_completed_cleanup().await?;
         remove_outbox_if_present(entry, request, status.generation)?;
+        if let Some(completion) = completion {
+            completion.notify();
+        }
         return Ok(response_from_status(
             &request.operation_ref,
             &status,
@@ -834,10 +964,33 @@ async fn finalize_prepared_operation(
         &record,
         now,
     )?;
+    let completion_recorded = if let Some(completion) = completion {
+        let receipt = transaction.completion_receipt()?;
+        let candidate = completion_candidate(entry, request, &record, &receipt);
+        // Persistence is intentionally performed before lifecycle completion.
+        // The worker is notified only after the exact completed receipt exists.
+        completion.persist_accepted(
+            &candidate,
+            accepted_evidence(
+                request
+                    .external_evidence
+                    .as_ref()
+                    .ok_or(WebTransactionError("web_transaction_evidence_invalid"))?,
+            ),
+            now,
+        )?
+    } else {
+        false
+    };
     let completed = transaction
         .activate_after_external_verification(now)
         .await?;
     remove_outbox_if_present(entry, request, record.generation)?;
+    if completion_recorded {
+        if let Some(completion) = completion {
+            completion.notify();
+        }
+    }
     Ok(response_from_status(
         &request.operation_ref,
         &completed,
@@ -985,6 +1138,45 @@ fn validate_external_evidence(
         return Err(WebTransactionError("web_transaction_evidence_invalid").into());
     }
     Ok(())
+}
+
+fn completion_candidate(
+    entry: &TransactionCatalogEntry,
+    request: &TransactionRequest,
+    record: &HostEnvelopeOutboxRecord,
+    receipt: &EntryCompletionReceipt,
+) -> CompletionCandidate {
+    CompletionCandidate {
+        operation_ref: request.operation_ref.clone(),
+        operation_id: receipt.operation_id.clone(),
+        operation_kind: request.operation_kind.clone(),
+        source: request.source.clone(),
+        host_ref: request.host_ref.clone(),
+        service_ref: request.service_ref.clone(),
+        slot_ref: request.slot_ref.clone(),
+        declaration_fingerprint: request.declaration_fingerprint.clone(),
+        secret_ref: receipt.secret_ref.clone(),
+        scope_ref: entry.plan.expected_scope_ref.clone(),
+        generation: receipt.generation,
+        revocation_epoch: record.revocation_epoch,
+        plan_fingerprint: receipt.plan_fingerprint.clone(),
+        target_fingerprint: receipt.target_fingerprint.clone(),
+        producer_key_id: entry.delivery.producer_key_id.clone(),
+        prepared_at_unix_secs: record.prepared_at_unix_secs,
+        preflighted_at_unix_secs: receipt.preflighted_at_unix_secs,
+    }
+}
+
+fn accepted_evidence(evidence: &ExternalActivationEvidence) -> AcceptedActivationEvidence {
+    AcceptedActivationEvidence {
+        generation: evidence.generation,
+        materialized: evidence.materialized,
+        process_state: evidence.process_state.clone(),
+        probe_state: evidence.probe_state.clone(),
+        heartbeat_observed_at_unix_secs: evidence.heartbeat_observed_at_unix_secs,
+        process_observed_at_unix_secs: evidence.process_observed_at_unix_secs,
+        probe_observed_at_unix_secs: evidence.probe_observed_at_unix_secs,
+    }
 }
 
 fn outbox_path(entry: &TransactionCatalogEntry, operation_ref: &str) -> Result<PathBuf> {
@@ -1446,6 +1638,53 @@ mod tests {
             outbox_hash(&record).expect("outbox hash"),
             "7da188178df0cd5c18c3340c6d7474a8d89d630dbcfdba3ca004ffd8039b21aa"
         );
+    }
+
+    #[test]
+    fn activation_evidence_is_exact_generation_positive_and_fresh() {
+        let record = HostEnvelopeOutboxRecord {
+            schema: OUTBOX_SCHEMA.to_string(),
+            schema_version: DELIVERY_SCHEMA_VERSION,
+            operation_ref: "op_0123456789abcdef".to_string(),
+            operation_kind: "create".to_string(),
+            host_ref: "host_0123456789abcdef".to_string(),
+            service_ref: "svc_0123456789abcdef".to_string(),
+            slot_ref: "slot_0123456789abcdef".to_string(),
+            secret_ref: "sec_0123456789abcdef".to_string(),
+            scope_ref: "scp_0123456789abcdef0123456789abcdef01234567".to_string(),
+            declaration_fingerprint: "decl_0123456789abcdef".to_string(),
+            envelope_ref: "env_0123456789abcdef".to_string(),
+            generation: 3,
+            revocation_epoch: 7,
+            prepared_at_unix_secs: 1_800_000_000,
+            expires_at_unix_secs: 1_800_000_900,
+            packet_base64: "cGFja2V0".to_string(),
+            value_returned: false,
+            integrity_hash: String::new(),
+        };
+        let now = UNIX_EPOCH + std::time::Duration::from_secs(1_800_000_100);
+        let evidence = ExternalActivationEvidence {
+            generation: 3,
+            materialized: true,
+            process_state: "running".to_string(),
+            probe_state: "healthy".to_string(),
+            heartbeat_observed_at_unix_secs: 1_800_000_090,
+            process_observed_at_unix_secs: 1_800_000_091,
+            probe_observed_at_unix_secs: 1_800_000_092,
+        };
+        validate_external_evidence(&evidence, &record, now).unwrap();
+        let mut wrong_generation = evidence.clone();
+        wrong_generation.generation += 1;
+        assert!(validate_external_evidence(&wrong_generation, &record, now).is_err());
+        let mut stale = evidence.clone();
+        stale.heartbeat_observed_at_unix_secs = 1_799_999_900;
+        assert!(validate_external_evidence(&stale, &record, now).is_err());
+        let mut failed = evidence.clone();
+        failed.probe_state = "failed".to_string();
+        assert!(validate_external_evidence(&failed, &record, now).is_err());
+        let mut rolled_back = evidence;
+        rolled_back.process_state = "rolled_back".to_string();
+        assert!(validate_external_evidence(&rolled_back, &record, now).is_err());
     }
 
     #[test]

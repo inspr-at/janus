@@ -64,6 +64,59 @@ health evidence through Pharos. Janus then commits the central transaction.
 Lost responses are retry-safe because the journal, host outbox, bridge state,
 and host executor all use the same operation and generation binding.
 
+## Optional Paimos completion producer
+
+One generated create may opt into a completion-only producer by installing
+`/etc/janus/managed-completion-paimos-binding.json`. Absence of that fixed file
+preserves the previous behavior and emits no Paimos report. There is no argv,
+environment, executable, callback, URL, or reporter-config path selector.
+
+The binding is strict schema
+`inspr.janus.managed-completion-paimos-binding.v1`: one exact operation,
+create/generated catalog key, secret and scope, delivery generation and
+revocation epoch, plan and target fingerprints, producer key ID, and one
+`inspr.janus.paimos-dependency-reporter-binding.v1` value. The nested reporter
+binding pins the canonical digest of the existing fixed reporter config plus
+its handoff ID, dependency/stage/execution, plan/predecessor/context digests,
+authority and credential epochs, expiry, evidence kind, and original reporter
+observation timestamp. A different current reporter config is refused; Janus
+never writes or replaces it.
+
+Before lifecycle activation, and only after the existing generation-bound
+host evidence validation succeeds, Janus fsyncs one integrity-protected
+`completion.json` record in the fixed
+`/var/lib/janus/managed-completion-dispatch` directory. The record retains the
+original heartbeat, process, and probe timestamps, their accepted-at time,
+the preparation and preflight times, generation, and binding digest. It never
+contains the generated value, ciphertext, packet, credential, reporter URL,
+or reporter payload. A retry with the same evidence reuses the record and its
+original times; conflicting evidence or binding fails closed.
+
+The background worker considers only that one binding-derived record and its
+exact integrity-checked lifecycle journal. It never scans completed journal
+history or stamps an old completion with the current time. Eligibility is
+exactly `completed` with reason `entry_external_activation_ok`, create,
+generated source, and matching operation, secret, generation, plan, target,
+and preflight receipt. Prepared, failed, rolled-back, local-hook completion,
+wrong-generation, wrong-target, or missing-record states cause no reporter
+mutation.
+
+Dispatch is outside the Unix request, serialized by a private process lock,
+and retried at most three times per notification. It calls the existing fixed
+Paimos reporter in-process, which retains its own per-handoff lock, exact
+accept-1/terminal-2 request journal, and idempotency keys. A reporter failure
+does not roll back or change the successful secret transaction; restart or an
+idempotent duplicate finalize can notify it again. Because reporting begins
+only after durable Janus completion and the lifecycle transaction has no
+Paimos wait edge, the transaction cannot wait on the dependency it satisfies.
+
+The binding and reporter config must be root-owned mode `0600`, regular,
+single-link files. The completion record directory must already exist,
+root-owned mode `0700`, and may contain only `.completion.lock` and the single
+bounded record. The record and lock are mode `0600`, regular, single-link
+files. Symlinks, hardlinks, owner/mode changes, oversized input, extra files,
+duplicate/unknown JSON fields, or an ambiguous catalog match are refused.
+
 ## Replacement safety
 
 Replace is admitted only for an exact reviewed declaration with a current
@@ -141,6 +194,11 @@ JANUS_MANAGED_WEB_TRANSACTION_CATALOG_FILE=/etc/janus/managed-web-transactions.j
 JANUS_MANAGED_WEB_TRANSACTION_ALLOWED_UID=65532
 JANUS_LIFECYCLE_TOMBSTONE_DIR=/var/lib/janus/tombstones
 ```
+
+The optional completion producer uses only the fixed binding path documented
+above and the reporter's existing fixed
+`/run/janus-paimos-dependency-reporter/config.json`; neither path is accepted
+from the web peer.
 
 It also uses the same exact-scope, Age backend, release-admission, migration,
 and scope-transfer environment as lifecycle entry. The socket parent and

@@ -60,6 +60,8 @@ fn load_host_producer_signing_key(path: &Path, key_id: &str) -> Result<SigningKe
     Ok(SigningKey::from_bytes(&bytes))
 }
 
+#[path = "lifecycle_entry/completion_dispatch.rs"]
+mod completion_dispatch;
 #[path = "lifecycle_entry/dynamic_custody.rs"]
 pub(super) mod dynamic_custody;
 #[path = "lifecycle_entry/dynamic_delivery.rs"]
@@ -223,6 +225,23 @@ pub(super) struct EntryStatus {
     pub(super) phase: EntryPhase,
     pub(super) reason_code: String,
     pub(super) value_returned: bool,
+}
+
+/// Narrow, value-free receipt used by the managed completion producer. It is
+/// read from one already-bound journal; callers cannot select another path or
+/// infer completion by scanning historical journals.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct EntryCompletionReceipt {
+    pub(super) operation_id: String,
+    pub(super) secret_ref: String,
+    pub(super) mode: String,
+    pub(super) operation_kind: String,
+    pub(super) generation: u64,
+    pub(super) phase: EntryPhase,
+    pub(super) reason_code: String,
+    pub(super) plan_fingerprint: String,
+    pub(super) target_fingerprint: String,
+    pub(super) preflighted_at_unix_secs: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1007,6 +1026,24 @@ impl EntryTransaction {
         now: SystemTime,
     ) -> Result<EntryStatus> {
         self.activate_bound(now, false).await
+    }
+
+    /// Read the exact integrity-checked journal receipt for this transaction.
+    pub(super) fn completion_receipt(&self) -> Result<EntryCompletionReceipt> {
+        let _lock = self.lock()?;
+        let journal = self.read_bound_journal()?;
+        Ok(EntryCompletionReceipt {
+            operation_id: journal.operation_id,
+            secret_ref: journal.secret_ref,
+            mode: journal.mode,
+            operation_kind: journal.operation_kind,
+            generation: journal.generation,
+            phase: journal.phase,
+            reason_code: journal.reason_code,
+            plan_fingerprint: journal.plan_fingerprint,
+            target_fingerprint: journal.target_fingerprint,
+            preflighted_at_unix_secs: journal.preflighted_at_unix_secs,
+        })
     }
 
     async fn activate_bound(&self, now: SystemTime, run_local_reload: bool) -> Result<EntryStatus> {

@@ -485,6 +485,15 @@ ordinary API. See the
 [`web ingress boundary`](docs/managed-secret-ingress.md), and
 [`typed transaction protocol`](docs/managed-web-transaction.md).
 
+For one explicitly bound generated create, Rust can retain the already
+validated host activation evidence before lifecycle completion and notify the
+existing Paimos dependency reporter afterward. The optional binding is one
+root-owned fixed-path file; without it, managed transactions behave exactly as
+before. Reporting runs outside the request, never edits reporter config, and a
+report failure cannot undo a completed secret transaction. The exact binding,
+durability, restart, custody, and cycle-prevention rules are part of the
+[`typed transaction protocol`](docs/managed-web-transaction.md#optional-paimos-completion-producer).
+
 ### Paimos dependency evidence
 
 `janus-paimos-dependency-reporter` is a one-shot adapter for the Paimos
@@ -575,7 +584,7 @@ are checked by `scripts/check-paimos-external-stage-pins.py`.
 | Local evidence assertion | Config carries one trusted positive `authorization` or `credential_handoff` timestamp from an already-reviewed Janus transaction; the reporter does not independently certify transaction or target readiness. |
 | Journal / crash replay | Accept and report bodies are journaled before send; ambiguous transport failures replay identical bytes and idempotency keys without a new pull. |
 | Server-side freshness | Paimos enforces registration, handoff validity, revocation, rotation, sequence, and expiry; stale, rotated, or revoked handoffs fail closed at pull or mutation. |
-| No `janusd` wiring yet | Nothing in `janusd`, Warden, or the executor writes reporter config or execs the binary; orchestration remains external (systemd, operator script, future worker). |
+| Narrow `janusd` producer | One optional fixed-path mapping may invoke this same reporter only after an exact generated-create journal reaches external-activation completion. Janus never writes reporter config, adds an executable selector, or turns approval into Paimos authority. |
 
 **What this evidence proves:** one Janus dependency reporter, bound to one
 reviewed handoff, was configured with one asserted positive fact
