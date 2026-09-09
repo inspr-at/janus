@@ -13,11 +13,11 @@ agents - without making raw credentials part of prompts, command arguments,
 logs, or application code.
 
 [![License: AGPL-3.0-only](https://img.shields.io/badge/license-AGPL--3.0--only-1f7a72.svg)](LICENSE)
-[![Rust engine](https://img.shields.io/badge/Rust_engine-v0.1.34-cb7c28.svg)](https://github.com/inspr-at/janus/releases/tag/rust-engine-v0.1.34)
+[![Rust engine](https://img.shields.io/badge/Rust_engine-v0.1.35-cb7c28.svg)](https://github.com/inspr-at/janus/releases/tag/rust-engine-v0.1.35)
 
 [Product site](https://janus.inspr.at/) ·
 [Deutsch](https://janus.inspr.at/de/) ·
-[Rust engine v0.1.34](https://github.com/inspr-at/janus/releases/tag/rust-engine-v0.1.34) ·
+[Rust engine v0.1.35](https://github.com/inspr-at/janus/releases/tag/rust-engine-v0.1.35) ·
 [INSPR](https://www.inspr.at)
 
 Janus is part of the open INSPR product family and is authored and published
@@ -96,7 +96,7 @@ Janus has two layers with different histories:
 
 | Layer | Role | Language | Status |
 |---|---|---|---|
-| **Rust engine** | Secret store contracts, Warden, permits, approved-use execution, rotation, lifecycle, and operator CLI | Rust | Active and released. Current tag: `rust-engine-v0.1.34`. |
+| **Rust engine** | Secret store contracts, Warden, permits, approved-use execution, rotation, lifecycle, and operator CLI | Rust | Active and released. Current tag: `rust-engine-v0.1.35`. |
 | **Go envelope** | Existing governance, audit, evidence, and oversight surface | Go | Shipped, operational, and transitional. New core capability work lands in Rust. |
 
 The Rust engine is no longer a skeleton. Core execution paths ship with unit,
