@@ -77,3 +77,8 @@ examples/paimos-dependency-reporter/managed-completion-binding.golden.json:gener
 crates/janusd/src/lifecycle_entry/completion_dispatch.rs:generic-api-key:505
 crates/janusd/src/lifecycle_entry/web_transaction.rs:generic-api-key:1629
 crates/janusd/src/lifecycle_entry/web_transaction.rs:generic-api-key:1657
+
+# JANUS-462 moves the same reviewed synthetic fixture lines by fourteen lines.
+# Preserve historical positions; these exact tracked-tree positions are unchanged bytes.
+crates/janusd/src/lifecycle_entry/web_transaction.rs:generic-api-key:1643
+crates/janusd/src/lifecycle_entry/web_transaction.rs:generic-api-key:1671

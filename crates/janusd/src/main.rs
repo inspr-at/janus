@@ -3440,13 +3440,17 @@ struct ManagedCommandProfileCatalog {
 
 impl ManagedCommandProfileCatalog {
     fn load(path: &Path) -> Result<Self> {
+        Self::load_with_scope(path, &runtime_scope_from_env()?)
+    }
+
+    fn load_with_scope(path: &Path, scope: &ScopeRef) -> Result<Self> {
         let contents = std::fs::read_to_string(path).with_context(|| {
             format!(
                 "failed to read managed command profile manifest {}",
                 path.display()
             )
         })?;
-        Self::parse_with_scope(&contents, &runtime_scope_from_env()?)
+        Self::parse_with_scope(&contents, scope)
     }
 
     #[cfg(test)]
