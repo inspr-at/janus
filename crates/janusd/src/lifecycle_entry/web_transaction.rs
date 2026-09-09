@@ -1854,8 +1854,7 @@ mod managed_completion_integration_tests {
 
     const HANDOFF_ID: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
     const MEDIA_TYPE: &str = "application/vnd.paimos.external-stage.v1+json";
-    static LIFECYCLE_ENVIRONMENT_LOCK: tokio::sync::Mutex<()> =
-        tokio::sync::Mutex::const_new(());
+    static LIFECYCLE_ENVIRONMENT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     struct EnvironmentGuard {
         identity: Option<std::ffi::OsString>,
