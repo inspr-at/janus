@@ -41,6 +41,7 @@ ed25519-dalek = "2"
 fs2 = "0.4"
 janus-core = { path = "../janus-core" }
 rustix = { version = "1", features = ["fs"] }
+rustls = { version = "=0.23.42", default-features = false, features = ["ring", "std", "tls12"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
@@ -48,6 +49,7 @@ ssh-key = { version = "=0.6.7", default-features = false, features = ["std"] }
 zeroize = "1"
 ureq = { version = "=2.12.1", default-features = false, features = ["tls"] }
 url = "2"
+webpki-roots = "=0.26.11"
 
 [dev-dependencies]
 tempfile = "3"

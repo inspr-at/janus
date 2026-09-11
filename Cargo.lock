@@ -1176,6 +1176,7 @@ dependencies = [
  "fs2",
  "janus-core",
  "rustix",
+ "rustls",
  "serde",
  "serde_json",
  "sha2",
@@ -1183,6 +1184,7 @@ dependencies = [
  "tempfile",
  "ureq",
  "url",
+ "webpki-roots 0.26.11",
  "zeroize",
 ]
 

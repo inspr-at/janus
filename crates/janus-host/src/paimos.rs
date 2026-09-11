@@ -12,6 +12,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::Read;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
@@ -44,6 +45,8 @@ const JOURNAL_SCHEMA: &str = "inspr.janus.paimos-dependency-reporter-journal.v1"
 pub(crate) const SYSTEM_CONFIG_PATH: &str = "/run/janus-paimos-dependency-reporter/config.json";
 const MAX_CONFIG_BYTES: usize = 32 * 1024;
 const MAX_API_KEY_BYTES: usize = 4 * 1024;
+const MAX_CA_BUNDLE_BYTES: usize = 256 * 1024;
+const MAX_CA_CERTIFICATES: usize = 32;
 const MAX_RESPONSE_BYTES: usize = 64 * 1024;
 const MAX_JOURNAL_BYTES: usize = 128 * 1024;
 const IDEMPOTENCY_DOMAIN: &[u8] = b"inspr.janus.paimos-external-stage.idempotency.v1\0";
@@ -81,6 +84,8 @@ struct ReporterConfigV1 {
     schema: String,
     schema_version: u8,
     paimos_origin: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    paimos_ca_file: Option<String>,
     handoff_id: String,
     api_key_file: String,
     handoff_secret_file: String,
@@ -98,6 +103,8 @@ pub(crate) struct ManagedReporterConfigV1 {
     schema: String,
     schema_version: u8,
     paimos_origin: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    paimos_ca_file: Option<String>,
     handoff_id: String,
     api_key_file: String,
     handoff_secret_file: String,
@@ -586,6 +593,7 @@ fn run_managed_bound_config(
         schema: CONFIG_SCHEMA.to_string(),
         schema_version: 1,
         paimos_origin: config.paimos_origin,
+        paimos_ca_file: config.paimos_ca_file,
         handoff_id: config.handoff_id,
         api_key_file: config.api_key_file,
         handoff_secret_file: config.handoff_secret_file,
@@ -632,12 +640,7 @@ impl Reporter {
         validate_private_directory(journal_directory, owner_uid)?;
         let journal_path = journal_directory.join(format!("{}.json", config.handoff_id));
         let lock = acquire_lock(journal_directory, &config.handoff_id, owner_uid)?;
-        let http = ureq::AgentBuilder::new()
-            .timeout_connect(Duration::from_secs(3))
-            .timeout_read(Duration::from_secs(8))
-            .timeout_write(Duration::from_secs(8))
-            .redirects(0)
-            .build();
+        let http = build_http_agent(config.paimos_ca_file.as_deref(), owner_uid)?;
         Ok(Self {
             config,
             config_digest,
@@ -896,6 +899,10 @@ fn validate_config(config: &ReporterConfigV1, allow_loopback_http: bool) -> Repo
     normalized_origin(&config.paimos_origin, allow_loopback_http)?;
     if config.schema != CONFIG_SCHEMA
         || config.schema_version != 1
+        || config
+            .paimos_ca_file
+            .as_deref()
+            .is_some_and(|path| !absolute_path(path))
         || !valid_handoff_id(&config.handoff_id)
         || config.api_key_file == config.handoff_secret_file
         || !absolute_path(&config.api_key_file)
@@ -923,6 +930,10 @@ fn validate_managed_config(
     normalized_origin(&config.paimos_origin, allow_loopback_http)?;
     if config.schema != MANAGED_CONFIG_SCHEMA
         || config.schema_version != 1
+        || config
+            .paimos_ca_file
+            .as_deref()
+            .is_some_and(|path| !absolute_path(path))
         || !valid_handoff_id(&config.handoff_id)
         || config.api_key_file == config.handoff_secret_file
         || !absolute_path(&config.api_key_file)
@@ -943,6 +954,117 @@ fn validate_managed_config(
         return Err(PaimosReporterError::new("paimos_reporter_config_invalid"));
     }
     Ok(())
+}
+
+fn build_http_agent(ca_file: Option<&str>, owner_uid: u32) -> ReporterResult<ureq::Agent> {
+    let mut builder = ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(3))
+        .timeout_read(Duration::from_secs(8))
+        .timeout_write(Duration::from_secs(8))
+        .redirects(0);
+    if let Some(path) = ca_file {
+        let certificates = load_ca_certificates(Path::new(path), owner_uid)?;
+        let mut roots = rustls::RootCertStore {
+            roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+        };
+        for certificate in certificates {
+            roots
+                .add(certificate)
+                .map_err(|_| PaimosReporterError::new("paimos_reporter_ca_invalid"))?;
+        }
+        let tls = rustls::ClientConfig::builder_with_provider(
+            rustls::crypto::ring::default_provider().into(),
+        )
+        .with_protocol_versions(&[&rustls::version::TLS12, &rustls::version::TLS13])
+        .map_err(|_| PaimosReporterError::new("paimos_reporter_ca_invalid"))?
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+        builder = builder.tls_config(Arc::new(tls));
+    }
+    Ok(builder.build())
+}
+
+fn load_ca_certificates(
+    path: &Path,
+    owner_uid: u32,
+) -> ReporterResult<Vec<rustls::pki_types::CertificateDer<'static>>> {
+    let mut bytes = Zeroizing::new(
+        read_private_regular(
+            path,
+            MAX_CA_BUNDLE_BYTES,
+            Some(owner_uid),
+            "paimos_reporter_ca_file_refused",
+        )
+        .map_err(|_| PaimosReporterError::new("paimos_reporter_ca_file_refused"))?,
+    );
+    parse_ca_certificates(bytes.as_mut_slice())
+}
+
+fn parse_ca_certificates(
+    bytes: &[u8],
+) -> ReporterResult<Vec<rustls::pki_types::CertificateDer<'static>>> {
+    const BEGIN: &str = "-----BEGIN CERTIFICATE-----";
+    const END: &str = "-----END CERTIFICATE-----";
+
+    let text = std::str::from_utf8(bytes)
+        .map_err(|_| PaimosReporterError::new("paimos_reporter_ca_invalid"))?;
+    if !text.is_ascii() {
+        return Err(PaimosReporterError::new("paimos_reporter_ca_invalid"));
+    }
+    let mut in_certificate = false;
+    let mut payload_line_seen = false;
+    let mut block_count = 0usize;
+    for line in text.lines() {
+        if !in_certificate {
+            if line.is_empty() {
+                continue;
+            }
+            if line != BEGIN {
+                return Err(PaimosReporterError::new("paimos_reporter_ca_invalid"));
+            }
+            in_certificate = true;
+            payload_line_seen = false;
+            continue;
+        }
+        if line == END {
+            if !payload_line_seen {
+                return Err(PaimosReporterError::new("paimos_reporter_ca_invalid"));
+            }
+            block_count += 1;
+            if block_count > MAX_CA_CERTIFICATES {
+                return Err(PaimosReporterError::new("paimos_reporter_ca_invalid"));
+            }
+            in_certificate = false;
+            continue;
+        }
+        if line.is_empty()
+            || line.len() > 76
+            || !line
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/' | b'='))
+        {
+            return Err(PaimosReporterError::new("paimos_reporter_ca_invalid"));
+        }
+        payload_line_seen = true;
+    }
+    if in_certificate || block_count == 0 {
+        return Err(PaimosReporterError::new("paimos_reporter_ca_invalid"));
+    }
+
+    use rustls::pki_types::pem::PemObject as _;
+    let certificates = rustls::pki_types::CertificateDer::pem_slice_iter(bytes)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| PaimosReporterError::new("paimos_reporter_ca_invalid"))?;
+    if certificates.len() != block_count {
+        return Err(PaimosReporterError::new("paimos_reporter_ca_invalid"));
+    }
+    let mut parsed_roots = rustls::RootCertStore::empty();
+    for certificate in &certificates {
+        parsed_roots
+            .add(certificate.clone())
+            .map_err(|_| PaimosReporterError::new("paimos_reporter_ca_invalid"))?;
+    }
+    Ok(certificates)
 }
 
 fn normalized_origin(raw: &str, allow_loopback_http: bool) -> ReporterResult<String> {
@@ -1337,9 +1459,10 @@ fn absolute_path(value: &str) -> bool {
 mod tests {
     use std::collections::BTreeMap;
     use std::fs;
-    use std::io::{BufRead, BufReader, Write as _};
+    use std::io::{BufRead, BufReader, Read as _, Write as _};
     use std::net::{TcpListener, TcpStream};
     use std::os::unix::fs::PermissionsExt as _;
+    use std::process::{Command, Stdio};
     use std::sync::{Arc, Mutex};
     use std::thread;
 
@@ -1480,6 +1603,7 @@ mod tests {
                 schema: CONFIG_SCHEMA.to_string(),
                 schema_version: 1,
                 paimos_origin: String::new(),
+                paimos_ca_file: None,
                 handoff_id: HANDOFF_ID.to_string(),
                 api_key_file: api_key_path.to_string_lossy().into_owned(),
                 handoff_secret_file: handoff_secret_path.to_string_lossy().into_owned(),
@@ -1502,6 +1626,171 @@ mod tests {
             handoff_header: URL_SAFE_NO_PAD.encode(handoff_secret),
             _temporary: temporary,
         }
+    }
+
+    struct TestCa {
+        certificate: PathBuf,
+        private_key: PathBuf,
+    }
+
+    struct TestServerCertificate {
+        certificate: PathBuf,
+        private_key: PathBuf,
+    }
+
+    fn write_private(path: &Path, bytes: &[u8]) {
+        fs::write(path, bytes).expect("write private test file");
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+            .expect("protect private test file");
+    }
+
+    fn run_test_openssl(directory: &Path, arguments: &[&str]) {
+        let status = Command::new("openssl")
+            .current_dir(directory)
+            .args(arguments)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("run openssl for ephemeral test certificate");
+        assert!(status.success(), "ephemeral openssl command failed");
+    }
+
+    fn generate_test_ca(directory: &Path, name: &str) -> TestCa {
+        let ca_directory = directory.join(name);
+        fs::create_dir(&ca_directory).expect("create ephemeral CA directory");
+        run_test_openssl(
+            &ca_directory,
+            &[
+                "req",
+                "-x509",
+                "-newkey",
+                "rsa:2048",
+                "-nodes",
+                "-keyout",
+                "ca.key",
+                "-out",
+                "ca.pem",
+                "-days",
+                "2",
+                "-sha256",
+                "-subj",
+                "/CN=Janus ephemeral test CA",
+                "-addext",
+                "basicConstraints=critical,CA:TRUE",
+                "-addext",
+                "keyUsage=critical,keyCertSign,cRLSign",
+            ],
+        );
+        let certificate = ca_directory.join("ca.pem");
+        let private_key = ca_directory.join("ca.key");
+        fs::set_permissions(&certificate, fs::Permissions::from_mode(0o600))
+            .expect("protect ephemeral CA certificate");
+        fs::set_permissions(&private_key, fs::Permissions::from_mode(0o600))
+            .expect("protect ephemeral CA key");
+        TestCa {
+            certificate,
+            private_key,
+        }
+    }
+
+    fn generate_server_certificate(
+        directory: &Path,
+        ca: &TestCa,
+        name: &str,
+        subject_alt_name: &str,
+    ) -> TestServerCertificate {
+        let server_directory = directory.join(name);
+        fs::create_dir(&server_directory).expect("create ephemeral server certificate directory");
+        run_test_openssl(
+            &server_directory,
+            &[
+                "req",
+                "-newkey",
+                "rsa:2048",
+                "-nodes",
+                "-keyout",
+                "server.key",
+                "-out",
+                "server.csr",
+                "-subj",
+                "/CN=Janus ephemeral test server",
+            ],
+        );
+        fs::write(
+            server_directory.join("server.ext"),
+            format!(
+                "basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectAltName={subject_alt_name}\n"
+            ),
+        )
+        .expect("write ephemeral certificate extensions");
+        let ca_certificate = ca.certificate.to_str().expect("UTF-8 CA certificate path");
+        let ca_private_key = ca.private_key.to_str().expect("UTF-8 CA key path");
+        run_test_openssl(
+            &server_directory,
+            &[
+                "x509",
+                "-req",
+                "-in",
+                "server.csr",
+                "-CA",
+                ca_certificate,
+                "-CAkey",
+                ca_private_key,
+                "-CAcreateserial",
+                "-out",
+                "server.pem",
+                "-days",
+                "2",
+                "-sha256",
+                "-extfile",
+                "server.ext",
+            ],
+        );
+        TestServerCertificate {
+            certificate: server_directory.join("server.pem"),
+            private_key: server_directory.join("server.key"),
+        }
+    }
+
+    fn start_test_https_server(
+        material: &TestServerCertificate,
+    ) -> (String, thread::JoinHandle<()>) {
+        use rustls::pki_types::pem::PemObject as _;
+
+        let certificate = rustls::pki_types::CertificateDer::from_pem_file(&material.certificate)
+            .expect("read ephemeral server certificate");
+        let private_key = rustls::pki_types::PrivateKeyDer::from_pem_file(&material.private_key)
+            .expect("read ephemeral server private key");
+        let server_config = rustls::ServerConfig::builder_with_provider(
+            rustls::crypto::ring::default_provider().into(),
+        )
+        .with_protocol_versions(&[&rustls::version::TLS12, &rustls::version::TLS13])
+        .expect("ephemeral TLS protocol versions")
+        .with_no_client_auth()
+        .with_single_cert(vec![certificate], private_key)
+        .expect("ephemeral TLS server configuration");
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral HTTPS server");
+        let port = listener
+            .local_addr()
+            .expect("ephemeral HTTPS address")
+            .port();
+        let handle = thread::spawn(move || {
+            let Ok((stream, _)) = listener.accept() else {
+                return;
+            };
+            let Ok(connection) = rustls::ServerConnection::new(Arc::new(server_config)) else {
+                return;
+            };
+            let mut stream = rustls::StreamOwned::new(connection, stream);
+            let mut request = [0u8; 4096];
+            if stream.read(&mut request).is_ok() {
+                let _ = stream.write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+                );
+            }
+        });
+        (format!("https://127.0.0.1:{port}"), handle)
     }
 
     fn read_request(stream: TcpStream, authorization: &str, handoff_header: &str) -> ParsedRequest {
@@ -2113,6 +2402,243 @@ mod tests {
         );
     }
 
+    #[test]
+    fn optional_ca_is_certificate_only_bounded_and_privately_custodied() {
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempfile::tempdir().expect("temporary CA test root");
+        let ca = generate_test_ca(temporary.path(), "trusted-ca");
+        let owner_uid = fs::metadata(&ca.certificate)
+            .expect("ephemeral CA metadata")
+            .uid();
+        assert_eq!(
+            load_ca_certificates(&ca.certificate, owner_uid)
+                .expect("valid protected CA certificate")
+                .len(),
+            1
+        );
+
+        let invalid = temporary.path().join("invalid.pem");
+        for bytes in [
+            b"not a PEM certificate".as_slice(),
+            b"-----BEGIN CERTIFICATE-----\nYWJj\n-----END CERTIFICATE-----\n".as_slice(),
+            b"-----BEGIN PUBLIC KEY-----\nYWJj\n-----END PUBLIC KEY-----\n".as_slice(),
+        ] {
+            write_private(&invalid, bytes);
+            assert_eq!(
+                load_ca_certificates(&invalid, owner_uid)
+                    .expect_err("non-certificate or malformed PEM must fail")
+                    .reason_code(),
+                "paimos_reporter_ca_invalid"
+            );
+        }
+
+        let mut certificate_and_key = fs::read(&ca.certificate).expect("read ephemeral CA PEM");
+        certificate_and_key
+            .extend_from_slice(&fs::read(&ca.private_key).expect("read ephemeral CA key"));
+        write_private(&invalid, &certificate_and_key);
+        certificate_and_key.fill(0);
+        assert_eq!(
+            load_ca_certificates(&invalid, owner_uid)
+                .expect_err("certificate plus private key must fail")
+                .reason_code(),
+            "paimos_reporter_ca_invalid"
+        );
+
+        let certificate = fs::read(&ca.certificate).expect("read ephemeral CA for count bound");
+        write_private(&invalid, &certificate.repeat(MAX_CA_CERTIFICATES + 1));
+        assert_eq!(
+            load_ca_certificates(&invalid, owner_uid)
+                .expect_err("excess certificate count must fail")
+                .reason_code(),
+            "paimos_reporter_ca_invalid"
+        );
+        write_private(&invalid, &vec![b'A'; MAX_CA_BUNDLE_BYTES + 1]);
+        assert_eq!(
+            load_ca_certificates(&invalid, owner_uid)
+                .expect_err("oversized certificate file must fail")
+                .reason_code(),
+            "paimos_reporter_ca_file_refused"
+        );
+
+        let missing = temporary.path().join("missing.pem");
+        assert_eq!(
+            load_ca_certificates(&missing, owner_uid)
+                .expect_err("missing certificate file must fail")
+                .reason_code(),
+            "paimos_reporter_ca_file_refused"
+        );
+        let wrong_owner_uid = if owner_uid == 0 { 1 } else { 0 };
+        assert_eq!(
+            load_ca_certificates(&ca.certificate, wrong_owner_uid)
+                .expect_err("certificate file with the wrong owner must fail")
+                .reason_code(),
+            "paimos_reporter_ca_file_refused"
+        );
+        fs::set_permissions(&ca.certificate, fs::Permissions::from_mode(0o644))
+            .expect("weaken ephemeral CA mode");
+        assert_eq!(
+            load_ca_certificates(&ca.certificate, owner_uid)
+                .expect_err("public certificate file mode must fail")
+                .reason_code(),
+            "paimos_reporter_ca_file_refused"
+        );
+        fs::set_permissions(&ca.certificate, fs::Permissions::from_mode(0o600))
+            .expect("restore ephemeral CA mode");
+
+        let linked = temporary.path().join("linked.pem");
+        fs::hard_link(&ca.certificate, &linked).expect("hard-link ephemeral CA");
+        assert_eq!(
+            load_ca_certificates(&ca.certificate, owner_uid)
+                .expect_err("multiply linked certificate file must fail")
+                .reason_code(),
+            "paimos_reporter_ca_file_refused"
+        );
+        fs::remove_file(&linked).expect("remove ephemeral test hard link");
+        let symlinked = temporary.path().join("symlinked.pem");
+        symlink(&ca.certificate, &symlinked).expect("symlink ephemeral CA");
+        assert_eq!(
+            load_ca_certificates(&symlinked, owner_uid)
+                .expect_err("symlinked certificate file must fail")
+                .reason_code(),
+            "paimos_reporter_ca_file_refused"
+        );
+        let directory = temporary.path().join("certificate-directory");
+        fs::create_dir(&directory).expect("create non-regular CA path");
+        assert_eq!(
+            load_ca_certificates(&directory, owner_uid)
+                .expect_err("non-regular certificate path must fail")
+                .reason_code(),
+            "paimos_reporter_ca_file_refused"
+        );
+    }
+
+    #[test]
+    fn custom_ca_https_preserves_chain_and_hostname_verification() {
+        let temporary = tempfile::tempdir().expect("temporary HTTPS test root");
+        let trusted_ca = generate_test_ca(temporary.path(), "trusted-ca");
+        let wrong_ca = generate_test_ca(temporary.path(), "wrong-ca");
+        let matching_server = generate_server_certificate(
+            temporary.path(),
+            &trusted_ca,
+            "matching-server",
+            "IP:127.0.0.1",
+        );
+        let wrong_hostname_server = generate_server_certificate(
+            temporary.path(),
+            &trusted_ca,
+            "wrong-hostname-server",
+            "DNS:not-localhost.invalid",
+        );
+        let owner_uid = fs::metadata(&trusted_ca.certificate)
+            .expect("trusted CA metadata")
+            .uid();
+        let trusted_path = trusted_ca.certificate.to_str().expect("UTF-8 CA path");
+        let wrong_path = wrong_ca.certificate.to_str().expect("UTF-8 wrong CA path");
+
+        let (origin, server) = start_test_https_server(&matching_server);
+        let response = build_http_agent(Some(trusted_path), owner_uid)
+            .expect("build trusted reporter HTTPS client")
+            .get(&origin)
+            .call()
+            .expect("matching CA and hostname must succeed");
+        assert_eq!(response.status(), 200);
+        server.join().expect("matching HTTPS server exits");
+
+        let (origin, server) = start_test_https_server(&matching_server);
+        assert!(matches!(
+            build_http_agent(None, owner_uid)
+                .expect("build bundled-root reporter HTTPS client")
+                .get(&origin)
+                .call(),
+            Err(ureq::Error::Transport(_))
+        ));
+        server.join().expect("missing-CA HTTPS server exits");
+
+        let (origin, server) = start_test_https_server(&matching_server);
+        assert!(matches!(
+            build_http_agent(Some(wrong_path), owner_uid)
+                .expect("build wrong-root reporter HTTPS client")
+                .get(&origin)
+                .call(),
+            Err(ureq::Error::Transport(_))
+        ));
+        server.join().expect("wrong-CA HTTPS server exits");
+
+        let (origin, server) = start_test_https_server(&wrong_hostname_server);
+        assert!(matches!(
+            build_http_agent(Some(trusted_path), owner_uid)
+                .expect("build trusted reporter HTTPS client")
+                .get(&origin)
+                .call(),
+            Err(ureq::Error::Transport(_))
+        ));
+        server.join().expect("wrong-hostname HTTPS server exits");
+    }
+
+    #[test]
+    fn omitted_ca_preserves_legacy_serialized_config_shape() {
+        let mut fixture = fixture(DependencyEvidenceV1::Authorization {
+            observed_at: OBSERVED_AT.to_string(),
+        });
+        fixture.config.paimos_origin = "https://paimos.example".to_string();
+        let serialized = serde_json::to_value(&fixture.config).expect("serialize reporter config");
+        assert!(serialized.get("paimos_ca_file").is_none());
+
+        let without_ca = reporter_binding(&fixture.config, false).expect("legacy reporter binding");
+        fixture.config.paimos_ca_file = Some("/run/credentials/paimos-ca.pem".to_string());
+        let with_ca = reporter_binding(&fixture.config, false).expect("custom-CA reporter binding");
+        assert_ne!(without_ca.config_digest, with_ca.config_digest);
+    }
+
+    #[test]
+    fn managed_config_keeps_optional_ca_strict_and_digest_bound() {
+        let fixture = fixture(DependencyEvidenceV1::Authorization {
+            observed_at: OBSERVED_AT.to_string(),
+        });
+        let mut config = ManagedReporterConfigV1 {
+            schema: MANAGED_CONFIG_SCHEMA.to_string(),
+            schema_version: 1,
+            paimos_origin: "https://paimos.example".to_string(),
+            paimos_ca_file: None,
+            handoff_id: fixture.config.handoff_id,
+            api_key_file: fixture.config.api_key_file,
+            handoff_secret_file: fixture.config.handoff_secret_file,
+            journal_directory: fixture.config.journal_directory,
+            expected: fixture.config.expected,
+            evidence: ManagedEvidencePolicyV1 {
+                kind: "credential_handoff".to_string(),
+                source: "managed_completion_record".to_string(),
+            },
+        };
+        let canonical_without_ca = canonical_json_bytes(&config).expect("canonical managed config");
+        assert!(!canonical_without_ca
+            .windows(b"paimos_ca_file".len())
+            .any(|window| window == b"paimos_ca_file"));
+        let binding_without_ca =
+            managed_reporter_binding(&config, false).expect("managed binding without CA");
+
+        config.paimos_ca_file = Some("/run/credentials/paimos-ca.pem".to_string());
+        let binding_with_ca =
+            managed_reporter_binding(&config, false).expect("managed binding with CA");
+        assert_ne!(
+            binding_without_ca.config_digest,
+            binding_with_ca.config_digest
+        );
+
+        let mut document = serde_json::to_value(&config).expect("serialize managed config");
+        document["opaque"] = json!("forbidden");
+        assert_eq!(
+            decode_strict::<ManagedReporterConfigV1>(
+                &serde_json::to_vec(&document).expect("encode invalid managed config"),
+                "managed_unknown_field",
+            )
+            .expect_err("managed config must retain unknown-field refusal")
+            .reason_code(),
+            "managed_unknown_field"
+        );
+    }
+
     type ConfigMutation = fn(ReporterConfigV1) -> ReporterConfigV1;
 
     const CHECKED_EXAMPLE_PATH: &str = concat!(
@@ -2152,7 +2678,20 @@ mod tests {
         assert_eq!(config.schema, CONFIG_SCHEMA);
         assert_eq!(config.schema_version, 1);
         assert_eq!(config.handoff_id, HANDOFF_ID);
+        assert_eq!(
+            config.paimos_ca_file.as_deref(),
+            Some("/example/inert/paimos-ca.pem")
+        );
         assert_eq!(config.evidence.kind(), EvidenceKind::Authorization);
+
+        let mut omitted = config;
+        omitted.paimos_ca_file = None;
+        let legacy_bytes = serde_json::to_vec(&omitted).expect("serialize omitted-CA config");
+        assert_eq!(
+            wire_digest(&legacy_bytes),
+            "sha256:02d813feecbfcfb168bb63a9978a666abb68a89d54e322ee78c87525d9c4057c",
+            "omitting paimos_ca_file must preserve the pre-JANUS-466 config digest"
+        );
     }
 
     #[test]
@@ -2187,6 +2726,14 @@ mod tests {
                     config
                 },
                 "paimos_reporter_origin_refused",
+            ),
+            (
+                "relative CA path",
+                |mut config| {
+                    config.paimos_ca_file = Some("relative/paimos-ca.pem".to_string());
+                    config
+                },
+                "paimos_reporter_config_invalid",
             ),
             (
                 "wrong schema",

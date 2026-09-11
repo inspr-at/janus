@@ -121,11 +121,14 @@ Paimos pull must still agree.
 Managed reporter config uses
 `inspr.janus.paimos-managed-completion-reporter-config.v1`. It fixes
 `credential_handoff` from `managed_completion_record` but deliberately has no
-observation timestamp. The one-shot derives outgoing `observed_at` from the
-newest of the three original host observations. Every observation must be at
-or after preparation and at or before the original acceptance time; the oldest
-must be no more than 120 seconds old at acceptance. Retrying preserves those
-bytes. The legacy static reporter schema and behavior are unchanged.
+observation timestamp. It accepts the same optional top-level `paimos_ca_file`
+as the static reporter; omission preserves the prior canonical config digest,
+while a configured path is included in that binding. The one-shot derives
+outgoing `observed_at` from the newest of the three original host observations.
+Every observation must be at or after preparation and at or before the original
+acceptance time; the oldest must be no more than 120 seconds old at acceptance.
+Retrying preserves those bytes. The legacy static reporter's reporting
+semantics and omitted-CA behavior are unchanged.
 
 The managed config is this closed shape (all shown paths and values are
 synthetic):
@@ -135,6 +138,7 @@ synthetic):
   "schema": "inspr.janus.paimos-managed-completion-reporter-config.v1",
   "schema_version": 1,
   "paimos_origin": "https://paimos.example",
+  "paimos_ca_file": "/run/credentials/paimos-ca.pem",
   "handoff_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
   "api_key_file": "/run/credentials/paimos-api-key",
   "handoff_secret_file": "/run/credentials/paimos-handoff-secret",
@@ -156,6 +160,11 @@ synthetic):
   }
 }
 ```
+
+The optional CA file has the same protected certificate-only, 256 KiB and
+32-certificate bounds as the static reporter. Its certificates extend only
+this reporter's bundled roots; TLS chain, hostname, and time checks remain
+enabled, redirects remain disabled, and no host trust store is modified.
 
 The privileged one-shot invokes the existing reporter implementation and
 therefore keeps its per-handoff lock, fsynced request journal, exact accept-1

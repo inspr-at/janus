@@ -2,6 +2,7 @@
   "schema": "inspr.janus.paimos-dependency-reporter-config.v1",
   "schema_version": 1,
   "paimos_origin": "https://paimos.example",
+  "paimos_ca_file": "/example/inert/paimos-ca.pem",
   "handoff_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
   "api_key_file": "/example/inert/paimos-api-key",
   "handoff_secret_file": "/example/inert/paimos-handoff-secret",
