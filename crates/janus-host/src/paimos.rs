@@ -1459,7 +1459,7 @@ fn absolute_path(value: &str) -> bool {
 mod tests {
     use std::collections::BTreeMap;
     use std::fs;
-    use std::io::{BufRead, BufReader, Read as _, Write as _};
+    use std::io::{BufRead, BufReader, Write as _};
     use std::net::{TcpListener, TcpStream};
     use std::os::unix::fs::PermissionsExt as _;
     use std::process::{Command, Stdio};
@@ -1784,7 +1784,7 @@ mod tests {
             };
             let mut stream = rustls::StreamOwned::new(connection, stream);
             let mut request = [0u8; 4096];
-            if stream.read(&mut request).is_ok() {
+            if std::io::Read::read(&mut stream, &mut request).is_ok() {
                 let _ = stream.write_all(
                     b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
                 );

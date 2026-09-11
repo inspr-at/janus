@@ -36,6 +36,7 @@
               "janus-provider-age"
             ];
             cargoTestFlags = [ "--workspace" ];
+            nativeCheckInputs = [ pkgs.openssl ];
 
             installPhase = ''
               runHook preInstall
