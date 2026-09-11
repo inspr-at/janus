@@ -13,11 +13,11 @@ agents - without making raw credentials part of prompts, command arguments,
 logs, or application code.
 
 [![License: AGPL-3.0-only](https://img.shields.io/badge/license-AGPL--3.0--only-1f7a72.svg)](LICENSE)
-[![Rust engine](https://img.shields.io/badge/Rust_engine-v0.1.35-cb7c28.svg)](https://github.com/inspr-at/janus/releases/tag/rust-engine-v0.1.35)
+[![Rust engine](https://img.shields.io/badge/Rust_engine-v0.1.36-cb7c28.svg)](https://github.com/inspr-at/janus/releases/tag/rust-engine-v0.1.36)
 
 [Product site](https://janus.inspr.at/) ·
 [Deutsch](https://janus.inspr.at/de/) ·
-[Rust engine v0.1.35](https://github.com/inspr-at/janus/releases/tag/rust-engine-v0.1.35) ·
+[Rust engine v0.1.36](https://github.com/inspr-at/janus/releases/tag/rust-engine-v0.1.36) ·
 [INSPR](https://www.inspr.at)
 
 Janus is part of the open INSPR product family and is authored and published
@@ -96,7 +96,7 @@ Janus has two layers with different histories:
 
 | Layer | Role | Language | Status |
 |---|---|---|---|
-| **Rust engine** | Secret store contracts, Warden, permits, approved-use execution, rotation, lifecycle, and operator CLI | Rust | Active and released. Current tag: `rust-engine-v0.1.35`. |
+| **Rust engine** | Secret store contracts, Warden, permits, approved-use execution, rotation, lifecycle, and operator CLI | Rust | Active and released. Current tag: `rust-engine-v0.1.36`. |
 | **Go envelope** | Existing governance, audit, evidence, and oversight surface | Go | Shipped, operational, and transitional. New core capability work lands in Rust. |
 
 The Rust engine is no longer a skeleton. Core execution paths ship with unit,
@@ -507,13 +507,14 @@ from `/run/janus-paimos-dependency-reporter/config.json`.
 
 The root-owned production config uses schema
 `inspr.janus.paimos-dependency-reporter-config.v1` and names only an HTTPS
-Paimos origin, handoff ID, separate API-key and handoff-secret files, a private
-journal directory, the expected dependency/stage/execution/lineage/authority/
-credential binding, and one evidence kind plus observation timestamp. The
-API-key file contains one whitespace-free `paimos_...` value. The handoff file
-contains exactly the 32 raw mint/rotate bytes. Both must be owner-only,
-single-link regular files owned by root and must not share an inode; the
-journal directory must be root-owned mode `0700`.
+Paimos origin, an optional Paimos CA-certificate PEM file, handoff ID, separate
+API-key and handoff-secret files, a private journal directory, the expected
+dependency/stage/execution/lineage/authority/credential binding, and one
+evidence kind plus observation timestamp. The API-key file contains one
+whitespace-free `paimos_...` value. The handoff file contains exactly the 32 raw
+mint/rotate bytes. Credential and configured CA files must be owner-only,
+single-link regular files owned by root; the credential files must not share an
+inode. The journal directory must be root-owned mode `0700`.
 
 The checked, identity-free example at
 [`examples/paimos-dependency-reporter/config.example.json`](examples/paimos-dependency-reporter/config.example.json)
@@ -529,6 +530,7 @@ The strict configuration shape is mirrored byte-for-byte from that example:
   "schema": "inspr.janus.paimos-dependency-reporter-config.v1",
   "schema_version": 1,
   "paimos_origin": "https://paimos.example",
+  "paimos_ca_file": "/example/inert/paimos-ca.pem",
   "handoff_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
   "api_key_file": "/example/inert/paimos-api-key",
   "handoff_secret_file": "/example/inert/paimos-handoff-secret",
@@ -553,6 +555,14 @@ The strict configuration shape is mirrored byte-for-byte from that example:
 
 `credential_handoff` is the only other evidence kind. Unknown fields, false
 evidence, and every nonterminal outcome are deliberately unrepresentable.
+`paimos_ca_file` may be omitted to retain the reporter's existing bundled-root
+TLS behavior and unchanged configuration digest. When present it must contain
+only 1–32 well-formed certificates in an owner-only, single-link regular PEM
+file no larger than 256 KiB. Those roots are added only to this reporter's
+bundled-root HTTPS client; normal chain, hostname, and time verification remain
+enabled, and redirects remain disabled. Private keys, other PEM objects,
+malformed or excessive bundles, unsafe files, and missing files fail closed
+with value-free reason codes. The reporter never changes a host trust store.
 
 The adapter first pulls and validates the complete safe binding, journals the
 exact accept body, sends accept sequence 1, journals the exact terminal body,
@@ -582,6 +592,7 @@ are checked by `scripts/check-paimos-external-stage-pins.py`.
 | --- | --- |
 | Config custody | Root-owned, mode `0600`, single-link regular file at the fixed path; no argv or environment override. |
 | Credential custody | API key and 32-byte handoff secret live in separate `0600` files with distinct inodes; neither value may appear in config, logs, argv, or fixtures. |
+| Optional private CA | `paimos_ca_file` names one root-owned, owner-only, single-link regular certificate-only PEM bundle (maximum 256 KiB and 32 certificates). Omission keeps bundled roots; configuration never disables TLS verification or redirects. |
 | Dependency-only role | Reporter class `janus`, role `dependency` only; it cannot mark specification, implementation, QA, deployment, or verification successful and adds no new authorization claim. |
 | Exact binding | `expected` must match the current Paimos pull byte-for-byte on execution, plan/predecessor/context digests, authority epoch, credential epoch, and `expires_at`. |
 | Local evidence assertion | Config carries one trusted positive `authorization` or `credential_handoff` timestamp from an already-reviewed Janus transaction; the reporter does not independently certify transaction or target readiness. |
