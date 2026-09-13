@@ -202,6 +202,68 @@ the Nix-side equivalent is `builtins.hashString "sha256"
 (builtins.toJSON (builtins.fromJSON (builtins.readFile fixture)))`, prefixed
 with `sha256:` when placed in the capability.
 
+### Retained credential re-attestation
+
+A later delivery execution may require a fresh readiness fact for the same
+credential generation after the original managed-create receipt is terminal.
+The separate no-argument
+`janus-paimos-managed-credential-reattestation-reporter` performs that
+read-only operation. It does not reinterpret the original
+`inspr.janus.managed-completion-record.v2`, replay its operation, or install,
+reload, restart, decrypt, reveal, or replace credential material.
+
+The root-owned
+`inspr.janus.managed-credential-reattestation-capability.v1` binds a new
+reviewed operation reference and one canonical
+`inspr.janus.managed-credential-reattestation-binding.v1` digest. The binding
+pins that operation and declaration, a new re-attestation reference, the
+immutable original completion binding and record digests, the retained
+host/service/slot/operation/envelope/secret/declaration, credential generation,
+revocation epoch and producer key, the expected encrypted packet digest, a
+root-owned no-argument observer path and executable/config digests, the
+expected process executable, artifact and release, a maximum observation age,
+and the exact new Paimos handoff tuple. Its reporter evidence source is exactly
+`managed_credential_reattestation_record`; the original completion consumer
+continues to require exactly `managed_completion_record`.
+
+Before invoking the observer, Janus loads the integrity-protected host cache.
+It requires an active committed generation, current slot declaration, current
+minimum revocation epoch, an envelope absent from the revocation list, the
+expected encrypted packet hash, and a signature from the still-configured
+producer key. It checks the materialized credential only through regular-file
+metadata: exact owner, mode `0400`, one link, bounded nonzero size, device and
+inode. Credential bytes and decrypted cache contents are never read. The same
+host and material identity must remain unchanged after the observation.
+
+The observer is root-owned, non-writable, digest-pinned and invoked with no
+arguments, no stdin, and a closed environment. Its closed, value-free
+`inspr.janus.managed-credential-current-observation.v1` output binds the source
+operation and credential generation/revocation to a running process with an
+expected executable digest and a healthy loopback probe. The process and probe
+PID must agree; the probe also binds `credential_ready`, artifact, release,
+runtime identity and generation, and a canonical runtime-history digest.
+Heartbeat, process and probe times must all be current, non-future, and within
+the binding's at-most-120-second window. The checked example is
+[`managed-credential-current-observation.golden.json`](../examples/paimos-dependency-reporter/managed-credential-current-observation.golden.json).
+The independently canonicalized binding example is
+[`managed-credential-reattestation-binding.golden.json`](../examples/paimos-dependency-reporter/managed-credential-reattestation-binding.golden.json),
+with digest
+`sha256:4abd0941d4e7358845b925ccce464592003f3f789d2d2512f1d3975884410be6`.
+
+After both host checks and the fresh observation agree, the one-shot creates a
+new integrity-sealed
+`inspr.janus.managed-credential-reattestation-record.v1` with `O_EXCL`, mode
+`0600`, and file and directory fsync under
+`/var/lib/janus-managed-central/credential-reattestation`. Existing completion
+state and receipts are untouched. The exact record fixes the evidence time and
+new handoff before the existing managed reporter journals any request. A retry
+for the same binding validates and reuses only that record and the reporter's
+same per-handoff request journal; it never stamps old evidence with a new time
+or redirects it to another execution. Before a pending retry can use that old
+record, it repeats the current host and fresh observer checks, so a later
+revocation, generation change, credential replacement, stopped process, or
+unhealthy probe prevents delivery rather than carrying readiness forward.
+
 ## Replacement safety
 
 Replace is admitted only for an exact reviewed declaration with a current

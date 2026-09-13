@@ -384,6 +384,80 @@ fn install_caches_only_ciphertext_and_materializes_private_runtime_value() {
 }
 
 #[test]
+fn credential_attestation_proves_current_committed_generation_and_revocation() {
+    let fixture = Fixture::new();
+    let canary = b"credential-attestation-canary";
+    fixture
+        .executor
+        .install(&fixture.packet(1, canary), now())
+        .expect("install");
+    assert_eq!(
+        fixture
+            .executor
+            .credential_attestation_status(SERVICE_REF, SLOT_REF)
+            .unwrap_err(),
+        HostEnvelopeError::new("host_envelope_binding_denied")
+    );
+    fixture.executor.commit(&control(1)).expect("commit");
+    let before = fs::read(fixture.runtime_target()).expect("read canary before attestation");
+    let status = fixture
+        .executor
+        .credential_attestation_status(SERVICE_REF, SLOT_REF)
+        .expect("active attestation");
+    assert_eq!(status.operation_ref, "op_00000001");
+    assert_eq!(status.envelope_ref, "env_00000001");
+    assert_eq!(status.generation, 1);
+    assert_eq!(status.revocation_epoch, 1);
+    assert_eq!(status.producer_key_id, KEY_REF);
+    assert!(status.packet_sha256.starts_with("sha256:"));
+    assert_eq!(status.material_size, canary.len() as u64);
+    assert_eq!(status.material_owner_uid, fixture.owner_uid);
+    assert_eq!(status.phase, "active");
+    assert!(!status.value_returned);
+    assert_eq!(
+        fs::read(fixture.runtime_target()).expect("read canary after attestation"),
+        before
+    );
+
+    let mut revoked_config = config(&fixture.signing_key, fixture.owner_uid);
+    revoked_config.minimum_revocation_epoch = 2;
+    let revoked = HostExecutor::new(
+        revoked_config,
+        ExecutorPaths {
+            identity: fixture.identity_path.clone(),
+            cache_root: fixture.cache_root.clone(),
+            runtime_root: fixture.runtime_root.clone(),
+            executor_uid: fixture.owner_uid,
+        },
+    )
+    .expect("revoked executor");
+    assert_eq!(
+        revoked
+            .credential_attestation_status(SERVICE_REF, SLOT_REF)
+            .unwrap_err(),
+        HostEnvelopeError::new("host_envelope_binding_denied")
+    );
+
+    let other_signing_key = SigningKey::from_bytes(&[23; 32]);
+    let changed_authority = HostExecutor::new(
+        config(&other_signing_key, fixture.owner_uid),
+        ExecutorPaths {
+            identity: fixture.identity_path.clone(),
+            cache_root: fixture.cache_root.clone(),
+            runtime_root: fixture.runtime_root.clone(),
+            executor_uid: fixture.owner_uid,
+        },
+    )
+    .expect("changed authority executor");
+    assert_eq!(
+        changed_authority
+            .credential_attestation_status(SERVICE_REF, SLOT_REF)
+            .unwrap_err(),
+        HostEnvelopeError::new("host_envelope_signature_invalid")
+    );
+}
+
+#[test]
 fn privileged_executor_separates_cache_and_runtime_ownership() {
     let fixture = Fixture::new();
     if fixture.owner_uid != 0 {

@@ -553,7 +553,10 @@ pub(crate) fn validate_managed_reporter_binding_shape(
         || binding.credential_epoch <= 0
         || !valid_timestamp(&binding.expires_at)
         || binding.evidence_kind != "credential_handoff"
-        || binding.evidence_source != "managed_completion_record"
+        || !matches!(
+            binding.evidence_source.as_str(),
+            "managed_completion_record" | "managed_credential_reattestation_record"
+        )
     {
         return Err(PaimosReporterError::new("paimos_reporter_binding_refused"));
     }
@@ -952,7 +955,10 @@ fn validate_managed_config(
         || !valid_wire_digest(&config.expected.context_digest)
         || !valid_timestamp(&config.expected.expires_at)
         || config.evidence.kind != "credential_handoff"
-        || config.evidence.source != "managed_completion_record"
+        || !matches!(
+            config.evidence.source.as_str(),
+            "managed_completion_record" | "managed_credential_reattestation_record"
+        )
     {
         return Err(PaimosReporterError::new("paimos_reporter_config_invalid"));
     }
@@ -2659,6 +2665,17 @@ mod tests {
             .any(|window| window == b"paimos_ca_file"));
         let binding_without_ca =
             managed_reporter_binding(&config, false).expect("managed binding without CA");
+
+        config.evidence.source = "managed_credential_reattestation_record".to_string();
+        let reattestation =
+            managed_reporter_binding(&config, false).expect("managed re-attestation binding");
+        assert_eq!(
+            reattestation.evidence_source,
+            "managed_credential_reattestation_record"
+        );
+        config.evidence.source = "unreviewed_observation".to_string();
+        assert!(managed_reporter_binding(&config, false).is_err());
+        config.evidence.source = "managed_completion_record".to_string();
 
         config.paimos_ca_file = Some("/run/credentials/paimos-ca.pem".to_string());
         let binding_with_ca =

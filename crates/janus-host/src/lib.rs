@@ -10,6 +10,7 @@ pub mod agent;
 mod dynamic;
 pub mod paimos;
 pub mod paimos_completion;
+pub mod paimos_reattestation;
 
 pub use dynamic::{
     DynamicHostExecutorOutcome, DynamicHostRemovalControlV1, DynamicHostReplacementControlV1,
@@ -298,6 +299,30 @@ pub struct HostExecutorOutcome {
     pub generation: Option<u64>,
     pub phase: String,
     pub reason_code: String,
+    pub value_returned: bool,
+}
+
+/// Value-free proof of the credential generation that is currently active in
+/// the protected host cache and materialized at the declared runtime path.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HostCredentialAttestationStatusV1 {
+    pub host_ref: String,
+    pub service_ref: String,
+    pub slot_ref: String,
+    pub operation_ref: String,
+    pub envelope_ref: String,
+    pub secret_ref: String,
+    pub declaration_fingerprint: String,
+    pub generation: u64,
+    pub revocation_epoch: u64,
+    pub producer_key_id: String,
+    pub packet_sha256: String,
+    pub material_device: u64,
+    pub material_inode: u64,
+    pub material_size: u64,
+    pub material_owner_uid: u32,
+    pub phase: String,
     pub value_returned: bool,
 }
 
@@ -1207,6 +1232,115 @@ impl HostExecutor {
             }
         }
         Ok(results)
+    }
+
+    /// Prove one active credential generation without decrypting its cached
+    /// packet or reading the materialized credential bytes.
+    pub fn credential_attestation_status(
+        &self,
+        service_ref: &str,
+        slot_ref: &str,
+    ) -> HostResult<HostCredentialAttestationStatusV1> {
+        if self.config.retired {
+            return Err(HostEnvelopeError::new("host_executor_retired"));
+        }
+        let slot = self
+            .config
+            .slots
+            .iter()
+            .find(|slot| slot.service_ref == service_ref && slot.slot_ref == slot_ref)
+            .ok_or_else(|| HostEnvelopeError::new("host_envelope_slot_denied"))?;
+        let slot_dir = self.slot_cache_dir(&slot.slot_ref);
+        let state = load_optional_state(&slot_dir.join("state.json"), self.paths.executor_uid)?
+            .ok_or_else(|| HostEnvelopeError::new("host_cache_state_missing"))?;
+        validate_state_binding(&state, &self.config.host_ref, slot)?;
+        if !state.committed
+            || state.current.revocation_epoch < self.config.minimum_revocation_epoch
+            || self
+                .config
+                .revoked_envelope_refs
+                .iter()
+                .any(|reference| reference == &state.current.envelope_ref)
+        {
+            return Err(HostEnvelopeError::new("host_envelope_binding_denied"));
+        }
+        let producer_key_id = self.validate_cached_packet_authenticity(
+            &slot_dir.join("current.envelope"),
+            &state.current,
+        )?;
+        let runtime_path = self.runtime_path(slot);
+        let material = fs::symlink_metadata(&runtime_path)
+            .map_err(|_| HostEnvelopeError::new("host_runtime_target_unsafe"))?;
+        if !material.file_type().is_file()
+            || material.uid() != self.config.owner_uid
+            || material.mode() & 0o777 != 0o400
+            || material.nlink() != 1
+            || material.len() == 0
+            || material.len() > MAX_SECRET_BYTES as u64
+        {
+            return Err(HostEnvelopeError::new("host_runtime_target_unsafe"));
+        }
+        Ok(HostCredentialAttestationStatusV1 {
+            host_ref: self.config.host_ref.clone(),
+            service_ref: slot.service_ref.clone(),
+            slot_ref: slot.slot_ref.clone(),
+            operation_ref: state.current.operation_ref,
+            envelope_ref: state.current.envelope_ref,
+            secret_ref: slot.secret_ref.clone(),
+            declaration_fingerprint: slot.declaration_fingerprint.clone(),
+            generation: state.current.generation,
+            revocation_epoch: state.current.revocation_epoch,
+            producer_key_id,
+            packet_sha256: format!("sha256:{}", state.current.packet_sha256),
+            material_device: material.dev(),
+            material_inode: material.ino(),
+            material_size: material.len(),
+            material_owner_uid: material.uid(),
+            phase: "active".to_string(),
+            value_returned: false,
+        })
+    }
+
+    fn validate_cached_packet_authenticity(
+        &self,
+        path: &Path,
+        generation: &CachedGenerationV1,
+    ) -> HostResult<String> {
+        let raw = read_private_regular(
+            path,
+            MAX_PACKET_BYTES,
+            Some(self.paths.executor_uid),
+            "host_cache_current_unavailable",
+        )?;
+        if sha256_hex(&raw) != generation.packet_sha256 {
+            return Err(HostEnvelopeError::new("host_cache_current_unavailable"));
+        }
+        let packet: SignedHostEnvelopeV1 =
+            decode_strict_json(&raw, "host_envelope_packet_invalid")?;
+        if packet.schema != ENVELOPE_SCHEMA
+            || packet.schema_version != SCHEMA_VERSION
+            || !valid_ref("key_", &packet.key_id)
+        {
+            return Err(HostEnvelopeError::new("host_envelope_packet_invalid"));
+        }
+        let ciphertext = STANDARD_NO_PAD
+            .decode(packet.ciphertext.as_bytes())
+            .map_err(|_| HostEnvelopeError::new("host_envelope_ciphertext_invalid"))?;
+        if ciphertext.is_empty() || ciphertext.len() > MAX_CIPHERTEXT_BYTES {
+            return Err(HostEnvelopeError::new("host_envelope_ciphertext_oversized"));
+        }
+        let signature_bytes = STANDARD_NO_PAD
+            .decode(packet.signature.as_bytes())
+            .map_err(|_| HostEnvelopeError::new("host_envelope_signature_invalid"))?;
+        let signature = Signature::from_slice(&signature_bytes)
+            .map_err(|_| HostEnvelopeError::new("host_envelope_signature_invalid"))?;
+        let key = self
+            .keys
+            .get(&packet.key_id)
+            .ok_or_else(|| HostEnvelopeError::new("host_envelope_signing_key_unknown"))?;
+        key.verify(&signature_message(&packet.key_id, &ciphertext), &signature)
+            .map_err(|_| HostEnvelopeError::new("host_envelope_signature_invalid"))?;
+        Ok(packet.key_id)
     }
 
     fn restore_slot(
