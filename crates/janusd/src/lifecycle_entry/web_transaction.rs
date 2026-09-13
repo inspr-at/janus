@@ -2545,6 +2545,21 @@ timeout_seconds = 5
     }
 
     #[tokio::test]
+    async fn entry_lock_drop_releases_duplicated_descriptor() {
+        let fixture = LifecycleFixture::new("http://127.0.0.1:9");
+        let first = fixture.transaction("op_dupfd0123456789a");
+        let second = fixture.transaction("op_dupfd0123456789b");
+        let held = first.try_entry_lock().expect("acquire entry lock");
+        let inherited = held.file.try_clone().expect("duplicate lock descriptor");
+
+        drop(held);
+        second
+            .try_entry_lock()
+            .expect("dropping entry lock releases duplicated descriptor");
+        drop(inherited);
+    }
+
+    #[tokio::test]
     async fn generated_create_completion_reaches_real_paimos_reporter() {
         let mut fake = FakePaimos::bind();
         let mut fixture = LifecycleFixture::new(&fake.origin);

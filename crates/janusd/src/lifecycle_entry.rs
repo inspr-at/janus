@@ -326,7 +326,17 @@ enum ExpectedPresence {
 }
 
 struct EntryLock {
-    _file: File,
+    file: File,
+}
+
+impl Drop for EntryLock {
+    fn drop(&mut self) {
+        // Closing only this descriptor does not release a flock inherited by
+        // a concurrently forked child until that child execs. Unlock the
+        // shared open-file description first so the next operation does not
+        // observe transient contention from the inherited descriptor.
+        let _ = FileExt::unlock(&self.file);
+    }
 }
 
 pub(super) fn is_lifecycle_entry_command(args: &[String]) -> bool {
@@ -2079,7 +2089,7 @@ impl EntryTransaction {
                 "entry operation is already running",
             )
         })?;
-        Ok(EntryLock { _file: file })
+        Ok(EntryLock { file })
     }
 
     fn journal_path(&self) -> PathBuf {
