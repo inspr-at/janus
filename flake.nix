@@ -54,9 +54,11 @@
               install -Dm755 "$release_dir/janus-managed-host-agent" "$out/bin/janus-managed-host-agent"
               install -Dm755 "$release_dir/janus-paimos-dependency-reporter" "$out/bin/janus-paimos-dependency-reporter"
               install -Dm755 "$release_dir/janus-paimos-managed-completion-reporter" "$out/bin/janus-paimos-managed-completion-reporter"
+              install -Dm755 "$release_dir/janus-paimos-managed-credential-reattestation-reporter" "$out/bin/janus-paimos-managed-credential-reattestation-reporter"
               install -Dm755 "$release_dir/janus-warden" "$out/bin/janus-warden"
               install -Dm755 "$release_dir/janus-agenix-import" "$out/bin/janus-agenix-import"
               test -x "$out/bin/janusd-identity-admin"
+              test -x "$out/bin/janus-paimos-managed-credential-reattestation-reporter"
               runHook postInstall
             '';
 

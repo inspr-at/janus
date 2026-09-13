@@ -196,7 +196,7 @@ impl ManagedCompletionBindingV2 {
         Ok(format!("sha256:{:x}", Sha256::digest(canonical)))
     }
 
-    fn matches_record(&self, record: &ManagedCompletionRecordV2) -> bool {
+    pub(crate) fn matches_record(&self, record: &ManagedCompletionRecordV2) -> bool {
         self.operation_ref == record.operation_ref
             && self.operation_kind == record.operation_kind
             && self.source == record.source
@@ -317,8 +317,9 @@ fn run_from_paths(
     .map_err(|_| ManagedCompletionError::new("managed_completion_report_pending"))
 }
 
-fn validate_binding_shape(binding: &ManagedCompletionBindingV2) -> CompletionResult<()> {
+pub(crate) fn validate_binding_shape(binding: &ManagedCompletionBindingV2) -> CompletionResult<()> {
     if crate::paimos::validate_managed_reporter_binding_shape(&binding.reporter).is_err()
+        || binding.reporter.evidence_source != "managed_completion_record"
         || binding.schema != BINDING_SCHEMA
         || binding.schema_version != 1
         || !valid_ref("op_", &binding.operation_ref)
