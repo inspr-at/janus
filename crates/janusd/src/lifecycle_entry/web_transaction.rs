@@ -2270,7 +2270,7 @@ timeout_seconds = 5
                             "reporter_class": "janus",
                             "reporter_role": "dependency",
                             "dependency_key": "privileged-handoff",
-                            "evidence_ceiling": ["credential_handoff"],
+                            "evidence_ceiling": ["authorization", "credential_handoff"],
                             "stage_key": "deployment",
                             "execution_number": 1,
                             "plan_digest": format!("sha256:{}", "1".repeat(64)),
