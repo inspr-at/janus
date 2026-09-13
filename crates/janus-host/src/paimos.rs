@@ -358,7 +358,16 @@ struct Reporter {
     origin: String,
     journal_path: PathBuf,
     owner_uid: u32,
-    _lock: File,
+    lock: File,
+}
+
+impl Drop for Reporter {
+    fn drop(&mut self) {
+        // Closing this descriptor alone does not release a flock while a
+        // concurrently forked child still holds an inherited duplicate.
+        // Unlock the shared open-file description before closing it.
+        let _ = FileExt::unlock(&self.lock);
+    }
 }
 
 /// Read the fixed root-owned request and execute at most one dependency report.
@@ -655,7 +664,7 @@ impl Reporter {
             origin,
             journal_path,
             owner_uid,
-            _lock: lock,
+            lock,
         })
     }
 
@@ -2346,6 +2355,25 @@ mod tests {
         assert_eq!(requests[1].body, requests[2].body);
         assert_eq!(requests[1].idempotency_key, requests[2].idempotency_key);
         assert_eq!(requests[3].path.rsplit('/').next(), Some("reports"));
+    }
+
+    #[test]
+    fn reporter_drop_releases_duplicated_lock_descriptor() {
+        let mut fixture = fixture(DependencyEvidenceV1::Authorization {
+            observed_at: OBSERVED_AT.to_string(),
+        });
+        fixture.config.paimos_origin = "http://127.0.0.1:1".to_string();
+        let first = Reporter::new(fixture.config.clone(), fixture.owner_uid, true)
+            .expect("acquire first reporter lock");
+        let inherited = first
+            .lock
+            .try_clone()
+            .expect("duplicate reporter lock descriptor");
+
+        drop(first);
+        Reporter::new(fixture.config.clone(), fixture.owner_uid, true)
+            .expect("dropping reporter releases duplicated descriptor");
+        drop(inherited);
     }
 
     #[test]
