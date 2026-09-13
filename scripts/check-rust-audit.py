@@ -20,7 +20,7 @@ EXPECTED = {
     ("spin", "0.9.8", "yanked", None),
 }
 EXPECTED_DIRECT_PARENTS = {
-    "rsa": {"age", "ssh-key"},
+    "rsa": {"age", "janus-forge", "ssh-key"},
     "proc-macro-error2": {"i18n-embed-fl"},
     "spin": {"lazy_static"},
 }

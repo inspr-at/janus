@@ -47,9 +47,9 @@ use janus_core::{
     Principal, PrincipalChain, PrincipalId, PrincipalKind, ProfileId, ProfilePolicy, Purpose,
     ReloadMethod, RotationOutcome, RuntimeAction, RuntimePlane, RuntimeTransport, SafeLabel,
     ScopePathV1, ScopeRef, SecretAgeEvidence, SecretBroker, SecretDescriptor, SecretLifecycle,
-    SecretMetadataOverlay, SecretName, SecretRef, SecretStore, SecretTombstoneRequest, Severity,
-    StaleSecretPolicy, StaleSecretReportRow, StaleSecretReporter, TombstonePolicy, TrustLevel,
-    UsePermit, UseProfile, UseRequest, ValidationProbe, WorkloadId,
+    SecretMetadataOverlay, SecretName, SecretRef, SecretStore, SecretTombstoneRequest, SecretValue,
+    Severity, StaleSecretPolicy, StaleSecretReportRow, StaleSecretReporter, TombstonePolicy,
+    TrustLevel, UsePermit, UseProfile, UseRequest, ValidationProbe, WorkloadId,
 };
 use janus_executor::{
     resolve_host_projection_profile, ApprovedUseExecutor, EnvFileHashSidecarFormat,
@@ -58,9 +58,11 @@ use janus_executor::{
     HostProjectionSelector, ManagedCommandPlan, ManagedCommandProfile, ManagedCommandProfileSpec,
     ManagedCommandRequest, ManagedCommandRuntimeLimits,
 };
+use janus_forge::issuer::{ConfiguredIssuerResolver, IssuerConnectorCatalog};
 use janus_forge::{
-    create_generated_agenix, ConsumerRotationHooks, GeneratedAlphabet, GeneratedCreateShape,
-    GeneratedRotationBroker, GeneratedValuePolicy, RotationApproval,
+    create_generated_agenix, create_generated_agenix_with_resolver, ConsumerRotationHooks,
+    GeneratedAlphabet, GeneratedCreateShape, GeneratedRotationBroker, GeneratedValuePolicy,
+    IssuerCredentialStore, RotationApproval,
 };
 use janus_local::{
     authorize_runtime_action_from_env, enforce_migration_ready_from_env,
@@ -648,6 +650,7 @@ struct ForgeCreateGeneratedConfig {
     reason: SafeLabel,
     recipients_file: PathBuf,
     export_root: PathBuf,
+    issuer_config: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -967,6 +970,18 @@ async fn run_forge_rotate_generated(config: ForgeRotateGeneratedConfig) -> Resul
     Ok(())
 }
 
+struct AgeIssuerCredentialStore {
+    store: AgeSecretStore,
+}
+
+#[async_trait]
+impl IssuerCredentialStore for AgeIssuerCredentialStore {
+    async fn load(&self, credential_ref: &str) -> janus_core::JanusResult<SecretValue> {
+        let name = SecretName::new(credential_ref.to_string())?;
+        self.store.get(&name).await
+    }
+}
+
 async fn run_forge_create_generated(config: ForgeCreateGeneratedConfig) -> Result<()> {
     if !config.recipients_file.is_absolute() {
         anyhow::bail!("--recipients-from must be an absolute reviewed path");
@@ -974,22 +989,60 @@ async fn run_forge_create_generated(config: ForgeCreateGeneratedConfig) -> Resul
     if !config.export_root.is_absolute() {
         anyhow::bail!("--export-root must be an absolute reviewed path");
     }
+    let issuer_catalog = if config.shape.has_issuer() {
+        let issuer_config = config
+            .issuer_config
+            .as_deref()
+            .context("--issuer-config is required for issuer-generated fields")?;
+        let catalog = IssuerConnectorCatalog::load(issuer_config)
+            .map_err(|_| anyhow::anyhow!("issuer connector catalog is unavailable"))?;
+        for alias in config.shape.issuer_aliases() {
+            if catalog.entry(&alias).is_none() {
+                anyhow::bail!("issuer alias is absent from the reviewed connector catalog");
+            }
+        }
+        Some(catalog)
+    } else {
+        None
+    };
+    if issuer_catalog.is_none() && config.issuer_config.is_some() {
+        anyhow::bail!("--issuer-config is only valid for issuer-generated fields");
+    }
     let recipients = read_recipient_file(&config.recipients_file)?;
     let audit_path = env_first(&["JANUS_FORGE_AUDIT_FILE", "JANUS_RUNTIME_AUDIT_FILE"])
         .map(PathBuf::from)
         .context("JANUS_FORGE_AUDIT_FILE or JANUS_RUNTIME_AUDIT_FILE is required")?;
     let mut audit = JsonlAuditSink::open(audit_path).context("forge audit unavailable")?;
     let principal = forge_principal_from_env()?;
-    let outcome = create_generated_agenix(
-        config.export_root,
-        config.secret,
-        &config.shape,
-        recipients,
-        config.reason,
-        &principal,
-        &mut audit,
-    )
-    .await
+    let outcome = if let Some(catalog) = issuer_catalog {
+        let resolver = ConfiguredIssuerResolver::new(catalog);
+        let credential_store = AgeIssuerCredentialStore {
+            store: load_age_store_from_env()?,
+        };
+        create_generated_agenix_with_resolver(
+            config.export_root,
+            config.secret,
+            &config.shape,
+            recipients,
+            config.reason,
+            &principal,
+            &resolver,
+            &credential_store,
+            &mut audit,
+        )
+        .await
+    } else {
+        create_generated_agenix(
+            config.export_root,
+            config.secret,
+            &config.shape,
+            recipients,
+            config.reason,
+            &principal,
+            &mut audit,
+        )
+        .await
+    }
     .context("generated agenix create failed")?;
 
     println!(
@@ -1000,6 +1053,7 @@ async fn run_forge_create_generated(config: ForgeCreateGeneratedConfig) -> Resul
             "secret_name": outcome.secret_name.as_str(),
             "shape_sha256": outcome.shape_digest,
             "recipients_sha256": outcome.recipient_digest,
+            "issuer_aliases_sha256": outcome.issuer_aliases_digest,
             "reason": outcome.reason.as_str(),
             "value_returned": outcome.value_returned,
         })
@@ -5560,6 +5614,7 @@ fn parse_forge_create_generated(
     let mut reason = None;
     let mut recipients_file = None;
     let mut export_root = None;
+    let mut issuer_config = None;
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -5588,6 +5643,11 @@ fn parse_forge_create_generated(
                 "--export-root",
                 PathBuf::from(required_arg("--export-root", args.next())?),
             )?,
+            "--issuer-config" => replace_once(
+                &mut issuer_config,
+                "--issuer-config",
+                PathBuf::from(required_arg("--issuer-config", args.next())?),
+            )?,
             "--value" | "--raw-value" | "--generated-value" => {
                 anyhow::bail!(
                     "{arg} is intentionally unsupported; Forge generates values internally"
@@ -5605,6 +5665,7 @@ fn parse_forge_create_generated(
         reason: reason.context("--reason is required")?,
         recipients_file: recipients_file.context("--recipients-from is required")?,
         export_root: export_root.context("--export-root is required")?,
+        issuer_config,
     })
 }
 
@@ -6161,7 +6222,7 @@ Administration commands:
     --validation PROBE --hook-manifest PATH [--reload METHOD] \
     [--alphabet url-safe|alphanumeric|hex] [--length N]
   forge create-generated --secret NAME --shape env:KEY=b64:N[,KEY=hex:N] \
-    --reason REASON --recipients-from PATH --export-root PATH
+    --reason REASON --recipients-from PATH --export-root PATH [--issuer-config PATH]
   lifecycle-entry preflight|apply|activate|rollback|status --plan PATH
   lifecycle action-queue --profile-manifest PATH --entry-state-dir PATH --audit-path PATH \
     [--format text|json] [--action-required-only] [--owner OWNER] \
@@ -6580,6 +6641,41 @@ mod tests {
             PathBuf::from("/run/janus/recipients")
         );
         assert_eq!(config.export_root, PathBuf::from("/var/lib/janus/export"));
+        assert!(config.issuer_config.is_none());
+    }
+
+    #[test]
+    fn parses_forge_issuer_shape_with_reviewed_catalog_path() {
+        let config = match parse_args(
+            [
+                "forge",
+                "create-generated",
+                "--secret",
+                "CANARY",
+                "--shape",
+                "env:OIDC=issuer:zitadel-oidc-client:AGM Platform/zulip",
+                "--reason",
+                "JANUS-465 synthetic reference",
+                "--recipients-from",
+                "/run/janus/recipients",
+                "--export-root",
+                "/var/lib/janus/export",
+                "--issuer-config",
+                "/etc/janus/issuer-connectors.json",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        )
+        .unwrap()
+        {
+            Command::ForgeCreateGenerated(config) => config,
+            _ => panic!("expected forge create-generated config"),
+        };
+        assert!(config.shape.has_issuer());
+        assert_eq!(
+            config.issuer_config,
+            Some(PathBuf::from("/etc/janus/issuer-connectors.json"))
+        );
     }
 
     #[test]

@@ -18,9 +18,10 @@
       "advisory": "RUSTSEC-2023-0071",
       "dependency_paths": [
         ["rsa", "age", "janus-provider-age"],
+        ["rsa", "janus-forge"],
         ["rsa", "ssh-key", "janus-provider-age"]
       ],
-      "rationale": "age 0.12.1 compiles RSA as part of SSH support and unifies that feature onto Janus's algorithm-inspection use of ssh-key, but Janus accepts only ssh-ed25519 and native age material; the vulnerable RSA operation is unreachable and no remote timing oracle exists.",
+      "rationale": "janus-forge uses RSA only to sign short-lived RS256 service-account assertions with a reviewed machine key; it does not decrypt attacker-controlled ciphertext or expose an RSA timing oracle. age 0.12.1 also compiles RSA through SSH support, while Janus accepts only ssh-ed25519 and native age recipient material.",
       "upstream": "https://github.com/RustCrypto/RSA/issues/626"
     },
     {
