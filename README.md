@@ -593,7 +593,7 @@ are checked by `scripts/check-paimos-external-stage-pins.py`.
 | Config custody | Root-owned, mode `0600`, single-link regular file at the fixed path; no argv or environment override. |
 | Credential custody | API key and 32-byte handoff secret live in separate `0600` files with distinct inodes; neither value may appear in config, logs, argv, or fixtures. |
 | Optional private CA | `paimos_ca_file` names one root-owned, owner-only, single-link regular certificate-only PEM bundle (maximum 256 KiB and 32 certificates). Omission keeps bundled roots; configuration never disables TLS verification or redirects. |
-| Dependency-only role | Reporter class `janus`, role `dependency` only; it cannot mark specification, implementation, QA, deployment, or verification successful and adds no new authorization claim. |
+| Dependency-only role | Reporter class `janus`, role `dependency`, and the exact ordered Janus class ceiling `[authorization, credential_handoff]` only; the configured scalar chooses which single evidence kind is emitted. It cannot mark specification, implementation, QA, deployment, or verification successful and adds no new authorization claim. |
 | Exact binding | `expected` must match the current Paimos pull byte-for-byte on execution, plan/predecessor/context digests, authority epoch, credential epoch, and `expires_at`. |
 | Local evidence assertion | Config carries one trusted positive `authorization` or `credential_handoff` timestamp from an already-reviewed Janus transaction; the reporter does not independently certify transaction or target readiness. |
 | Journal / crash replay | Accept and report bodies are journaled before send; ambiguous transport failures replay identical bytes and idempotency keys without a new pull. |

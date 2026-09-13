@@ -203,6 +203,9 @@ enum EvidenceKind {
     CredentialHandoff,
 }
 
+const JANUS_DEPENDENCY_EVIDENCE_CEILING: [EvidenceKind; 2] =
+    [EvidenceKind::Authorization, EvidenceKind::CredentialHandoff];
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PullResponseV1 {
@@ -756,7 +759,7 @@ impl Reporter {
             || response.reporter_class != ReporterClass::Janus
             || response.reporter_role != ReporterRole::Dependency
             || response.dependency_key != expected.dependency_key
-            || response.evidence_ceiling != [self.config.evidence.kind()]
+            || response.evidence_ceiling != JANUS_DEPENDENCY_EVIDENCE_CEILING
             || response.stage_key != expected.stage_key
             || response.execution_number != expected.execution_number
             || response.plan_digest != expected.plan_digest
@@ -1876,11 +1879,7 @@ mod tests {
             "reporter_class": "janus",
             "reporter_role": "dependency",
             "dependency_key": config.expected.dependency_key,
-            "evidence_ceiling": [match config.evidence.kind() {
-                EvidenceKind::Authorization => "authorization",
-                EvidenceKind::CredentialHandoff => "credential_handoff",
-                _ => unreachable!("closed Janus test evidence"),
-            }],
+            "evidence_ceiling": ["authorization", "credential_handoff"],
             "stage_key": "deployment",
             "execution_number": config.expected.execution_number,
             "plan_digest": config.expected.plan_digest,
@@ -2175,6 +2174,49 @@ mod tests {
             let journal = Path::new(&fixture.config.journal_directory)
                 .join(format!("{}.json", fixture.config.handoff_id));
             assert!(!journal.exists(), "refused pull touched durable state");
+        }
+    }
+
+    #[test]
+    fn pull_requires_exact_janus_dependency_evidence_ceiling() {
+        let cases = [
+            ("singleton", json!(["credential_handoff"])),
+            ("reordered", json!(["credential_handoff", "authorization"])),
+            ("pharos", json!(["deployment", "verification"])),
+            ("duplicate", json!(["authorization", "authorization"])),
+        ];
+        for (case, evidence_ceiling) in cases {
+            let mut fixture = fixture(DependencyEvidenceV1::CredentialHandoff {
+                observed_at: OBSERVED_AT.to_string(),
+            });
+            let mut body = pull_body(&fixture.config, "issued");
+            body["evidence_ceiling"] = evidence_ceiling;
+            let fake = FakeServer::start(
+                vec![FakeStep {
+                    method: "GET",
+                    path: "/api/external-stage/handoffs/01ARZ3NDEKTSV4RRFFQ69G5FAV",
+                    status: 200,
+                    media_type: MEDIA_TYPE,
+                    body: body.to_string(),
+                    disconnect: false,
+                }],
+                fixture.authorization.clone(),
+                fixture.handoff_header.clone(),
+            );
+            fixture.config.paimos_origin = fake.origin.clone();
+            let error = Reporter::new(fixture.config.clone(), fixture.owner_uid, true)
+                .expect("construct reporter")
+                .run()
+                .expect_err("non-canonical Janus evidence ceiling must fail");
+            assert_eq!(
+                error.reason_code(),
+                "paimos_reporter_binding_refused",
+                "unexpected refusal for {case} ceiling"
+            );
+            assert_eq!(fake.finish().len(), 1, "unexpected I/O for {case} ceiling");
+            let journal = Path::new(&fixture.config.journal_directory)
+                .join(format!("{}.json", fixture.config.handoff_id));
+            assert!(!journal.exists(), "{case} ceiling touched durable state");
         }
     }
 
