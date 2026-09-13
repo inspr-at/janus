@@ -1159,11 +1159,17 @@ dependencies = [
 name = "janus-forge"
 version = "0.1.37"
 dependencies = [
+ "age",
  "async-trait",
+ "base64 0.21.7",
+ "hex",
  "janus-core",
  "janus-provider-age",
  "rand",
+ "sha2",
+ "tempfile",
  "tokio",
+ "zeroize",
 ]
 
 [[package]]

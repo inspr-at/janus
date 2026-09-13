@@ -14,6 +14,8 @@
 #![forbid(unsafe_code)]
 
 use async_trait::async_trait;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine;
 use janus_core::{
     AuditAction, AuditEvent, AuditOutcome, AuditSink, ConsumerDescriptor, ConsumerRef,
     ConsumerRegistry, JanusError, JanusResult, PrincipalChain, ReloadMethod, RotationDecision,
@@ -23,6 +25,9 @@ use janus_core::{
 use janus_provider_age::{AgeRollbackMaterial, AgeSecretStore};
 use rand::rngs::OsRng;
 use rand::seq::SliceRandom;
+use rand::RngCore;
+use sha2::{Digest, Sha256};
+use zeroize::{Zeroize, Zeroizing};
 
 const URL_SAFE_ALPHABET: &[u8] =
     b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
@@ -30,6 +35,9 @@ const ALPHANUMERIC_ALPHABET: &[u8] =
     b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 const HEX_ALPHABET: &[u8] = b"0123456789abcdef";
 const MAX_GENERATED_VALUE_LEN: usize = 4096;
+const MAX_GENERATED_FIELDS: usize = 64;
+const MAX_GENERATED_ENTROPY_BYTES: usize = 4096;
+const MAX_GENERATED_OUTPUT_BYTES: usize = 64 * 1024;
 
 /// Alphabet for broker-generated secret values.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -111,6 +119,341 @@ impl GeneratedValuePolicy {
         }
         SecretValue::new(bytes)
     }
+}
+
+/// Encoding used for one field in a generated environment secret.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GeneratedFieldEncoding {
+    /// Random bytes rendered as standard padded base64.
+    Base64,
+    /// Random bytes rendered as lowercase hexadecimal.
+    Hex,
+    /// Random bytes sampled from ASCII letters and digits.
+    Alphanumeric,
+}
+
+impl GeneratedFieldEncoding {
+    fn parse(value: &str) -> JanusResult<Self> {
+        match value {
+            "b64" => Ok(Self::Base64),
+            "hex" => Ok(Self::Hex),
+            "alnum" => Ok(Self::Alphanumeric),
+            _ => Err(JanusError::InvalidIdentifier {
+                kind: "generated_shape_encoding",
+            }),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Base64 => "b64",
+            Self::Hex => "hex",
+            Self::Alphanumeric => "alnum",
+        }
+    }
+}
+
+/// One generated environment field. The entropy size is in random bytes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GeneratedField {
+    name: String,
+    encoding: GeneratedFieldEncoding,
+    entropy_bytes: usize,
+}
+
+impl GeneratedField {
+    /// Field name, safe to include in value-free evidence.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Field encoding.
+    pub fn encoding(&self) -> GeneratedFieldEncoding {
+        self.encoding
+    }
+
+    /// Random input size in bytes.
+    pub fn entropy_bytes(&self) -> usize {
+        self.entropy_bytes
+    }
+}
+
+/// Strict, canonical shape for a generated environment secret.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GeneratedCreateShape {
+    fields: Vec<GeneratedField>,
+    canonical: String,
+}
+
+impl GeneratedCreateShape {
+    /// Parse `env:KEY=b64:N,OTHER=hex:N` without accepting values.
+    pub fn parse(value: &str) -> JanusResult<Self> {
+        if !value.starts_with("env:") || value.len() > MAX_GENERATED_OUTPUT_BYTES {
+            return Err(JanusError::InvalidIdentifier {
+                kind: "generated_shape",
+            });
+        }
+        let body = &value[4..];
+        if body.is_empty() {
+            return Err(JanusError::InvalidIdentifier {
+                kind: "generated_shape",
+            });
+        }
+        let mut fields = Vec::new();
+        for item in body.split(',') {
+            let (name, policy) = item.split_once('=').ok_or(JanusError::InvalidIdentifier {
+                kind: "generated_shape_field",
+            })?;
+            if name.is_empty()
+                || !name.bytes().enumerate().all(|(index, byte)| {
+                    if index == 0 {
+                        byte == b'_' || byte.is_ascii_alphabetic()
+                    } else {
+                        byte == b'_' || byte.is_ascii_alphanumeric()
+                    }
+                })
+                || fields
+                    .iter()
+                    .any(|field: &GeneratedField| field.name == name)
+            {
+                return Err(JanusError::InvalidIdentifier {
+                    kind: "generated_shape_field",
+                });
+            }
+            let (encoding, entropy) =
+                policy
+                    .split_once(':')
+                    .ok_or(JanusError::InvalidIdentifier {
+                        kind: "generated_shape_policy",
+                    })?;
+            if encoding == "issuer" {
+                return Err(JanusError::Unsupported {
+                    capability: "issuer_generated_field",
+                });
+            }
+            let encoding = GeneratedFieldEncoding::parse(encoding)?;
+            let entropy_bytes =
+                entropy
+                    .parse::<usize>()
+                    .map_err(|_| JanusError::InvalidIdentifier {
+                        kind: "generated_shape_entropy",
+                    })?;
+            if entropy_bytes == 0 || entropy_bytes > MAX_GENERATED_ENTROPY_BYTES {
+                return Err(JanusError::InvalidIdentifier {
+                    kind: "generated_shape_entropy",
+                });
+            }
+            fields.push(GeneratedField {
+                name: name.to_string(),
+                encoding,
+                entropy_bytes,
+            });
+            if fields.len() > MAX_GENERATED_FIELDS {
+                return Err(JanusError::InvalidIdentifier {
+                    kind: "generated_shape_fields",
+                });
+            }
+        }
+        let output_bytes = fields.iter().try_fold(0_usize, |total, field| {
+            let encoded = match field.encoding {
+                GeneratedFieldEncoding::Base64 => field.entropy_bytes.div_ceil(3).saturating_mul(4),
+                GeneratedFieldEncoding::Hex => field.entropy_bytes.saturating_mul(2),
+                GeneratedFieldEncoding::Alphanumeric => field.entropy_bytes,
+            };
+            total
+                .checked_add(field.name.len())
+                .and_then(|total| total.checked_add(encoded))
+                .and_then(|total| total.checked_add(2))
+        });
+        match output_bytes {
+            Some(total) if total <= MAX_GENERATED_OUTPUT_BYTES => {}
+            _ => {
+                return Err(JanusError::InvalidIdentifier {
+                    kind: "generated_shape_output",
+                });
+            }
+        }
+        let canonical = format!(
+            "env:{}",
+            fields
+                .iter()
+                .map(|field| {
+                    format!(
+                        "{}={}:{}",
+                        field.name,
+                        field.encoding.as_str(),
+                        field.entropy_bytes
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        if canonical != value {
+            return Err(JanusError::InvalidIdentifier {
+                kind: "generated_shape",
+            });
+        }
+        Ok(Self { fields, canonical })
+    }
+
+    /// Canonical shape text.
+    pub fn as_str(&self) -> &str {
+        &self.canonical
+    }
+
+    /// Fields in declaration order.
+    pub fn fields(&self) -> &[GeneratedField] {
+        &self.fields
+    }
+
+    /// SHA-256 digest of the canonical shape.
+    pub fn digest(&self) -> String {
+        digest_text(self.as_str())
+    }
+
+    /// Generate the dotenv payload in bounded memory.
+    pub fn generate_value(&self) -> SecretValue {
+        let mut output = Vec::new();
+        for field in &self.fields {
+            output.extend_from_slice(field.name.as_bytes());
+            output.push(b'=');
+            match field.encoding {
+                GeneratedFieldEncoding::Base64 => {
+                    let mut random = vec![0_u8; field.entropy_bytes];
+                    OsRng.fill_bytes(&mut random);
+                    let encoded = Zeroizing::new(BASE64_STANDARD.encode(&random));
+                    output.extend_from_slice(encoded.as_bytes());
+                    random.zeroize();
+                }
+                GeneratedFieldEncoding::Hex => {
+                    let mut random = vec![0_u8; field.entropy_bytes];
+                    OsRng.fill_bytes(&mut random);
+                    let encoded = Zeroizing::new(hex::encode(&random));
+                    output.extend_from_slice(encoded.as_bytes());
+                    random.zeroize();
+                }
+                GeneratedFieldEncoding::Alphanumeric => {
+                    for _ in 0..field.entropy_bytes {
+                        let byte = ALPHANUMERIC_ALPHABET
+                            .choose(&mut OsRng)
+                            .expect("static generated alphabet is non-empty");
+                        output.push(*byte);
+                    }
+                }
+            }
+            output.push(b'\n');
+        }
+        SecretValue::new(output)
+    }
+}
+
+/// Value-free result of a generated agenix create.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GeneratedCreateOutcome {
+    /// Stable action label.
+    pub action: &'static str,
+    /// Whether a new ciphertext was created.
+    pub changed: bool,
+    /// Name-derived secret target.
+    pub secret_name: SecretName,
+    /// Canonical shape digest.
+    pub shape_digest: String,
+    /// Canonical recipient-set digest.
+    pub recipient_digest: String,
+    /// Reviewed reason.
+    pub reason: SafeLabel,
+    /// Generated create never returns values.
+    pub value_returned: bool,
+}
+
+/// Create a new agenix ciphertext from a reviewed shape.
+///
+/// The provider performs the exclusive create-if-absent operation; this layer
+/// generates only in memory and records value-free evidence before returning.
+pub async fn create_generated_agenix<A: AuditSink>(
+    export_root: impl Into<std::path::PathBuf>,
+    name: SecretName,
+    shape: &GeneratedCreateShape,
+    recipients: Vec<String>,
+    reason: SafeLabel,
+    principal: &PrincipalChain,
+    audit: &mut A,
+) -> JanusResult<GeneratedCreateOutcome> {
+    let recipient_digest = digest_recipients(&recipients)?;
+    let shape_digest = shape.digest();
+    let secret_ref = SecretRef::new(format!("generated:{}", name.as_str()))?;
+    audit.record(
+        AuditEvent::new(
+            AuditAction::RotationApprove,
+            AuditOutcome::Allowed,
+            "generated_create_approved",
+            Severity::High,
+            Some(secret_ref.clone()),
+            principal,
+        )
+        .with_evidence(SafeLabel::new(format!(
+            "name={} shape_sha256={} recipients_sha256={} reason={}",
+            name.as_str(),
+            shape_digest,
+            recipient_digest,
+            reason.as_str()
+        ))?),
+    )?;
+    let outcome = janus_provider_age::write_existing_agenix_value_if_absent(
+        export_root,
+        name.clone(),
+        recipients,
+        shape.generate_value(),
+    )
+    .await?;
+    audit.record(
+        AuditEvent::new(
+            AuditAction::RotationLifecycle,
+            AuditOutcome::Allowed,
+            "generated_create_written",
+            Severity::Notice,
+            Some(secret_ref),
+            principal,
+        )
+        .with_evidence(SafeLabel::new(format!(
+            "name={} shape_sha256={} recipients_sha256={}",
+            name.as_str(),
+            shape_digest,
+            recipient_digest
+        ))?),
+    )?;
+    Ok(GeneratedCreateOutcome {
+        action: "agenix.create.generated",
+        changed: outcome.changed,
+        secret_name: name,
+        shape_digest,
+        recipient_digest,
+        reason,
+        value_returned: false,
+    })
+}
+
+fn digest_text(value: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(value.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+fn digest_recipients(values: &[String]) -> JanusResult<String> {
+    let mut normalized = values
+        .iter()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    normalized.sort();
+    normalized.dedup();
+    if normalized.is_empty() {
+        return Err(JanusError::StoreUnavailable {
+            detail: "at least one age recipient is required".to_string(),
+        });
+    }
+    Ok(digest_text(&normalized.join("\n")))
 }
 
 /// Exact approval for a high-risk generated rotation.
@@ -573,15 +916,131 @@ fn reload_evidence(consumer: &ConsumerDescriptor) -> JanusResult<SafeLabel> {
 mod tests {
     use super::*;
     use janus_core::{
-        AuditWrite, BlastRadius, ConsumerKind, Environment, HealthStatus, OwnerRef, ProfileId,
-        RotationSpec, SafeLabel, ScopePathV1, ScopeRef, SecretClass, SecretDescriptor,
-        SecretLifecycle, SecretMeta, StoreCapabilities, TrustLevel,
+        AuditWrite, BlastRadius, ConsumerKind, Environment, HealthStatus, OwnerRef, Principal,
+        PrincipalChain, PrincipalId, PrincipalKind, ProfileId, RotationSpec, SafeLabel,
+        ScopePathV1, ScopeRef, SecretClass, SecretDescriptor, SecretLifecycle, SecretMeta,
+        StoreCapabilities, TrustLevel,
     };
 
     fn scope() -> ScopeRef {
         ScopePathV1::for_repository("fixture-org", "janus", "janus", "dev")
             .unwrap()
             .scope_ref()
+    }
+
+    #[test]
+    fn generated_shape_is_canonical_and_value_free() {
+        let shape = GeneratedCreateShape::parse("env:API_KEY=b64:24,PORT=hex:2").unwrap();
+        assert_eq!(shape.as_str(), "env:API_KEY=b64:24,PORT=hex:2");
+        assert_eq!(shape.fields().len(), 2);
+        assert_eq!(shape.fields()[0].name(), "API_KEY");
+        assert_eq!(shape.fields()[1].encoding, GeneratedFieldEncoding::Hex);
+        let value = shape.generate_value();
+        let payload = value.expose_bytes();
+        let text = std::str::from_utf8(payload).unwrap();
+        let lines = text.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].starts_with("API_KEY=") && lines[0].len() == 8 + 32);
+        assert!(lines[1].starts_with("PORT=") && lines[1].len() == 5 + 4);
+    }
+
+    #[test]
+    fn generated_shape_rejects_noncanonical_or_issuer_fields() {
+        for invalid in [
+            "env:API_KEY=b64:0",
+            "env:API_KEY=b64:1,API_KEY=hex:1",
+            "env:API_KEY=b64:1, API_SECRET=hex:1",
+            "env:API_KEY=b64:1,ISSUER=issuer:32",
+            "env:API_KEY=base64:32",
+        ] {
+            assert!(
+                GeneratedCreateShape::parse(invalid).is_err(),
+                "shape unexpectedly accepted: {invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn generated_shape_enforces_declared_bounds() {
+        let too_many_fields = (0..=MAX_GENERATED_FIELDS)
+            .map(|index| format!("KEY{index}=alnum:1"))
+            .collect::<Vec<_>>()
+            .join(",");
+        assert!(GeneratedCreateShape::parse(&format!("env:{too_many_fields}")).is_err());
+        assert!(GeneratedCreateShape::parse("env:TOKEN=alnum:4097").is_err());
+
+        let too_large_output = format!("env:TOKEN=alnum:{}", MAX_GENERATED_OUTPUT_BYTES);
+        assert!(GeneratedCreateShape::parse(&too_large_output).is_err());
+        assert!(GeneratedCreateShape::parse("env:TOKEN=b64:08").is_err());
+        assert!(GeneratedCreateShape::parse("env:").is_err());
+        assert!(GeneratedCreateShape::parse(&format!(
+            "env:{}",
+            "A".repeat(MAX_GENERATED_OUTPUT_BYTES)
+        ))
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn generated_create_is_exclusive_and_value_free() {
+        let temporary = tempfile::tempdir().unwrap();
+        let identity = age::x25519::Identity::generate();
+        let recipient = identity.to_public().to_string();
+        let name = SecretName::new("fixture-generated-env").unwrap();
+        let shape = GeneratedCreateShape::parse("env:TOKEN=alnum:24").unwrap();
+        let principal = PrincipalChain::new(
+            Principal::new(
+                PrincipalKind::Executor,
+                PrincipalId::new("janus-forge-fixture").unwrap(),
+            ),
+            scope(),
+        );
+        let mut audit = AuditWrite::accepting();
+        let outcome = create_generated_agenix(
+            temporary.path().to_path_buf(),
+            name.clone(),
+            &shape,
+            vec![recipient.clone()],
+            SafeLabel::new("JANUS-464 synthetic reference").unwrap(),
+            &principal,
+            &mut audit,
+        )
+        .await
+        .unwrap();
+        assert!(outcome.changed);
+        assert!(!outcome.value_returned);
+        assert_eq!(outcome.action, "agenix.create.generated");
+        assert!(temporary.path().join("fixture-generated-env.age").is_file());
+        assert!(!format!("{outcome:?}").contains("TOKEN="));
+        assert_eq!(audit.events().len(), 2);
+        assert!(audit.events().iter().all(|event| !event.value_returned));
+        assert!(audit.events().iter().all(|event| {
+            event
+                .evidence
+                .as_ref()
+                .is_some_and(|evidence| evidence.as_str().contains("shape_sha256="))
+        }));
+
+        let mut second_audit = AuditWrite::accepting();
+        let second = create_generated_agenix(
+            temporary.path().to_path_buf(),
+            name,
+            &shape,
+            vec![recipient],
+            SafeLabel::new("JANUS-464 synthetic reference").unwrap(),
+            &principal,
+            &mut second_audit,
+        )
+        .await;
+        assert!(
+            matches!(
+                second,
+                Err(JanusError::PolicyDenied {
+                    reason_code: "entry_target_present",
+                    ..
+                })
+            ),
+            "generated create must never overwrite an existing ciphertext"
+        );
     }
 
     #[derive(Clone, Debug, PartialEq, Eq)]

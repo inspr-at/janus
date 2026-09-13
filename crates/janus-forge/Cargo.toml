@@ -13,9 +13,15 @@ workspace = true
 
 [dependencies]
 async-trait = "0.1"
+base64 = "0.21"
+hex = "0.4"
 janus-core = { path = "../janus-core" }
 janus-provider-age = { path = "../janus-provider-age" }
 rand = "0.8"
+sha2 = "0.10"
+zeroize = "1"
 
 [dev-dependencies]
+age = { version = "=0.12.1", default-features = false, features = ["ssh"] }
+tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt"] }
