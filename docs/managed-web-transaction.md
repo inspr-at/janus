@@ -248,7 +248,7 @@ the binding's at-most-120-second window. The checked example is
 The independently canonicalized binding example is
 [`managed-credential-reattestation-binding.golden.json`](../examples/paimos-dependency-reporter/managed-credential-reattestation-binding.golden.json),
 with digest
-`sha256:4abd0941d4e7358845b925ccce464592003f3f789d2d2512f1d3975884410be6`.
+`sha256:815aa85115450ac9ad61f914b387cd866c9f8f625177a564608c1f657244428b`.
 
 After both host checks and the fresh observation agree, the one-shot creates a
 new integrity-sealed
