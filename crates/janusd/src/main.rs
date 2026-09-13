@@ -59,8 +59,8 @@ use janus_executor::{
     ManagedCommandRequest, ManagedCommandRuntimeLimits,
 };
 use janus_forge::{
-    ConsumerRotationHooks, GeneratedAlphabet, GeneratedRotationBroker, GeneratedValuePolicy,
-    RotationApproval,
+    create_generated_agenix, ConsumerRotationHooks, GeneratedAlphabet, GeneratedCreateShape,
+    GeneratedRotationBroker, GeneratedValuePolicy, RotationApproval,
 };
 use janus_local::{
     authorize_runtime_action_from_env, enforce_migration_ready_from_env,
@@ -197,6 +197,7 @@ pub async fn run_for_plane(selected_plane: Option<RuntimePlane>) -> Result<()> {
             Ok(())
         }
         Command::ForgeRotateGenerated(config) => run_forge_rotate_generated(config).await,
+        Command::ForgeCreateGenerated(config) => run_forge_create_generated(config).await,
         Command::RunManagedPreflight(config) => run_managed_command_preflight(config).await,
         Command::RunManaged(config) => run_managed_command(config).await,
         Command::EnvFilePreflight(config) => run_env_file_preflight(config).await,
@@ -552,6 +553,7 @@ impl Drop for IdentitySocketCleanup {
 enum Command {
     Help,
     ForgeRotateGenerated(ForgeRotateGeneratedConfig),
+    ForgeCreateGenerated(ForgeCreateGeneratedConfig),
     RunManagedPreflight(RunManagedPreflightConfig),
     RunManaged(RunManagedCommandConfig),
     EnvFilePreflight(EnvFilePreflightConfig),
@@ -574,6 +576,7 @@ impl Command {
         match self {
             Self::Help => unreachable!("help is handled before command classification"),
             Self::ForgeRotateGenerated(_) => RuntimeAction::ForgeRotateGenerated,
+            Self::ForgeCreateGenerated(_) => RuntimeAction::ForgeRotateGenerated,
             Self::RunManagedPreflight(_) => RuntimeAction::ManagedRunPreflight,
             Self::RunManaged(_) => RuntimeAction::ManagedRun,
             Self::EnvFilePreflight(_) => RuntimeAction::EnvFilePreflight,
@@ -636,6 +639,15 @@ struct ForgeRotateGeneratedConfig {
     alphabet: GeneratedAlphabet,
     length: usize,
     hook_manifest: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ForgeCreateGeneratedConfig {
+    secret: SecretName,
+    shape: GeneratedCreateShape,
+    reason: SafeLabel,
+    recipients_file: PathBuf,
+    export_root: PathBuf,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -951,6 +963,46 @@ async fn run_forge_rotate_generated(config: ForgeRotateGeneratedConfig) -> Resul
         outcome.phase,
         outcome.reason_code,
         outcome.value_returned
+    );
+    Ok(())
+}
+
+async fn run_forge_create_generated(config: ForgeCreateGeneratedConfig) -> Result<()> {
+    if !config.recipients_file.is_absolute() {
+        anyhow::bail!("--recipients-from must be an absolute reviewed path");
+    }
+    if !config.export_root.is_absolute() {
+        anyhow::bail!("--export-root must be an absolute reviewed path");
+    }
+    let recipients = read_recipient_file(&config.recipients_file)?;
+    let audit_path = env_first(&["JANUS_FORGE_AUDIT_FILE", "JANUS_RUNTIME_AUDIT_FILE"])
+        .map(PathBuf::from)
+        .context("JANUS_FORGE_AUDIT_FILE or JANUS_RUNTIME_AUDIT_FILE is required")?;
+    let mut audit = JsonlAuditSink::open(audit_path).context("forge audit unavailable")?;
+    let principal = forge_principal_from_env()?;
+    let outcome = create_generated_agenix(
+        config.export_root,
+        config.secret,
+        &config.shape,
+        recipients,
+        config.reason,
+        &principal,
+        &mut audit,
+    )
+    .await
+    .context("generated agenix create failed")?;
+
+    println!(
+        "{}",
+        serde_json::json!({
+            "action": outcome.action,
+            "changed": outcome.changed,
+            "secret_name": outcome.secret_name.as_str(),
+            "shape_sha256": outcome.shape_digest,
+            "recipients_sha256": outcome.recipient_digest,
+            "reason": outcome.reason.as_str(),
+            "value_returned": outcome.value_returned,
+        })
     );
     Ok(())
 }
@@ -4044,6 +4096,9 @@ fn classify_runtime_action(args: &[String]) -> Result<RuntimeAction> {
         [forge, rotate, ..] if forge == "forge" && rotate == "rotate-generated" => {
             RuntimeAction::ForgeRotateGenerated
         }
+        [forge, create, ..] if forge == "forge" && create == "create-generated" => {
+            RuntimeAction::ForgeRotateGenerated
+        }
         [run, preflight, ..] if run == "run" && preflight == "preflight" => {
             RuntimeAction::ManagedRunPreflight
         }
@@ -4238,6 +4293,9 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command> {
     match args.as_slice() {
         [forge, rotate, rest @ ..] if forge == "forge" && rotate == "rotate-generated" => {
             parse_forge_rotate_generated(rest.iter().cloned()).map(Command::ForgeRotateGenerated)
+        }
+        [forge, create, rest @ ..] if forge == "forge" && create == "create-generated" => {
+            parse_forge_create_generated(rest.iter().cloned()).map(Command::ForgeCreateGenerated)
         }
         [run, preflight, rest @ ..] if run == "run" && preflight == "preflight" => {
             parse_run_managed_preflight(rest.iter().cloned()).map(Command::RunManagedPreflight)
@@ -5494,6 +5552,62 @@ fn parse_forge_rotate_generated(
     Ok(config)
 }
 
+fn parse_forge_create_generated(
+    args: impl IntoIterator<Item = String>,
+) -> Result<ForgeCreateGeneratedConfig> {
+    let mut secret = None;
+    let mut shape = None;
+    let mut reason = None;
+    let mut recipients_file = None;
+    let mut export_root = None;
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--secret" => replace_once(
+                &mut secret,
+                "--secret",
+                SecretName::new(required_arg("--secret", args.next())?)?,
+            )?,
+            "--shape" => replace_once(
+                &mut shape,
+                "--shape",
+                GeneratedCreateShape::parse(&required_arg("--shape", args.next())?)?,
+            )?,
+            "--reason" => replace_once(
+                &mut reason,
+                "--reason",
+                SafeLabel::new(required_arg("--reason", args.next())?)?,
+            )?,
+            "--recipients-from" => replace_once(
+                &mut recipients_file,
+                "--recipients-from",
+                PathBuf::from(required_arg("--recipients-from", args.next())?),
+            )?,
+            "--export-root" => replace_once(
+                &mut export_root,
+                "--export-root",
+                PathBuf::from(required_arg("--export-root", args.next())?),
+            )?,
+            "--value" | "--raw-value" | "--generated-value" => {
+                anyhow::bail!(
+                    "{arg} is intentionally unsupported; Forge generates values internally"
+                )
+            }
+            other if other.starts_with('-') => {
+                anyhow::bail!("unsupported forge create-generated flag")
+            }
+            _ => anyhow::bail!("unsupported forge create-generated argument"),
+        }
+    }
+    Ok(ForgeCreateGeneratedConfig {
+        secret: secret.context("--secret is required")?,
+        shape: shape.context("--shape is required")?,
+        reason: reason.context("--reason is required")?,
+        recipients_file: recipients_file.context("--recipients-from is required")?,
+        export_root: export_root.context("--export-root is required")?,
+    })
+}
+
 fn parse_alphabet(value: &str) -> Result<GeneratedAlphabet> {
     match value {
         "url-safe" => Ok(GeneratedAlphabet::UrlSafe),
@@ -6046,6 +6160,8 @@ Administration commands:
   forge rotate-generated --secret NAME --reason REASON --consumer-ref REF \
     --validation PROBE --hook-manifest PATH [--reload METHOD] \
     [--alphabet url-safe|alphanumeric|hex] [--length N]
+  forge create-generated --secret NAME --shape env:KEY=b64:N[,KEY=hex:N] \
+    --reason REASON --recipients-from PATH --export-root PATH
   lifecycle-entry preflight|apply|activate|rollback|status --plan PATH
   lifecycle action-queue --profile-manifest PATH --entry-state-dir PATH --audit-path PATH \
     [--format text|json] [--action-required-only] [--owner OWNER] \
@@ -6063,7 +6179,7 @@ Administration commands:
 This process cannot execute managed commands, render env files, consume UsePermits, or expose Warden tools.
 Lifecycle and retirement operations remain value-free; provider deletion is not implied.
 Reload methods: none, restart-service:LABEL, signal:LABEL, exec-hook:LABEL, connector-action:LABEL.
-Forge generates replacement values internally; no --value argument exists.
+Forge generates replacement and bootstrap values internally; no --value argument exists.
 All non-help commands require JANUS_SCOPE_ORGANIZATION, JANUS_SCOPE_PROJECT, JANUS_SCOPE_REPOSITORY, and JANUS_SCOPE_ENVIRONMENT. JANUS_SCOPE_NAMESPACE and JANUS_SCOPE_WORKLOAD are optional; workload requires namespace."#;
 
 fn print_usage(selected_plane: Option<RuntimePlane>) {
@@ -6339,6 +6455,11 @@ mod tests {
                 .collect::<Vec<_>>();
             assert_eq!(classify_runtime_action(&args).unwrap(), expected);
         }
+        assert_eq!(
+            classify_runtime_action(&["forge".to_string(), "create-generated".to_string()])
+                .unwrap(),
+            RuntimeAction::ForgeRotateGenerated
+        );
         assert!(classify_runtime_action(&["resolve".to_string()]).is_err());
     }
 
@@ -6410,6 +6531,7 @@ mod tests {
     fn parse_ok(args: &[&str]) -> ForgeRotateGeneratedConfig {
         match parse_args(args.iter().map(|arg| arg.to_string())).unwrap() {
             Command::ForgeRotateGenerated(config) => config,
+            Command::ForgeCreateGenerated(_) => panic!("expected forge rotate-generated config"),
             Command::Help => panic!("expected forge config"),
             Command::RunManagedPreflight(_) => panic!("expected forge config"),
             Command::RunManaged(_) => panic!("expected forge config"),
@@ -6430,11 +6552,70 @@ mod tests {
         }
     }
 
+    #[test]
+    fn parses_forge_create_generated_without_secret_literals() {
+        let args = [
+            "forge",
+            "create-generated",
+            "--secret",
+            "CANARY",
+            "--shape",
+            "env:API_KEY=b64:24,PORT=hex:2",
+            "--reason",
+            "JANUS-464 synthetic reference",
+            "--recipients-from",
+            "/run/janus/recipients",
+            "--export-root",
+            "/var/lib/janus/export",
+        ];
+        let config = match parse_args(args.into_iter().map(str::to_string)).unwrap() {
+            Command::ForgeCreateGenerated(config) => config,
+            _ => panic!("expected forge create-generated config"),
+        };
+        assert_eq!(config.secret.as_str(), "CANARY");
+        assert_eq!(config.shape.as_str(), "env:API_KEY=b64:24,PORT=hex:2");
+        assert_eq!(config.reason.as_str(), "JANUS-464 synthetic reference");
+        assert_eq!(
+            config.recipients_file,
+            PathBuf::from("/run/janus/recipients")
+        );
+        assert_eq!(config.export_root, PathBuf::from("/var/lib/janus/export"));
+    }
+
+    #[test]
+    fn forge_create_generated_rejects_literal_values() {
+        let error = parse_args(
+            [
+                "forge",
+                "create-generated",
+                "--secret",
+                "CANARY",
+                "--shape",
+                "env:API_KEY=b64:24",
+                "--reason",
+                "JANUS-464",
+                "--recipients-from",
+                "/run/janus/recipients",
+                "--export-root",
+                "/var/lib/janus/export",
+                "--value",
+                "do-not-echo-me",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("unsupported"));
+        assert!(!error.contains("do-not-echo-me"));
+    }
+
     fn parse_run_ok(args: &[&str]) -> RunManagedCommandConfig {
         match parse_args(args.iter().map(|arg| arg.to_string())).unwrap() {
             Command::RunManaged(config) => config,
             Command::RunManagedPreflight(_) => panic!("expected run config"),
             Command::ForgeRotateGenerated(_) => panic!("expected run config"),
+            Command::ForgeCreateGenerated(_) => panic!("expected run config"),
             Command::EnvFilePreflight(_) => panic!("expected run config"),
             Command::EnvFile(_) => panic!("expected run config"),
             Command::ProjectionPreflight(_) | Command::ProjectionIssue(_) => {
@@ -6465,6 +6646,7 @@ mod tests {
             Command::EnvFile(config) => config,
             Command::EnvFilePreflight(_) => panic!("expected env-file config"),
             Command::ForgeRotateGenerated(_) => panic!("expected env-file config"),
+            Command::ForgeCreateGenerated(_) => panic!("expected env-file config"),
             Command::RunManagedPreflight(_) => panic!("expected env-file config"),
             Command::RunManaged(_) => panic!("expected env-file config"),
             Command::ProjectionPreflight(_) | Command::ProjectionIssue(_) => {
@@ -6491,6 +6673,7 @@ mod tests {
                 panic!("expected env-file preflight config")
             }
             Command::ForgeRotateGenerated(_) => panic!("expected env-file preflight config"),
+            Command::ForgeCreateGenerated(_) => panic!("expected env-file preflight config"),
             Command::RunManagedPreflight(_) => panic!("expected env-file preflight config"),
             Command::RunManaged(_) => panic!("expected env-file preflight config"),
             Command::PermitIssue(_) => panic!("expected env-file preflight config"),
@@ -6524,6 +6707,7 @@ mod tests {
         match parse_args(args.iter().map(|arg| arg.to_string())).unwrap() {
             Command::Approve(ApproveCommand::Issue(config)) => config,
             Command::ForgeRotateGenerated(_) => panic!("expected approve issue config"),
+            Command::ForgeCreateGenerated(_) => panic!("expected approve issue config"),
             Command::RunManagedPreflight(_) => panic!("expected approve issue config"),
             Command::RunManaged(_) => panic!("expected approve issue config"),
             Command::EnvFilePreflight(_) => panic!("expected approve issue config"),
@@ -6548,6 +6732,7 @@ mod tests {
         match parse_args(args.iter().map(|arg| arg.to_string())).unwrap() {
             Command::Approve(ApproveCommand::Permit(config)) => config,
             Command::ForgeRotateGenerated(_) => panic!("expected approve permit config"),
+            Command::ForgeCreateGenerated(_) => panic!("expected approve permit config"),
             Command::RunManagedPreflight(_) => panic!("expected approve permit config"),
             Command::RunManaged(_) => panic!("expected approve permit config"),
             Command::EnvFilePreflight(_) => panic!("expected approve permit config"),
@@ -6572,6 +6757,7 @@ mod tests {
         match parse_args(args.iter().map(|arg| arg.to_string())).unwrap() {
             Command::Approve(ApproveCommand::Revoke(config)) => config,
             Command::ForgeRotateGenerated(_) => panic!("expected approve revoke config"),
+            Command::ForgeCreateGenerated(_) => panic!("expected approve revoke config"),
             Command::RunManagedPreflight(_) => panic!("expected approve revoke config"),
             Command::RunManaged(_) => panic!("expected approve revoke config"),
             Command::EnvFilePreflight(_) => panic!("expected approve revoke config"),
@@ -6596,6 +6782,7 @@ mod tests {
         match parse_args(args.iter().map(|arg| arg.to_string())).unwrap() {
             Command::LifecycleTransition(config) => config,
             Command::ForgeRotateGenerated(_) => panic!("expected lifecycle config"),
+            Command::ForgeCreateGenerated(_) => panic!("expected lifecycle config"),
             Command::RunManagedPreflight(_) => panic!("expected lifecycle config"),
             Command::RunManaged(_) => panic!("expected lifecycle config"),
             Command::EnvFilePreflight(_) => panic!("expected lifecycle config"),
@@ -6620,6 +6807,7 @@ mod tests {
             Command::LifecycleStaleReport(config) => config,
             Command::LifecycleTransition(_) => panic!("expected lifecycle stale-report config"),
             Command::ForgeRotateGenerated(_) => panic!("expected lifecycle stale-report config"),
+            Command::ForgeCreateGenerated(_) => panic!("expected lifecycle stale-report config"),
             Command::RunManagedPreflight(_) => {
                 panic!("expected lifecycle stale-report config")
             }
@@ -6652,6 +6840,7 @@ mod tests {
                 panic!("expected lifecycle destroy-record config")
             }
             Command::ForgeRotateGenerated(_) => panic!("expected lifecycle destroy-record config"),
+            Command::ForgeCreateGenerated(_) => panic!("expected lifecycle destroy-record config"),
             Command::RunManagedPreflight(_) => {
                 panic!("expected lifecycle destroy-record config")
             }
@@ -6686,6 +6875,9 @@ mod tests {
                 panic!("expected lifecycle destroy-finalize config")
             }
             Command::ForgeRotateGenerated(_) => {
+                panic!("expected lifecycle destroy-finalize config")
+            }
+            Command::ForgeCreateGenerated(_) => {
                 panic!("expected lifecycle destroy-finalize config")
             }
             Command::RunManagedPreflight(_) => {
@@ -6724,6 +6916,9 @@ mod tests {
                 panic!("expected lifecycle destroy-reconcile config")
             }
             Command::ForgeRotateGenerated(_) => {
+                panic!("expected lifecycle destroy-reconcile config")
+            }
+            Command::ForgeCreateGenerated(_) => {
                 panic!("expected lifecycle destroy-reconcile config")
             }
             Command::RunManagedPreflight(_) => {
