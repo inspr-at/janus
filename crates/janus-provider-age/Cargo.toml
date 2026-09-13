@@ -19,7 +19,11 @@ path = "src/bin/janus-agenix-import.rs"
 age = { version = "=0.12.1", default-features = false, features = ["ssh"] }
 async-trait = "0.1"
 fs2 = "0.4"
+hex = "0.4"
 janus-core = { path = "../janus-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
 ssh-key = { version = "=0.6.7", default-features = false, features = ["std"] }
 tokio = { version = "1", features = ["rt"] }
 zeroize = "1"

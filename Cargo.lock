@@ -431,6 +431,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e7c1832837b905bbfb5101e07cc24c8deddf52f93225eee6ead5f4d63d53ddcb"
 dependencies = [
  "const-oid",
+ "pem-rfc7468",
  "zeroize",
 ]
 
@@ -1166,9 +1167,15 @@ dependencies = [
  "janus-core",
  "janus-provider-age",
  "rand",
+ "rsa",
+ "serde",
+ "serde_json",
  "sha2",
  "tempfile",
  "tokio",
+ "ureq",
+ "url",
+ "wait-timeout",
  "zeroize",
 ]
 
@@ -1228,9 +1235,13 @@ dependencies = [
  "age",
  "async-trait",
  "fs2",
+ "hex",
  "janus-conformance",
  "janus-core",
  "rustix",
+ "serde",
+ "serde_json",
+ "sha2",
  "ssh-key",
  "tempfile",
  "tokio",

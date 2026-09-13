@@ -29,6 +29,12 @@ use rand::RngCore;
 use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
 
+pub mod issuer;
+pub use issuer::{
+    IssuerAlias, IssuerConnectorCatalog, IssuerConnectorEntry, IssuerCredentialStore, IssuerKind,
+    IssuerResolution, IssuerResolutionEvidence, IssuerResolver,
+};
+
 const URL_SAFE_ALPHABET: &[u8] =
     b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 const ALPHANUMERIC_ALPHABET: &[u8] =
@@ -122,7 +128,7 @@ impl GeneratedValuePolicy {
 }
 
 /// Encoding used for one field in a generated environment secret.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GeneratedFieldEncoding {
     /// Random bytes rendered as standard padded base64.
     Base64,
@@ -130,6 +136,8 @@ pub enum GeneratedFieldEncoding {
     Hex,
     /// Random bytes sampled from ASCII letters and digits.
     Alphanumeric,
+    /// Resolve a value through a configured issuer alias.
+    Issuer(IssuerAlias),
 }
 
 impl GeneratedFieldEncoding {
@@ -144,11 +152,12 @@ impl GeneratedFieldEncoding {
         }
     }
 
-    fn as_str(self) -> &'static str {
+    fn as_str(&self) -> &'static str {
         match self {
             Self::Base64 => "b64",
             Self::Hex => "hex",
             Self::Alphanumeric => "alnum",
+            Self::Issuer(_) => "issuer",
         }
     }
 }
@@ -169,7 +178,7 @@ impl GeneratedField {
 
     /// Field encoding.
     pub fn encoding(&self) -> GeneratedFieldEncoding {
-        self.encoding
+        self.encoding.clone()
     }
 
     /// Random input size in bytes.
@@ -226,23 +235,24 @@ impl GeneratedCreateShape {
                     .ok_or(JanusError::InvalidIdentifier {
                         kind: "generated_shape_policy",
                     })?;
-            if encoding == "issuer" {
-                return Err(JanusError::Unsupported {
-                    capability: "issuer_generated_field",
-                });
-            }
-            let encoding = GeneratedFieldEncoding::parse(encoding)?;
-            let entropy_bytes =
-                entropy
-                    .parse::<usize>()
-                    .map_err(|_| JanusError::InvalidIdentifier {
+            let (encoding, entropy_bytes) = if encoding == "issuer" {
+                let alias = IssuerAlias::parse(&format!("issuer:{entropy}"))?;
+                (GeneratedFieldEncoding::Issuer(alias), 0)
+            } else {
+                let encoding = GeneratedFieldEncoding::parse(encoding)?;
+                let entropy_bytes =
+                    entropy
+                        .parse::<usize>()
+                        .map_err(|_| JanusError::InvalidIdentifier {
+                            kind: "generated_shape_entropy",
+                        })?;
+                if entropy_bytes == 0 || entropy_bytes > MAX_GENERATED_ENTROPY_BYTES {
+                    return Err(JanusError::InvalidIdentifier {
                         kind: "generated_shape_entropy",
-                    })?;
-            if entropy_bytes == 0 || entropy_bytes > MAX_GENERATED_ENTROPY_BYTES {
-                return Err(JanusError::InvalidIdentifier {
-                    kind: "generated_shape_entropy",
-                });
-            }
+                    });
+                }
+                (encoding, entropy_bytes)
+            };
             fields.push(GeneratedField {
                 name: name.to_string(),
                 encoding,
@@ -255,10 +265,11 @@ impl GeneratedCreateShape {
             }
         }
         let output_bytes = fields.iter().try_fold(0_usize, |total, field| {
-            let encoded = match field.encoding {
+            let encoded = match &field.encoding {
                 GeneratedFieldEncoding::Base64 => field.entropy_bytes.div_ceil(3).saturating_mul(4),
                 GeneratedFieldEncoding::Hex => field.entropy_bytes.saturating_mul(2),
                 GeneratedFieldEncoding::Alphanumeric => field.entropy_bytes,
+                GeneratedFieldEncoding::Issuer(_) => MAX_GENERATED_VALUE_LEN,
             };
             total
                 .checked_add(field.name.len())
@@ -278,12 +289,11 @@ impl GeneratedCreateShape {
             fields
                 .iter()
                 .map(|field| {
-                    format!(
-                        "{}={}:{}",
-                        field.name,
-                        field.encoding.as_str(),
-                        field.entropy_bytes
-                    )
+                    let policy = match &field.encoding {
+                        GeneratedFieldEncoding::Issuer(alias) => alias.as_str().to_string(),
+                        _ => format!("{}:{}", field.encoding.as_str(), field.entropy_bytes),
+                    };
+                    format!("{}={}", field.name, policy)
                 })
                 .collect::<Vec<_>>()
                 .join(",")
@@ -311,13 +321,44 @@ impl GeneratedCreateShape {
         digest_text(self.as_str())
     }
 
+    /// Whether any field is resolved through an issuer connector.
+    pub fn has_issuer(&self) -> bool {
+        self.fields
+            .iter()
+            .any(|field| matches!(&field.encoding, GeneratedFieldEncoding::Issuer(_)))
+    }
+
+    /// Stable digest of issuer aliases in declaration order.
+    pub fn issuer_aliases_digest(&self) -> String {
+        let aliases = self
+            .fields
+            .iter()
+            .filter_map(|field| match &field.encoding {
+                GeneratedFieldEncoding::Issuer(alias) => Some(alias.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        digest_text(&aliases.join("\n"))
+    }
+
+    /// Issuer aliases in declaration order for catalog binding checks.
+    pub fn issuer_aliases(&self) -> Vec<IssuerAlias> {
+        self.fields
+            .iter()
+            .filter_map(|field| match &field.encoding {
+                GeneratedFieldEncoding::Issuer(alias) => Some(alias.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Generate the dotenv payload in bounded memory.
     pub fn generate_value(&self) -> SecretValue {
         let mut output = Vec::new();
         for field in &self.fields {
             output.extend_from_slice(field.name.as_bytes());
             output.push(b'=');
-            match field.encoding {
+            match &field.encoding {
                 GeneratedFieldEncoding::Base64 => {
                     let mut random = vec![0_u8; field.entropy_bytes];
                     OsRng.fill_bytes(&mut random);
@@ -340,10 +381,80 @@ impl GeneratedCreateShape {
                         output.push(*byte);
                     }
                 }
+                GeneratedFieldEncoding::Issuer(_) => {
+                    unreachable!("issuer fields require resolve_value")
+                }
             }
             output.push(b'\n');
         }
         SecretValue::new(output)
+    }
+
+    /// Resolve issuer fields in declaration order inside the write-side
+    /// broker. Resolved values never cross this boundary as strings.
+    pub async fn resolve_value<R: IssuerResolver, C: IssuerCredentialStore>(
+        &self,
+        resolver: &R,
+        credential_store: &C,
+    ) -> JanusResult<SecretValue> {
+        let mut output = Vec::new();
+        for field in &self.fields {
+            output.extend_from_slice(field.name.as_bytes());
+            output.push(b'=');
+            match &field.encoding {
+                GeneratedFieldEncoding::Issuer(alias) => {
+                    let IssuerResolution { value, evidence } =
+                        resolver.resolve(alias, credential_store).await?;
+                    if evidence.kind != alias.kind() || evidence.alias_digest != alias.digest() {
+                        return Err(JanusError::policy_denied(
+                            "issuer_resolution_evidence_mismatch",
+                            "issuer resolver evidence is not bound to the requested alias",
+                        ));
+                    }
+                    let bytes = value.expose_bytes();
+                    if bytes.is_empty()
+                        || bytes.len() > issuer::MAX_ISSUER_VALUE_BYTES
+                        || bytes.iter().any(|byte| matches!(byte, 0 | b'\n' | b'\r'))
+                    {
+                        return Err(JanusError::policy_denied(
+                            "issuer_value_invalid",
+                            "issuer resolver returned an invalid generated field",
+                        ));
+                    }
+                    output.extend_from_slice(bytes);
+                }
+                GeneratedFieldEncoding::Base64 => {
+                    let mut random = vec![0_u8; field.entropy_bytes];
+                    OsRng.fill_bytes(&mut random);
+                    let encoded = Zeroizing::new(BASE64_STANDARD.encode(&random));
+                    output.extend_from_slice(encoded.as_bytes());
+                    random.zeroize();
+                }
+                GeneratedFieldEncoding::Hex => {
+                    let mut random = vec![0_u8; field.entropy_bytes];
+                    OsRng.fill_bytes(&mut random);
+                    let encoded = Zeroizing::new(hex::encode(&random));
+                    output.extend_from_slice(encoded.as_bytes());
+                    random.zeroize();
+                }
+                GeneratedFieldEncoding::Alphanumeric => {
+                    for _ in 0..field.entropy_bytes {
+                        output.push(
+                            *ALPHANUMERIC_ALPHABET
+                                .choose(&mut OsRng)
+                                .expect("static generated alphabet is non-empty"),
+                        );
+                    }
+                }
+            }
+            output.push(b'\n');
+            if output.len() > MAX_GENERATED_OUTPUT_BYTES {
+                return Err(JanusError::InvalidIdentifier {
+                    kind: "generated_shape_output",
+                });
+            }
+        }
+        Ok(SecretValue::new(output))
     }
 }
 
@@ -360,6 +471,8 @@ pub struct GeneratedCreateOutcome {
     pub shape_digest: String,
     /// Canonical recipient-set digest.
     pub recipient_digest: String,
+    /// Digest of issuer aliases in the shape, when any are present.
+    pub issuer_aliases_digest: Option<String>,
     /// Reviewed reason.
     pub reason: SafeLabel,
     /// Generated create never returns values.
@@ -379,8 +492,49 @@ pub async fn create_generated_agenix<A: AuditSink>(
     principal: &PrincipalChain,
     audit: &mut A,
 ) -> JanusResult<GeneratedCreateOutcome> {
+    if shape.has_issuer() {
+        return Err(JanusError::Unsupported {
+            capability: "issuer_resolver",
+        });
+    }
+    create_generated_agenix_with_resolver(
+        export_root,
+        name,
+        shape,
+        recipients,
+        reason,
+        principal,
+        &NoIssuerResolver,
+        &NoIssuerCredentialStore,
+        audit,
+    )
+    .await
+}
+
+/// Create a generated agenix ciphertext with a reviewed issuer resolver.
+///
+/// For issuer-bearing shapes the provider reservation is durable before the
+/// first resolver call. A resolver failure therefore leaves an explicit
+/// interrupted reservation and never silently re-issues a remote credential.
+#[allow(clippy::too_many_arguments)]
+pub async fn create_generated_agenix_with_resolver<
+    R: IssuerResolver,
+    C: IssuerCredentialStore,
+    A: AuditSink,
+>(
+    export_root: impl Into<std::path::PathBuf>,
+    name: SecretName,
+    shape: &GeneratedCreateShape,
+    recipients: Vec<String>,
+    reason: SafeLabel,
+    principal: &PrincipalChain,
+    resolver: &R,
+    credential_store: &C,
+    audit: &mut A,
+) -> JanusResult<GeneratedCreateOutcome> {
     let recipient_digest = digest_recipients(&recipients)?;
     let shape_digest = shape.digest();
+    let issuer_aliases_digest = shape.has_issuer().then(|| shape.issuer_aliases_digest());
     let secret_ref = SecretRef::new(format!("generated:{}", name.as_str()))?;
     audit.record(
         AuditEvent::new(
@@ -399,13 +553,26 @@ pub async fn create_generated_agenix<A: AuditSink>(
             reason.as_str()
         ))?),
     )?;
-    let outcome = janus_provider_age::write_existing_agenix_value_if_absent(
-        export_root,
-        name.clone(),
-        recipients,
-        shape.generate_value(),
-    )
-    .await?;
+    let outcome = if let Some(issuer_aliases_digest) = issuer_aliases_digest.as_ref() {
+        let reservation = janus_provider_age::reserve_agenix_create(
+            export_root,
+            name.clone(),
+            shape_digest.clone(),
+            recipient_digest.clone(),
+            issuer_aliases_digest.clone(),
+        )
+        .await?;
+        let value = shape.resolve_value(resolver, credential_store).await?;
+        janus_provider_age::write_reserved_agenix_value(reservation, recipients, value).await?
+    } else {
+        janus_provider_age::write_existing_agenix_value_if_absent(
+            export_root,
+            name.clone(),
+            recipients,
+            shape.generate_value(),
+        )
+        .await?
+    };
     audit.record(
         AuditEvent::new(
             AuditAction::RotationLifecycle,
@@ -416,10 +583,11 @@ pub async fn create_generated_agenix<A: AuditSink>(
             principal,
         )
         .with_evidence(SafeLabel::new(format!(
-            "name={} shape_sha256={} recipients_sha256={}",
+            "name={} shape_sha256={} recipients_sha256={} issuer_aliases_sha256={}",
             name.as_str(),
             shape_digest,
-            recipient_digest
+            recipient_digest,
+            issuer_aliases_digest.as_deref().unwrap_or("none")
         ))?),
     )?;
     Ok(GeneratedCreateOutcome {
@@ -428,9 +596,36 @@ pub async fn create_generated_agenix<A: AuditSink>(
         secret_name: name,
         shape_digest,
         recipient_digest,
+        issuer_aliases_digest,
         reason,
         value_returned: false,
     })
+}
+
+struct NoIssuerResolver;
+
+#[async_trait]
+impl IssuerResolver for NoIssuerResolver {
+    async fn resolve(
+        &self,
+        _alias: &IssuerAlias,
+        _credential_store: &dyn IssuerCredentialStore,
+    ) -> JanusResult<IssuerResolution> {
+        Err(JanusError::Unsupported {
+            capability: "issuer_resolver",
+        })
+    }
+}
+
+struct NoIssuerCredentialStore;
+
+#[async_trait]
+impl IssuerCredentialStore for NoIssuerCredentialStore {
+    async fn load(&self, _credential_ref: &str) -> JanusResult<SecretValue> {
+        Err(JanusError::Unsupported {
+            capability: "issuer_credential_store",
+        })
+    }
 }
 
 fn digest_text(value: &str) -> String {
@@ -945,12 +1140,20 @@ mod tests {
     }
 
     #[test]
-    fn generated_shape_rejects_noncanonical_or_issuer_fields() {
+    fn generated_shape_rejects_noncanonical_and_accepts_bound_issuer_fields() {
+        let issuer_shape =
+            GeneratedCreateShape::parse("env:OIDC=issuer:zitadel-oidc-client:AGM Platform/zulip")
+                .unwrap();
+        assert!(issuer_shape.has_issuer());
+        assert_eq!(
+            issuer_shape.issuer_aliases()[0].as_str(),
+            "issuer:zitadel-oidc-client:AGM Platform/zulip"
+        );
         for invalid in [
             "env:API_KEY=b64:0",
             "env:API_KEY=b64:1,API_KEY=hex:1",
             "env:API_KEY=b64:1, API_SECRET=hex:1",
-            "env:API_KEY=b64:1,ISSUER=issuer:32",
+            "env:API_KEY=b64:1,ISSUER=issuer:zitadel-oidc-client:AGM  Platform/zulip",
             "env:API_KEY=base64:32",
         ] {
             assert!(
@@ -958,6 +1161,23 @@ mod tests {
                 "shape unexpectedly accepted: {invalid}"
             );
         }
+    }
+
+    #[test]
+    fn issuer_catalog_is_closed_and_binds_alias_kind() {
+        let catalog = IssuerConnectorCatalog::parse_json(
+            br#"{"schema":"janus.issuer-connectors.v1","connectors":[{"kind":"zitadel-oidc-client","alias":"issuer:zitadel-oidc-client:AGM Platform/zulip","credential_ref":"janus-zitadel-machine","origin":"https://identity.example.test","project_id":"1","application_id":"2","timeout_seconds":10}]}"#,
+        )
+        .unwrap();
+        let alias = IssuerAlias::parse("issuer:zitadel-oidc-client:AGM Platform/zulip").unwrap();
+        assert_eq!(
+            catalog.entry(&alias).unwrap().credential_ref.as_deref(),
+            Some("janus-zitadel-machine")
+        );
+        assert!(IssuerConnectorCatalog::parse_json(
+            br#"{"schema":"janus.issuer-connectors.v1","connectors":[{"kind":"zitadel-oidc-client","alias":"issuer:zitadel-oidc-client:AGM Platform/zulip","credential_ref":"a","origin":"https://identity.example.test","project_id":"1","application_id":"2","timeout_seconds":10},{"kind":"zitadel-oidc-client","alias":"issuer:zitadel-oidc-client:AGM Platform/zulip","credential_ref":"b","origin":"https://identity.example.test","project_id":"1","application_id":"2","timeout_seconds":10}]}"#,
+        )
+        .is_err());
     }
 
     #[test]
@@ -1041,6 +1261,74 @@ mod tests {
             ),
             "generated create must never overwrite an existing ciphertext"
         );
+    }
+
+    struct FixtureCredentialStore;
+
+    #[async_trait]
+    impl IssuerCredentialStore for FixtureCredentialStore {
+        async fn load(&self, _credential_ref: &str) -> JanusResult<SecretValue> {
+            Ok(SecretValue::new(b"fixture-machine-key".to_vec()))
+        }
+    }
+
+    struct FixtureIssuerResolver;
+
+    #[async_trait]
+    impl IssuerResolver for FixtureIssuerResolver {
+        async fn resolve(
+            &self,
+            alias: &IssuerAlias,
+            _credential_store: &dyn IssuerCredentialStore,
+        ) -> JanusResult<IssuerResolution> {
+            Ok(IssuerResolution {
+                value: SecretValue::new(b"issuer-value-canary".to_vec()),
+                evidence: IssuerResolutionEvidence {
+                    kind: alias.kind(),
+                    alias_digest: alias.digest(),
+                },
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn issuer_shape_resolves_after_reservation_and_keeps_outcome_value_free() {
+        let temporary = tempfile::tempdir().unwrap();
+        let identity = age::x25519::Identity::generate();
+        let recipient = identity.to_public().to_string();
+        let shape = GeneratedCreateShape::parse(
+            "env:ZULIP_OIDC_CLIENT_SECRET=issuer:zitadel-oidc-client:AGM Platform/zulip",
+        )
+        .unwrap();
+        let name = SecretName::new("fixture-issuer-env").unwrap();
+        let principal = PrincipalChain::new(
+            Principal::new(
+                PrincipalKind::Executor,
+                PrincipalId::new("janus-forge-fixture").unwrap(),
+            ),
+            scope(),
+        );
+        let mut audit = AuditWrite::accepting();
+        let outcome = create_generated_agenix_with_resolver(
+            temporary.path().to_path_buf(),
+            name,
+            &shape,
+            vec![recipient],
+            SafeLabel::new("JANUS-465 synthetic issuer reference").unwrap(),
+            &principal,
+            &FixtureIssuerResolver,
+            &FixtureCredentialStore,
+            &mut audit,
+        )
+        .await
+        .unwrap();
+        assert!(outcome.changed);
+        assert!(!outcome.value_returned);
+        assert!(outcome.issuer_aliases_digest.is_some());
+        let ciphertext = std::fs::read(temporary.path().join("fixture-issuer-env.age")).unwrap();
+        assert!(!ciphertext
+            .windows(b"issuer-value-canary".len())
+            .any(|window| window == b"issuer-value-canary"));
     }
 
     #[derive(Clone, Debug, PartialEq, Eq)]

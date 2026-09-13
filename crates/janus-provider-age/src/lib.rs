@@ -20,9 +20,13 @@ use janus_core::{
     SecretMetadataOverlay, SecretName, SecretRef, SecretStore, SecretValue, Severity,
     StoreCapabilities,
 };
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
 
 const MAX_AGENIX_MATERIAL_BYTES: usize = 64 * 1024;
+const MAX_CREATE_JOURNAL_BYTES: u64 = 16 * 1024;
+const CREATE_JOURNAL_SCHEMA: &str = "janus.agenix-create-journal.v1";
 
 /// Import one host-materialized agenix secret into Janus custody.
 ///
@@ -379,6 +383,210 @@ pub async fn write_existing_agenix_value_if_absent(
     })
 }
 
+/// Value-free metadata persisted before an issuer connector is invoked.
+///
+/// A reserved journal is deliberately left in place when connector work or
+/// the following write is interrupted. A later invocation must not silently
+/// ask a remote issuer for another value.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgenixCreateReservation {
+    export_root: PathBuf,
+    name: SecretName,
+    journal_path: PathBuf,
+    value_returned: bool,
+}
+
+impl AgenixCreateReservation {
+    /// The declared secret name, safe for value-free audit binding.
+    pub fn secret_name(&self) -> &SecretName {
+        &self.name
+    }
+
+    /// Reservations never expose plaintext values.
+    pub fn value_returned(&self) -> bool {
+        self.value_returned
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct AgenixCreateJournalV1 {
+    schema: String,
+    schema_version: u32,
+    name: String,
+    shape_digest: String,
+    recipient_digest: String,
+    issuer_aliases_digest: String,
+    state: String,
+    value_returned: bool,
+}
+
+/// Reserve an absent agenix target before any issuer side effect.
+///
+/// The reservation is exclusive under the provider lock and records only
+/// bounded, value-free digests. An existing reserved journal is a hard stop:
+/// recovery must be explicitly reviewed rather than automatically re-issuing
+/// a remote credential.
+pub async fn reserve_agenix_create(
+    export_root: impl Into<PathBuf>,
+    name: SecretName,
+    shape_digest: String,
+    recipient_digest: String,
+    issuer_aliases_digest: String,
+) -> JanusResult<AgenixCreateReservation> {
+    let export_root = export_root.into();
+    validate_create_digest(&shape_digest, "shape_digest")?;
+    validate_create_digest(&recipient_digest, "recipient_digest")?;
+    validate_create_digest(&issuer_aliases_digest, "issuer_aliases_digest")?;
+    safe_name_path(&name)?;
+    validate_create_root(&export_root)?;
+    let journal_path = create_journal_path(&export_root, &name);
+    let target = export_root.join(format!("{}.age", name.as_str()));
+    let name_for_task = name.clone();
+    let shape_for_task = shape_digest.clone();
+    let recipient_for_task = recipient_digest.clone();
+    let issuer_for_task = issuer_aliases_digest.clone();
+    let root_for_task = export_root.clone();
+    let journal_for_task = journal_path.clone();
+    tokio::task::spawn_blocking(move || {
+        let _lock = try_lock_store_exclusive(&root_for_task)?;
+        if let Some(existing) = read_create_journal(&journal_for_task)? {
+            if existing.name != name_for_task.as_str()
+                || existing.shape_digest != shape_for_task
+                || existing.recipient_digest != recipient_for_task
+                || existing.issuer_aliases_digest != issuer_for_task
+            {
+                return Err(JanusError::policy_denied(
+                    "issuer_create_reservation_conflict",
+                    "existing issuer create reservation has different reviewed metadata",
+                ));
+            }
+            return match existing.state.as_str() {
+                "reserved" => Err(JanusError::policy_denied(
+                    "issuer_create_interrupted",
+                    "issuer create reservation requires explicit recovery",
+                )),
+                "committed"
+                    if !existing.value_returned
+                        && fs::symlink_metadata(&target)
+                            .map(|metadata| {
+                                metadata.is_file() && !metadata.file_type().is_symlink()
+                            })
+                            .unwrap_or(false) =>
+                {
+                    Err(JanusError::policy_denied(
+                        "entry_target_present",
+                        "issuer create target already exists",
+                    ))
+                }
+                _ => Err(JanusError::StoreUnavailable {
+                    detail: "issuer create journal is inconsistent".to_string(),
+                }),
+            };
+        }
+        if fs::symlink_metadata(&target).is_ok() {
+            return Err(JanusError::policy_denied(
+                "entry_target_present",
+                "issuer create target already exists",
+            ));
+        }
+        let journal = AgenixCreateJournalV1 {
+            schema: CREATE_JOURNAL_SCHEMA.to_string(),
+            schema_version: 1,
+            name: name_for_task.as_str().to_string(),
+            shape_digest: shape_for_task,
+            recipient_digest: recipient_for_task,
+            issuer_aliases_digest: issuer_for_task,
+            state: "reserved".to_string(),
+            value_returned: false,
+        };
+        write_create_journal(&journal_for_task, &journal, &root_for_task)?;
+        Ok(AgenixCreateReservation {
+            export_root: root_for_task,
+            name: name_for_task,
+            journal_path: journal_for_task,
+            value_returned: false,
+        })
+    })
+    .await
+    .map_err(|err| JanusError::StoreUnavailable {
+        detail: format!("issuer create reservation task failed: {err}"),
+    })?
+}
+
+/// Encrypt a resolved issuer value for an existing reservation.
+///
+/// The target remains create-only. A crash after remote issuance but before
+/// this call leaves the reservation in `reserved` state and future retries are
+/// refused by [`reserve_agenix_create`].
+pub async fn write_reserved_agenix_value(
+    reservation: AgenixCreateReservation,
+    recipients: Vec<String>,
+    value: SecretValue,
+) -> JanusResult<AgeAdminOutcome> {
+    if reservation.value_returned {
+        return Err(JanusError::StoreUnavailable {
+            detail: "issuer create reservation handle is invalid".to_string(),
+        });
+    }
+    if value.expose_bytes().is_empty() || value.expose_bytes().len() > MAX_AGENIX_MATERIAL_BYTES {
+        return Err(JanusError::policy_denied(
+            "issuer_value_invalid",
+            "issuer value is empty or oversized",
+        ));
+    }
+    validate_create_root(&reservation.export_root)?;
+    safe_name_path(&reservation.name)?;
+    let recipients = normalize_recipient_strings(recipients)?;
+    let recipient_count = recipients.len();
+    let recipient_digest = digest_recipient_values(&recipients);
+    let root = reservation.export_root.clone();
+    let name = reservation.name.clone();
+    let journal_path = reservation.journal_path.clone();
+    tokio::task::spawn_blocking(move || {
+        let _lock = try_lock_store_exclusive(&root)?;
+        let journal =
+            read_create_journal(&journal_path)?.ok_or_else(|| JanusError::StoreUnavailable {
+                detail: "issuer create reservation journal is missing".to_string(),
+            })?;
+        if journal.state != "reserved"
+            || journal.name != name.as_str()
+            || journal.value_returned
+            || journal.recipient_digest != recipient_digest
+        {
+            return Err(JanusError::policy_denied(
+                "issuer_create_reservation_conflict",
+                "issuer create recipients do not match the reservation",
+            ));
+        }
+        let path = root.join(format!("{}.age", name.as_str()));
+        if fs::symlink_metadata(&path).is_ok() {
+            return Err(JanusError::policy_denied(
+                "issuer_create_interrupted",
+                "issuer create target exists while reservation is pending",
+            ));
+        }
+        let mut plaintext = Zeroizing::new(value.expose_bytes().to_vec());
+        let result = encrypt_to_new_file(&path, &root, &recipients, &plaintext);
+        plaintext.zeroize();
+        result?;
+        let mut committed = journal;
+        committed.state = "committed".to_string();
+        write_create_journal_replacing(&journal_path, &committed, &root)?;
+        Ok(AgeAdminOutcome {
+            action: "agenix.write.issuer",
+            changed: true,
+            present_secrets: 1,
+            recipient_count,
+            value_returned: false,
+        })
+    })
+    .await
+    .map_err(|err| JanusError::StoreUnavailable {
+        detail: format!("issuer agenix write task failed: {err}"),
+    })?
+}
+
 /// Open one opaque dynamic custody object for a reviewed internal consumer.
 ///
 /// The caller supplies only the validated managed secret reference. The final
@@ -603,6 +811,179 @@ fn normalized_absolute_path(path: &Path) -> bool {
                 std::path::Component::CurDir | std::path::Component::ParentDir
             )
         })
+}
+
+fn validate_create_root(root: &Path) -> JanusResult<()> {
+    if !normalized_absolute_path(root) {
+        return Err(JanusError::StoreUnavailable {
+            detail: "issuer create root must be an absolute normalized path".to_string(),
+        });
+    }
+    if let Ok(metadata) = fs::symlink_metadata(root) {
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err(JanusError::StoreUnavailable {
+                detail: "issuer create root must be a directory".to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_create_digest(value: &str, kind: &'static str) -> JanusResult<()> {
+    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(JanusError::InvalidIdentifier { kind });
+    }
+    Ok(())
+}
+
+fn digest_recipient_values(values: &[String]) -> String {
+    let mut normalized = values.to_vec();
+    normalized.sort();
+    normalized.dedup();
+    let mut hash = Sha256::new();
+    hash.update(normalized.join("\n").as_bytes());
+    hex::encode(hash.finalize())
+}
+
+fn create_journal_path(root: &Path, name: &SecretName) -> PathBuf {
+    let mut digest = Sha256::new();
+    digest.update(b"janus-agenix-create-v1\0");
+    digest.update(name.as_str().as_bytes());
+    root.join(format!(".janus-agenix-create-{:x}.json", digest.finalize()))
+}
+
+fn read_create_journal(path: &Path) -> JanusResult<Option<AgenixCreateJournalV1>> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(map_store_io(error)),
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        if !metadata.is_file()
+            || metadata.file_type().is_symlink()
+            || metadata.nlink() != 1
+            || metadata.permissions().mode() & 0o777 != 0o600
+            || metadata.len() > MAX_CREATE_JOURNAL_BYTES
+        {
+            return Err(JanusError::StoreUnavailable {
+                detail: "issuer create journal custody is invalid".to_string(),
+            });
+        }
+    }
+    let bytes = fs::read(path).map_err(map_store_io)?;
+    if bytes.is_empty() || bytes.len() as u64 > MAX_CREATE_JOURNAL_BYTES {
+        return Err(JanusError::StoreUnavailable {
+            detail: "issuer create journal is invalid".to_string(),
+        });
+    }
+    let journal: AgenixCreateJournalV1 =
+        serde_json::from_slice(&bytes).map_err(|_| JanusError::StoreUnavailable {
+            detail: "issuer create journal is invalid".to_string(),
+        })?;
+    if journal.schema != CREATE_JOURNAL_SCHEMA
+        || journal.schema_version != 1
+        || journal.name.is_empty()
+        || journal.shape_digest.len() != 64
+        || journal.recipient_digest.len() != 64
+        || journal.issuer_aliases_digest.len() != 64
+        || !journal
+            .shape_digest
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+        || !journal
+            .recipient_digest
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+        || !journal
+            .issuer_aliases_digest
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+        || !matches!(journal.state.as_str(), "reserved" | "committed")
+        || journal.value_returned
+    {
+        return Err(JanusError::StoreUnavailable {
+            detail: "issuer create journal is invalid".to_string(),
+        });
+    }
+    Ok(Some(journal))
+}
+
+fn write_create_journal(
+    path: &Path,
+    journal: &AgenixCreateJournalV1,
+    root: &Path,
+) -> JanusResult<()> {
+    let bytes = serde_json::to_vec(journal).map_err(|_| JanusError::StoreUnavailable {
+        detail: "issuer create journal could not be encoded".to_string(),
+    })?;
+    write_journal_bytes(path, root, &bytes, true)
+}
+
+fn write_create_journal_replacing(
+    path: &Path,
+    journal: &AgenixCreateJournalV1,
+    root: &Path,
+) -> JanusResult<()> {
+    let bytes = serde_json::to_vec(journal).map_err(|_| JanusError::StoreUnavailable {
+        detail: "issuer create journal could not be encoded".to_string(),
+    })?;
+    write_journal_bytes(path, root, &bytes, false)
+}
+
+fn write_journal_bytes(
+    path: &Path,
+    root: &Path,
+    bytes: &[u8],
+    create_only: bool,
+) -> JanusResult<()> {
+    if bytes.is_empty() || bytes.len() as u64 > MAX_CREATE_JOURNAL_BYTES {
+        return Err(JanusError::StoreUnavailable {
+            detail: "issuer create journal is oversized".to_string(),
+        });
+    }
+    let tmp = root.join(format!(
+        ".janus-agenix-create-{}.{}.tmp",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|err| JanusError::StoreUnavailable {
+                detail: format!("system clock before unix epoch: {err}"),
+            })?
+            .as_nanos()
+    ));
+    let result = (|| {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+            .map_err(map_store_io)?;
+        set_file_private(&file)?;
+        file.write_all(bytes).map_err(map_store_io)?;
+        file.sync_all().map_err(map_store_io)?;
+        drop(file);
+        if create_only {
+            fs::hard_link(&tmp, path).map_err(|error| {
+                if error.kind() == std::io::ErrorKind::AlreadyExists {
+                    JanusError::policy_denied(
+                        "issuer_create_reservation_conflict",
+                        "issuer create reservation already exists",
+                    )
+                } else {
+                    map_store_io(error)
+                }
+            })?;
+            fs::remove_file(&tmp).map_err(map_store_io)?;
+        } else {
+            fs::rename(&tmp, path).map_err(map_store_io)?;
+        }
+        sync_dir(root)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
 }
 
 /// Native age-backed store.
@@ -2457,6 +2838,99 @@ AAAEADBJvjZT8X6JRJI8xVq/1aU8nMVgOtVnmdwqWwrSlXG3sKLqeplhpW+uObz5dvMgjz
             !temporary.path().join("fixture-escape.age").exists(),
             "unsafe names must not escape the export root"
         );
+    }
+
+    #[tokio::test]
+    async fn issuer_reservation_is_durable_before_value_work_and_blocks_reissue() {
+        let temporary = TempDir::new().unwrap();
+        let export_root = temporary.path().join("agenix-export");
+        let name = SecretName::new("fixture-service-env").unwrap();
+        let reservation = reserve_agenix_create(
+            export_root.clone(),
+            name.clone(),
+            "a".repeat(64),
+            "b".repeat(64),
+            "c".repeat(64),
+        )
+        .await
+        .unwrap();
+        assert_eq!(reservation.secret_name().as_str(), name.as_str());
+        assert!(!reservation.value_returned());
+        let journal = fs::read_dir(&export_root)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with(".janus-agenix-create-"))
+            })
+            .expect("reservation journal");
+        let journal_bytes = fs::read(&journal).unwrap();
+        assert!(!journal_bytes
+            .windows(b"issuer-value-canary".len())
+            .any(|window| { window == b"issuer-value-canary" }));
+        let retry = reserve_agenix_create(
+            export_root,
+            name,
+            "a".repeat(64),
+            "b".repeat(64),
+            "c".repeat(64),
+        )
+        .await
+        .expect_err("reserved issuer work must not silently reissue");
+        assert!(matches!(
+            retry,
+            JanusError::PolicyDenied {
+                reason_code: "issuer_create_interrupted",
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn issuer_reservation_commits_only_after_exclusive_ciphertext_create() {
+        let temporary = TempDir::new().unwrap();
+        let export_root = temporary.path().join("agenix-export");
+        let identity = age::x25519::Identity::generate();
+        let recipient = identity.to_public().to_string();
+        let recipient_digest = digest_recipient_values(std::slice::from_ref(&recipient));
+        let name = SecretName::new("fixture-service-env").unwrap();
+        let reservation = reserve_agenix_create(
+            export_root.clone(),
+            name.clone(),
+            "a".repeat(64),
+            recipient_digest.clone(),
+            "c".repeat(64),
+        )
+        .await
+        .unwrap();
+        let outcome = write_reserved_agenix_value(
+            reservation,
+            vec![recipient],
+            SecretValue::new(b"issuer-value-canary".to_vec()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome.action, "agenix.write.issuer");
+        assert!(outcome.changed);
+        assert!(!outcome.value_returned);
+        assert!(export_root.join("fixture-service-env.age").is_file());
+        let retry = reserve_agenix_create(
+            export_root,
+            name,
+            "a".repeat(64),
+            recipient_digest,
+            "c".repeat(64),
+        )
+        .await
+        .expect_err("committed issuer target must remain create-only");
+        assert!(matches!(
+            retry,
+            JanusError::PolicyDenied {
+                reason_code: "entry_target_present",
+                ..
+            }
+        ));
     }
 
     #[tokio::test]
