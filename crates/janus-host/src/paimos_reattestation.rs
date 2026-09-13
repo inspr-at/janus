@@ -207,9 +207,11 @@ impl ManagedCredentialReattestationBindingV1 {
             || !valid_ref("svc_", &self.service_ref)
             || !valid_ref("slot_", &self.slot_ref)
             || !valid_ref("op_", &self.source_operation_ref)
+            || self.reattestation_operation_ref == self.source_operation_ref
             || !valid_ref("env_", &self.envelope_ref)
             || !valid_ref("sec_", &self.secret_ref)
             || !valid_ref("decl_", &self.declaration_fingerprint)
+            || self.reattestation_declaration_fingerprint == self.declaration_fingerprint
             || self.generation == 0
             || self.revocation_epoch == 0
             || !valid_ref("key_", &self.producer_key_id)
@@ -483,6 +485,7 @@ fn validate_source_completion(
     if source_digest != binding.source_completion_binding_digest
         || wire_sha256(&source_record_raw) != binding.source_completion_record_sha256
         || !source_binding.matches_record(&source_record)
+        || !reporter_identity_is_distinct(&source_binding.reporter, &binding.reporter)
         || source_record.host_ref != binding.host_ref
         || source_record.service_ref != binding.service_ref
         || source_record.slot_ref != binding.slot_ref
@@ -496,6 +499,14 @@ fn validate_source_completion(
         return Err(error("managed_credential_reattestation_source_refused"));
     }
     Ok(())
+}
+
+fn reporter_identity_is_distinct(
+    source: &PaimosManagedCompletionBindingV1,
+    reattestation: &PaimosManagedCompletionBindingV1,
+) -> bool {
+    source.handoff_id != reattestation.handoff_id
+        && source.execution_number != reattestation.execution_number
 }
 
 fn validate_source_record_directory(path: &Path) -> Result<()> {
@@ -1096,6 +1107,47 @@ mod tests {
             heartbeat_observed_at_unix_secs: now - 1,
             value_returned: false,
         }
+    }
+
+    #[test]
+    fn reattestation_binding_refuses_source_operation_identity_aliases() {
+        let mut aliased_operation = binding();
+        aliased_operation.reattestation_operation_ref =
+            aliased_operation.source_operation_ref.clone();
+        assert_eq!(
+            aliased_operation
+                .validate()
+                .expect_err("source operation alias refused")
+                .reason_code(),
+            "managed_credential_reattestation_binding_invalid"
+        );
+
+        let mut aliased_declaration = binding();
+        aliased_declaration.reattestation_declaration_fingerprint =
+            aliased_declaration.declaration_fingerprint.clone();
+        assert_eq!(
+            aliased_declaration
+                .validate()
+                .expect_err("source declaration alias refused")
+                .reason_code(),
+            "managed_credential_reattestation_binding_invalid"
+        );
+    }
+
+    #[test]
+    fn reattestation_reporter_refuses_source_handoff_or_execution_aliases() {
+        let reattestation = reporter();
+        let mut source = reporter();
+        source.handoff_id = "01ARZ3NDEKTSV4RRFFQ69G5FAW".to_string();
+        source.execution_number = 1;
+        source.evidence_source = "managed_completion_record".to_string();
+        assert!(reporter_identity_is_distinct(&source, &reattestation));
+
+        source.handoff_id = reattestation.handoff_id.clone();
+        assert!(!reporter_identity_is_distinct(&source, &reattestation));
+        source.handoff_id = "01ARZ3NDEKTSV4RRFFQ69G5FAW".to_string();
+        source.execution_number = reattestation.execution_number;
+        assert!(!reporter_identity_is_distinct(&source, &reattestation));
     }
 
     #[test]
