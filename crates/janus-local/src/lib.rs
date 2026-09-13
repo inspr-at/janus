@@ -16,6 +16,7 @@ mod duty;
 mod identity;
 mod identity_admin;
 mod migration;
+mod operation_ref_issuer;
 mod recovery;
 mod release;
 mod retention;
@@ -55,6 +56,10 @@ pub use identity_admin::{
     PostureSource, ReviewEnvelopeV1, ReviewRequestV1, ReviewSignOutcomeV1,
 };
 pub use migration::{enforce_migration_ready_from_env, ApprovalMigrationRunner, MigrationStatus};
+pub use operation_ref_issuer::{
+    issue_authoritative_operation_ref, OperationRefIssueOutcomeV1, OperationRefIssueRequestV1,
+    OPERATION_REF_ISSUE_REQUEST_SCHEMA,
+};
 pub use recovery::{
     enforce_recovery_drill_freshness, enforce_recovery_drill_freshness_from_env,
     RecoveryDrillRunner, RecoveryDrillStatus, RecoveryPostflightTarget,

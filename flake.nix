@@ -50,6 +50,7 @@
               install -Dm755 "$release_dir/janusd-dynamic-transportd" "$out/bin/janusd-dynamic-transportd"
               install -Dm755 "$release_dir/janusd-identityd" "$out/bin/janusd-identityd"
               install -Dm755 "$release_dir/janusd-identity-admin" "$out/bin/janusd-identity-admin"
+              install -Dm755 "$release_dir/janusd-operation-ref-issuer" "$out/bin/janusd-operation-ref-issuer"
               install -Dm755 "$release_dir/janus-host-executor" "$out/bin/janus-host-executor"
               install -Dm755 "$release_dir/janus-managed-host-agent" "$out/bin/janus-managed-host-agent"
               install -Dm755 "$release_dir/janus-paimos-dependency-reporter" "$out/bin/janus-paimos-dependency-reporter"
@@ -58,6 +59,7 @@
               install -Dm755 "$release_dir/janus-warden" "$out/bin/janus-warden"
               install -Dm755 "$release_dir/janus-agenix-import" "$out/bin/janus-agenix-import"
               test -x "$out/bin/janusd-identity-admin"
+              test -x "$out/bin/janusd-operation-ref-issuer"
               test -x "$out/bin/janus-paimos-managed-credential-reattestation-reporter"
               runHook postInstall
             '';
