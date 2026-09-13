@@ -1051,7 +1051,7 @@ mod tests {
         "../../../examples/paimos-dependency-reporter/managed-credential-reattestation-binding.golden.json"
     );
     const GOLDEN_BINDING_DIGEST: &str =
-        "sha256:4abd0941d4e7358845b925ccce464592003f3f789d2d2512f1d3975884410be6";
+        "sha256:815aa85115450ac9ad61f914b387cd866c9f8f625177a564608c1f657244428b";
 
     #[test]
     fn reattestation_binding_digest_matches_cross_language_golden() {
@@ -1112,7 +1112,7 @@ mod tests {
             slot_ref: "slot_0123456789abcdef".to_string(),
             source_operation_ref: "op_0123456789abcdef".to_string(),
             envelope_ref: "env_0123456789abcdef".to_string(),
-            secret_ref: "sec_0123456789abcdef".to_string(),
+            secret_ref: "sec_fixture0".to_string(),
             declaration_fingerprint: "decl_0123456789abcdef".to_string(),
             generation: 1,
             revocation_epoch: 2,

@@ -82,3 +82,8 @@ crates/janusd/src/lifecycle_entry/web_transaction.rs:generic-api-key:1657
 # Preserve historical positions; these exact tracked-tree positions are unchanged bytes.
 crates/janusd/src/lifecycle_entry/web_transaction.rs:generic-api-key:1643
 crates/janusd/src/lifecycle_entry/web_transaction.rs:generic-api-key:1671
+
+# Reviewed JANUS-469 synthetic credential-reference fixtures. These bind only
+# the two exact historical findings from the initial unmerged feature commit.
+e871d907cc13cbbffdf79776b1cedd085425fa0a:examples/paimos-dependency-reporter/managed-credential-reattestation-binding.golden.json:generic-api-key:14
+e871d907cc13cbbffdf79776b1cedd085425fa0a:crates/janus-host/src/paimos_reattestation.rs:generic-api-key:1046
