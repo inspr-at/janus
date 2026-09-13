@@ -77,6 +77,29 @@ reviewed `JANUS_RUNTIME_OPERATION_REFERENCE_FILE`. The caller cannot submit an
 actor, UID, duty, transport, or posture. No-conflict actions reject operation
 authority and still require a healthy verified journal.
 
+Controllers issue each reference offline with `janusd-operation-ref-issuer`
+from a bounded request and an existing private operation-authority key. The
+issuer derives the opaque operation reference from authoritative lineage,
+generates a fresh nonce, calls the core signing contract, and creates one raw
+reference file exclusively. It never creates or returns the signing key and
+never replaces an existing output.
+
+```console
+janusd-operation-ref-issuer \
+  --request-file /private/request.json \
+  --signing-key-file /private/operation-authority.key \
+  --out /private/incoming/reference.json
+```
+
+The request schema is
+`inspr.janus.authoritative-operation-ref-issue-request.v1`. It accepts only
+`domain_service`, `authoritative_lineage`, `scope_ref`, `conflict_domain`,
+`duty`, `state_revision`, `policy_revision`, `ttl_seconds`, `audience`, and
+`release_digest` besides the schema fields. The controller supplies revisions
+from its authoritative state. Lifetime is 1–300 seconds. The request and key
+must be bounded caller-owned regular files; the key must be mode 0600 with one
+link. The output parent must already be caller-owned and mode 0700.
+
 ## Broker sidecar lifecycle
 
 `janusd-identityd` is commonly run as a short-lived sidecar around a render

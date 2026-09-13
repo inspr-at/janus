@@ -57,6 +57,11 @@ name = "janusd-identity-admin"
 path = "src/bin/janusd-identity-admin.rs"
 test = false
 
+[[bin]]
+name = "janusd-operation-ref-issuer"
+path = "src/bin/janusd-operation-ref-issuer.rs"
+test = false
+
 [dependencies]
 anyhow = "=1.0.103"
 async-trait = "0.1"

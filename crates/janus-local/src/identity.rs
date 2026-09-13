@@ -1400,7 +1400,11 @@ fn read_private_json<T: for<'de> Deserialize<'de>>(
     serde_json::from_slice(&bytes).map_err(|_| unavailable(format!("{kind} malformed")))
 }
 
-fn read_private_bytes(path: &Path, kind: &'static str, maximum: usize) -> JanusResult<Vec<u8>> {
+pub(crate) fn read_private_bytes(
+    path: &Path,
+    kind: &'static str,
+    maximum: usize,
+) -> JanusResult<Vec<u8>> {
     // Open without following symlinks and validate the descriptor (fstat), so
     // the file that is read is the file that was checked.
     let mut options = OpenOptions::new();
