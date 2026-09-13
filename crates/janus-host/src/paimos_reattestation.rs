@@ -646,7 +646,7 @@ fn validate_observation(
         || observation.probe.pid != observation.process.pid
         || observation.probe.artifact_digest != binding.expected_artifact_digest
         || observation.probe.release_ref != binding.expected_release_ref
-        || !valid_ref("runtime_", &observation.probe.runtime_id)
+        || !valid_runtime_id(&observation.probe.runtime_id)
         || observation.probe.runtime_generation == 0
         || !valid_wire_digest(&observation.probe.runtime_history_sha256)
         || observation.value_returned
@@ -985,6 +985,23 @@ fn valid_ref(prefix: &str, value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+}
+
+fn valid_runtime_id(value: &str) -> bool {
+    if valid_ref("runtime_", value) {
+        return true;
+    }
+    let Some(uuid) = value.strip_prefix("runtime_") else {
+        return false;
+    };
+    uuid.len() == 36
+        && uuid.bytes().enumerate().all(|(index, byte)| {
+            if matches!(index, 8 | 13 | 18 | 23) {
+                byte == b'-'
+            } else {
+                byte.is_ascii_digit() || matches!(byte, b'a'..=b'f')
+            }
+        })
 }
 
 fn valid_wire_digest(value: &str) -> bool {
@@ -1458,6 +1475,32 @@ mod tests {
             assert_eq!(
                 validate_observation(&changed, &binding, now)
                     .expect_err("changed observation refused")
+                    .reason_code(),
+                "managed_credential_reattestation_observation_refused"
+            );
+        }
+    }
+
+    #[test]
+    fn current_observation_accepts_canonical_runtime_uuid_and_rejects_malformed_ids() {
+        let binding = binding();
+        let now = 1_800_000_000;
+        let mut current = observation(now);
+        current.probe.runtime_id = "runtime_b9909e64-6df3-4ae7-99b3-b69f3948b40e".to_string();
+        validate_observation(&current, &binding, now).expect("canonical runtime UUID");
+
+        for runtime_id in [
+            "runtime_b9909e64_6df3-4ae7-99b3-b69f3948b40e",
+            "runtime_b9909e64-6df3-4ae7-99b3-b69f3948b40",
+            "runtime_b9909e64-6df3-4ae7-99b3-b69f3948b40g",
+            "runtime_B9909e64-6df3-4ae7-99b3-b69f3948b40e",
+            "runtime_b9909e64-6df3-4ae7-99b3-b69f3948b40e ",
+        ] {
+            let mut changed = observation(now);
+            changed.probe.runtime_id = runtime_id.to_string();
+            assert_eq!(
+                validate_observation(&changed, &binding, now)
+                    .expect_err("malformed runtime ID refused")
                     .reason_code(),
                 "managed_credential_reattestation_observation_refused"
             );
