@@ -2,11 +2,13 @@
 """Run the value-free JANUS-465 Zitadel issuer acceptance in an isolated lab.
 
 The driver never prints or writes decrypted client credentials. It invokes the
-released janusd-admin twice with distinct create-only targets, proves the first
+released janusd-admin with distinct create-only targets, proves the first
 credential works, regenerates the application secret, proves the replacement
 works and the first no longer works, then exercises a configured out-of-scope
-alias. ZITADEL's final provider-secret revocation is deliberately outside this
-driver because Janus 0.1.39 has no such connector operation.
+alias. Finally it invokes Janus's durable provider invalidation operation,
+which regenerates and discards the new secret, and proves the replacement can
+no longer obtain a token. This proves invalidation of the known credential; it
+does not claim that ZITADEL stores no current secret.
 """
 
 from __future__ import annotations
@@ -38,6 +40,17 @@ SUCCESS_KEYS = {
     "reason",
     "value_returned",
 }
+INVALIDATION_SUCCESS_KEYS = {
+    "action",
+    "changed",
+    "state",
+    "method",
+    "operation_ref_sha256",
+    "issuer_alias_sha256",
+    "connector_config_sha256",
+    "reason",
+    "value_returned",
+}
 REQUIRED_KEYS = {
     "schema",
     "janusd_admin",
@@ -54,6 +67,8 @@ REQUIRED_KEYS = {
     "store_identity_file",
     "output_identity_file",
     "export_root",
+    "invalidation_state_dir",
+    "invalidation_operation_ref",
     "audit_file",
     "evidence_file",
     "scope",
@@ -69,6 +84,7 @@ REQUIRED_KEYS = {
 }
 SCOPE_KEYS = {"organization", "project", "repository", "environment"}
 IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
+OPERATION_REF = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 ADMISSION_REQUIRED_ENV = (
     "JANUS_IDENTITY_SOCKET",
     "JANUS_DUTY_SURFACE_MANIFEST",
@@ -178,6 +194,10 @@ def load_config(path: Path) -> dict[str, object]:
             fail(f"{key} is invalid")
     if len({config["initial_name"], config["replacement_name"], config["denied_name"]}) != 3:
         fail("acceptance secret names must be distinct")
+    if not isinstance(config["invalidation_operation_ref"], str) or not OPERATION_REF.fullmatch(
+        config["invalidation_operation_ref"]
+    ):
+        fail("invalidation_operation_ref is invalid")
     endpoint = urllib.parse.urlsplit(str(config["token_endpoint"]))
     if (
         endpoint.scheme != "https"
@@ -254,6 +274,9 @@ def validate(config: dict[str, object], *, require_fresh: bool) -> dict[str, Pat
             config["output_identity_file"], "output_identity_file", kind="private_file"
         ),
         "export_root": checked_path(config["export_root"], "export_root", kind="mutable_dir"),
+        "invalidation_state_dir": checked_path(
+            config["invalidation_state_dir"], "invalidation_state_dir", kind="mutable_dir"
+        ),
         "audit_file": checked_path(config["audit_file"], "audit_file", kind="output_file"),
         "evidence_file": checked_path(config["evidence_file"], "evidence_file", kind="output_file"),
     }
@@ -271,6 +294,11 @@ def validate(config: dict[str, object], *, require_fresh: bool) -> dict[str, Pat
             target = paths["export_root"] / f"{config[name]}.age"
             if target.exists():
                 fail(f"{name} target already exists")
+        operation_digest = hashlib.sha256(
+            str(config["invalidation_operation_ref"]).encode()
+        ).hexdigest()
+        if (paths["invalidation_state_dir"] / f"invalidate_{operation_digest}.json").exists():
+            fail("invalidation operation already exists")
     return paths
 
 
@@ -364,6 +392,62 @@ def run_create(
     if (paths["export_root"] / f"{name}.age").exists():
         fail("out-of-scope issuer attempt wrote a ciphertext")
     return None
+
+
+def run_invalidate(config: dict[str, object], paths: dict[str, Path]) -> dict[str, object]:
+    command = [
+        str(paths["janusd_admin"]),
+        "forge",
+        "invalidate-issuer",
+        "--alias",
+        str(config["allowed_alias"]),
+        "--operation-ref",
+        str(config["invalidation_operation_ref"]),
+        "--reason",
+        "JANUS-465 isolated Zitadel acceptance cleanup",
+        "--state-dir",
+        str(paths["invalidation_state_dir"]),
+        "--issuer-config",
+        str(paths["issuer_config"]),
+    ]
+    result = subprocess.run(
+        command,
+        env=runtime_environment(config, paths),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if result.returncode != 0:
+        fail("released janusd-admin issuer invalidation failed")
+    try:
+        outcome = json.loads(result.stdout)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        fail("janusd-admin issuer invalidation returned invalid JSON")
+    if (
+        not isinstance(outcome, dict)
+        or set(outcome) != INVALIDATION_SUCCESS_KEYS
+        or outcome["action"] != "issuer.credential.invalidate"
+        or outcome["changed"] is not True
+        or outcome["state"] != "committed"
+        or outcome["method"] != "regenerate-and-discard"
+        or outcome["reason"] != "JANUS-465 isolated Zitadel acceptance cleanup"
+        or outcome["value_returned"] is not False
+        or not all(
+            isinstance(outcome[key], str)
+            and re.fullmatch(r"[0-9a-f]{64}", outcome[key]) is not None
+            for key in (
+                "operation_ref_sha256",
+                "issuer_alias_sha256",
+                "connector_config_sha256",
+            )
+        )
+        or outcome["operation_ref_sha256"]
+        != hashlib.sha256(str(config["invalidation_operation_ref"]).encode()).hexdigest()
+        or outcome["issuer_alias_sha256"]
+        != hashlib.sha256(str(config["allowed_alias"]).encode()).hexdigest()
+    ):
+        fail("janusd-admin issuer invalidation outcome is not value-free or canonical")
+    return outcome
 
 
 def probe_ciphertext(config_path: Path, config: dict[str, object], paths: dict[str, Path], secret_name: str) -> bool:
@@ -478,6 +562,9 @@ def run(config_path: Path) -> None:
     if probe_ciphertext(config_path, config, paths, str(config["initial_name"])):
         fail("initial generated credential remained valid after regeneration")
     run_create(config, paths, "denied_name", "denied_alias", expect_success=False)
+    invalidation = run_invalidate(config, paths)
+    if probe_ciphertext(config_path, config, paths, str(config["replacement_name"])):
+        fail("replacement generated credential remained valid after invalidation")
     write_evidence(
         paths["evidence_file"],
         {
@@ -490,9 +577,12 @@ def run(config_path: Path) -> None:
             "replacement_token_accepted": True,
             "initial_token_denied_after_rotation": True,
             "configured_scope_denied": True,
+            "replacement_token_denied_after_invalidation": True,
+            "final_provider_credential_invalidated": True,
+            "invalidation_method": invalidation["method"],
+            "invalidation_operation_ref_sha256": invalidation["operation_ref_sha256"],
+            "provider_secret_absence_proven": False,
             "value_returned": False,
-            "final_provider_secret_revoked": False,
-            "final_provider_secret_revoke_reason": "unsupported_by_janus_0.1.39",
             "initial_shape_sha256": first["shape_sha256"] if first else None,
             "replacement_shape_sha256": second["shape_sha256"] if second else None,
         },

@@ -60,9 +60,9 @@ use janus_executor::{
 };
 use janus_forge::issuer::{ConfiguredIssuerResolver, IssuerConnectorCatalog};
 use janus_forge::{
-    create_generated_agenix, create_generated_agenix_with_resolver, ConsumerRotationHooks,
-    GeneratedAlphabet, GeneratedCreateShape, GeneratedRotationBroker, GeneratedValuePolicy,
-    IssuerCredentialStore, RotationApproval,
+    create_generated_agenix, create_generated_agenix_with_resolver, invalidate_issuer_credential,
+    ConsumerRotationHooks, GeneratedAlphabet, GeneratedCreateShape, GeneratedRotationBroker,
+    GeneratedValuePolicy, IssuerAlias, IssuerCredentialStore, IssuerKind, RotationApproval,
 };
 use janus_local::{
     authorize_runtime_action_from_env, enforce_migration_ready_from_env,
@@ -179,6 +179,22 @@ pub async fn run_for_plane(selected_plane: Option<RuntimePlane>) -> Result<()> {
         enforce_scope_transfer_ready_from_env()
             .context("scope transfer state denied lifecycle action queue")?;
         return lifecycle_queue::run(&args, release).await;
+    }
+    if matches!(args.as_slice(), [forge, invalidate, ..] if forge == "forge" && invalidate == "invalidate-issuer")
+    {
+        let release = enforce_release_admission_from_env(&principal)
+            .context("release admission denied split runtime startup")?;
+        enforce_migration_ready_from_env().context("migration state denied runtime startup")?;
+        enforce_scope_transfer_ready_from_env()
+            .context("scope transfer state denied runtime startup")?;
+        enforce_recovery_drill_freshness_from_env(&release, &principal.scope)
+            .context("recovery drill freshness denied runtime startup")?;
+        enforce_retention_ready_from_env(&release, &principal.scope)
+            .context("retention evidence denied runtime startup")?;
+        return run_forge_invalidate_issuer(parse_forge_invalidate_issuer(
+            args.into_iter().skip(2),
+        )?)
+        .await;
     }
     let command = parse_args(args)?;
     debug_assert_eq!(command.runtime_action(), action);
@@ -654,6 +670,15 @@ struct ForgeCreateGeneratedConfig {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+struct ForgeInvalidateIssuerConfig {
+    alias: IssuerAlias,
+    operation_ref: String,
+    reason: SafeLabel,
+    state_dir: PathBuf,
+    issuer_config: PathBuf,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct RunManagedCommandConfig {
     profile_id: ProfileId,
     permit: Option<PermitToken>,
@@ -1054,6 +1079,60 @@ async fn run_forge_create_generated(config: ForgeCreateGeneratedConfig) -> Resul
             "shape_sha256": outcome.shape_digest,
             "recipients_sha256": outcome.recipient_digest,
             "issuer_aliases_sha256": outcome.issuer_aliases_digest,
+            "reason": outcome.reason.as_str(),
+            "value_returned": outcome.value_returned,
+        })
+    );
+    Ok(())
+}
+
+async fn run_forge_invalidate_issuer(config: ForgeInvalidateIssuerConfig) -> Result<()> {
+    if !config.state_dir.is_absolute() {
+        anyhow::bail!("--state-dir must be an absolute private path");
+    }
+    if !config.issuer_config.is_absolute() {
+        anyhow::bail!("--issuer-config must be an absolute reviewed path");
+    }
+    if config.alias.kind() != IssuerKind::ZitadelOidcClient {
+        anyhow::bail!("issuer invalidation supports configured Zitadel aliases only");
+    }
+    let catalog = IssuerConnectorCatalog::load(&config.issuer_config)
+        .map_err(|_| anyhow::anyhow!("issuer connector catalog is unavailable"))?;
+    let connector_config_digest = catalog.entry_digest(&config.alias).map_err(|_| {
+        anyhow::anyhow!("issuer alias is absent from the reviewed connector catalog")
+    })?;
+    let resolver = ConfiguredIssuerResolver::new(catalog);
+    let credential_store = AgeIssuerCredentialStore {
+        store: load_age_store_from_env()?,
+    };
+    let audit_path = env_first(&["JANUS_FORGE_AUDIT_FILE", "JANUS_RUNTIME_AUDIT_FILE"])
+        .map(PathBuf::from)
+        .context("JANUS_FORGE_AUDIT_FILE or JANUS_RUNTIME_AUDIT_FILE is required")?;
+    let mut audit = JsonlAuditSink::open(audit_path).context("forge audit unavailable")?;
+    let principal = forge_principal_from_env()?;
+    let outcome = invalidate_issuer_credential(
+        &config.state_dir,
+        &config.operation_ref,
+        &config.alias,
+        &connector_config_digest,
+        config.reason,
+        &principal,
+        &resolver,
+        &credential_store,
+        &mut audit,
+    )
+    .await
+    .context("issuer invalidation failed")?;
+    println!(
+        "{}",
+        serde_json::json!({
+            "action": outcome.action,
+            "changed": outcome.changed,
+            "state": outcome.state,
+            "method": outcome.method,
+            "operation_ref_sha256": outcome.operation_ref_digest,
+            "issuer_alias_sha256": outcome.issuer_alias_digest,
+            "connector_config_sha256": outcome.connector_config_digest,
             "reason": outcome.reason.as_str(),
             "value_returned": outcome.value_returned,
         })
@@ -4153,6 +4232,9 @@ fn classify_runtime_action(args: &[String]) -> Result<RuntimeAction> {
         [forge, create, ..] if forge == "forge" && create == "create-generated" => {
             RuntimeAction::ForgeRotateGenerated
         }
+        [forge, invalidate, ..] if forge == "forge" && invalidate == "invalidate-issuer" => {
+            RuntimeAction::ForgeRotateGenerated
+        }
         [run, preflight, ..] if run == "run" && preflight == "preflight" => {
             RuntimeAction::ManagedRunPreflight
         }
@@ -5669,6 +5751,60 @@ fn parse_forge_create_generated(
     })
 }
 
+fn parse_forge_invalidate_issuer(
+    args: impl IntoIterator<Item = String>,
+) -> Result<ForgeInvalidateIssuerConfig> {
+    let mut alias = None;
+    let mut operation_ref = None;
+    let mut reason = None;
+    let mut state_dir = None;
+    let mut issuer_config = None;
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--alias" => replace_once(
+                &mut alias,
+                "--alias",
+                IssuerAlias::parse(&required_arg("--alias", args.next())?)?,
+            )?,
+            "--operation-ref" => replace_once(
+                &mut operation_ref,
+                "--operation-ref",
+                required_arg("--operation-ref", args.next())?,
+            )?,
+            "--reason" => replace_once(
+                &mut reason,
+                "--reason",
+                SafeLabel::new(required_arg("--reason", args.next())?)?,
+            )?,
+            "--state-dir" => replace_once(
+                &mut state_dir,
+                "--state-dir",
+                PathBuf::from(required_arg("--state-dir", args.next())?),
+            )?,
+            "--issuer-config" => replace_once(
+                &mut issuer_config,
+                "--issuer-config",
+                PathBuf::from(required_arg("--issuer-config", args.next())?),
+            )?,
+            "--value" | "--raw-value" | "--generated-value" => {
+                anyhow::bail!("{arg} is intentionally unsupported; invalidation returns no value")
+            }
+            other if other.starts_with('-') => {
+                anyhow::bail!("unsupported forge invalidate-issuer flag")
+            }
+            _ => anyhow::bail!("unsupported forge invalidate-issuer argument"),
+        }
+    }
+    Ok(ForgeInvalidateIssuerConfig {
+        alias: alias.context("--alias is required")?,
+        operation_ref: operation_ref.context("--operation-ref is required")?,
+        reason: reason.context("--reason is required")?,
+        state_dir: state_dir.context("--state-dir is required")?,
+        issuer_config: issuer_config.context("--issuer-config is required")?,
+    })
+}
+
 fn parse_alphabet(value: &str) -> Result<GeneratedAlphabet> {
     match value {
         "url-safe" => Ok(GeneratedAlphabet::UrlSafe),
@@ -6223,6 +6359,8 @@ Administration commands:
     [--alphabet url-safe|alphanumeric|hex] [--length N]
   forge create-generated --secret NAME --shape env:KEY=b64:N[,KEY=hex:N] \
     --reason REASON --recipients-from PATH --export-root PATH [--issuer-config PATH]
+  forge invalidate-issuer --alias issuer:zitadel-oidc-client:REF --operation-ref REF \
+    --reason REASON --state-dir PATH --issuer-config PATH
   lifecycle-entry preflight|apply|activate|rollback|status --plan PATH
   lifecycle action-queue --profile-manifest PATH --entry-state-dir PATH --audit-path PATH \
     [--format text|json] [--action-required-only] [--owner OWNER] \
@@ -6642,6 +6780,65 @@ mod tests {
         );
         assert_eq!(config.export_root, PathBuf::from("/var/lib/janus/export"));
         assert!(config.issuer_config.is_none());
+    }
+
+    #[test]
+    fn parses_forge_invalidate_issuer_as_existing_high_risk_rotation_action() {
+        let args = [
+            "forge",
+            "invalidate-issuer",
+            "--alias",
+            "issuer:zitadel-oidc-client:INSPR Lab/acceptance",
+            "--operation-ref",
+            "janus465-invalidate-1",
+            "--reason",
+            "JANUS-465 provider invalidation",
+            "--state-dir",
+            "/var/lib/janus/issuer-invalidation",
+            "--issuer-config",
+            "/run/janus/issuer-connectors.json",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+        assert_eq!(
+            classify_runtime_action(&args).unwrap(),
+            RuntimeAction::ForgeRotateGenerated
+        );
+        let config = parse_forge_invalidate_issuer(args.into_iter().skip(2)).unwrap();
+        assert_eq!(
+            config.alias.as_str(),
+            "issuer:zitadel-oidc-client:INSPR Lab/acceptance"
+        );
+        assert_eq!(config.operation_ref, "janus465-invalidate-1");
+        assert_eq!(
+            config.state_dir,
+            PathBuf::from("/var/lib/janus/issuer-invalidation")
+        );
+        assert_eq!(
+            config.issuer_config,
+            PathBuf::from("/run/janus/issuer-connectors.json")
+        );
+
+        assert!(parse_forge_invalidate_issuer(
+            [
+                "--alias",
+                "issuer:tofu-output:Fixture/value",
+                "--operation-ref",
+                "janus465-invalidate-2",
+                "--reason",
+                "JANUS-465 invalid kind",
+                "--state-dir",
+                "/var/lib/janus/issuer-invalidation",
+                "--issuer-config",
+                "/run/janus/issuer-connectors.json",
+                "--value",
+                "forbidden",
+            ]
+            .into_iter()
+            .map(str::to_string)
+        )
+        .is_err());
     }
 
     #[test]

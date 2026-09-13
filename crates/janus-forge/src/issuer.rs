@@ -7,13 +7,19 @@
 
 use async_trait::async_trait;
 use janus_core::{JanusError, JanusResult, SecretValue};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+pub mod invalidation;
 pub mod tofu;
 pub mod zitadel;
+
+pub use invalidation::{
+    invalidate_issuer_credential, IssuerInvalidationEvidence, IssuerInvalidationOutcome,
+    IssuerInvalidator,
+};
 
 pub use tofu::{TofuOutputConfig, TofuOutputConnector};
 pub use zitadel::{
@@ -142,7 +148,7 @@ fn validate_reference(kind: IssuerKind, reference: &str) -> JanusResult<()> {
 
 /// A configured connector entry. `credential_ref` is a logical key selected
 /// by the reviewed catalog; it is never a filesystem path or URL.
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct IssuerConnectorEntry {
     pub kind: String,
@@ -313,6 +319,19 @@ impl IssuerConnectorCatalog {
             .map(|(_, entry)| entry)
     }
 
+    /// Digest the complete reviewed connector entry selected by an alias.
+    pub fn entry_digest(&self, alias: &IssuerAlias) -> JanusResult<String> {
+        let entry = self.entry(alias).ok_or_else(|| JanusError::NotFound {
+            name: alias.as_str().to_string(),
+        })?;
+        let canonical = serde_json::to_vec(entry).map_err(|_| JanusError::InvalidManifest {
+            detail: "issuer connector entry cannot be canonicalized".to_string(),
+        })?;
+        let mut hash = Sha256::new();
+        hash.update(canonical);
+        Ok(hex::encode(hash.finalize()))
+    }
+
     pub fn aliases_digest(&self) -> String {
         let canonical = self
             .entries
@@ -434,6 +453,56 @@ impl IssuerResolver for ConfiguredIssuerResolver {
                 kind: alias.kind(),
                 alias_digest: alias.digest(),
             },
+        })
+    }
+}
+
+#[async_trait]
+impl IssuerInvalidator for ConfiguredIssuerResolver {
+    async fn invalidate(
+        &self,
+        alias: &IssuerAlias,
+        credential_store: &dyn IssuerCredentialStore,
+    ) -> JanusResult<IssuerInvalidationEvidence> {
+        if alias.kind() != IssuerKind::ZitadelOidcClient {
+            return Err(JanusError::Unsupported {
+                capability: "issuer_invalidation_kind",
+            });
+        }
+        let entry = self
+            .catalog
+            .entry(alias)
+            .ok_or_else(|| JanusError::NotFound {
+                name: alias.as_str().to_string(),
+            })?;
+        let connector_config_digest = self.catalog.entry_digest(alias)?;
+        let config = ZitadelOidcClientConfig::new(
+            entry.origin.as_deref().expect("validated origin"),
+            entry.project_id.as_deref().expect("validated project id"),
+            entry
+                .application_id
+                .as_deref()
+                .expect("validated application id"),
+            entry.timeout_seconds.expect("validated timeout"),
+        )?;
+        let credential_ref = entry
+            .credential_ref
+            .as_deref()
+            .expect("validated credential reference")
+            .to_string();
+        let profile = credential_store.load(&credential_ref).await?;
+        let connector = ZitadelOidcClientConnector::default();
+        tokio::task::spawn_blocking(move || connector.invalidate(&config, profile))
+            .await
+            .map_err(|_| JanusError::StoreUnavailable {
+                detail: "Zitadel issuer invalidation task failed".to_string(),
+            })??;
+        Ok(IssuerInvalidationEvidence {
+            kind: alias.kind(),
+            alias_digest: alias.digest(),
+            connector_config_digest,
+            method: "regenerate-and-discard",
+            value_returned: false,
         })
     }
 }
