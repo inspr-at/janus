@@ -26,6 +26,16 @@ re-issuance after interruption; recovery requires an explicit reviewed action.
 The final provider operation remains create-only and never overwrites an
 existing ciphertext.
 
+For a configured ZITADEL alias, `janusd-admin forge invalidate-issuer` provides
+the separate provider cleanup boundary. It first reserves an operator-supplied
+idempotency reference in a private state directory, regenerates the exact
+application client secret, then immediately zeroizes and discards the returned
+replacement. An interrupted reservation cannot be retried automatically. A
+committed exact replay returns unchanged without contacting the provider, and
+any changed alias, connector configuration, principal, or reason is refused.
+The result proves that the previously active credential was invalidated. It
+does not claim that the provider stores no current secret.
+
 The command emits only the action, changed flag, target name, shape SHA-256,
 recipient-set SHA-256, optional issuer-alias SHA-256, reason, and
 `value_returned=false`. The durable audit record carries the same value-free

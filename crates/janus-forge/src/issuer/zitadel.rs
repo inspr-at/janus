@@ -287,6 +287,20 @@ where
             generated.client_secret.as_bytes().to_vec(),
         ))
     }
+
+    /// Regenerate the configured client secret and immediately discard it.
+    ///
+    /// ZITADEL invalidates the previously active client secret when this
+    /// operation succeeds. The replacement never crosses the connector
+    /// boundary and is zeroized by `SecretValue` on drop.
+    pub fn invalidate(
+        &self,
+        config: &ZitadelOidcClientConfig,
+        machine_profile: SecretValue,
+    ) -> JanusResult<()> {
+        drop(self.resolve(config, machine_profile)?);
+        Ok(())
+    }
 }
 
 fn remaining(timeout: Duration, started: Instant) -> JanusResult<Duration> {
@@ -552,6 +566,29 @@ mod tests {
                 "projectId": "111111111111111111"
             })
         );
+    }
+
+    #[test]
+    fn invalidation_regenerates_the_exact_application_and_returns_no_value() {
+        let config = ZitadelOidcClientConfig::new(
+            "https://identity.example.test",
+            "111111111111111111",
+            "222222222222222222",
+            10,
+        )
+        .unwrap();
+        let transport = FakeTransport::default();
+        let (profile, _) = fixture_profile();
+        let connector = ZitadelOidcClientConnector::new(transport, FixedClock);
+        assert_eq!(connector.invalidate(&config, profile), Ok(()));
+        let (endpoint, _, request) = connector.transport.generate.lock().unwrap().take().unwrap();
+        assert_eq!(
+            endpoint,
+            "https://identity.example.test/zitadel.application.v2.ApplicationService/GenerateClientSecret"
+        );
+        let request: Value = serde_json::from_slice(&request).unwrap();
+        assert_eq!(request["applicationId"], "222222222222222222");
+        assert_eq!(request["projectId"], "111111111111111111");
     }
 
     #[test]

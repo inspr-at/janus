@@ -81,7 +81,7 @@ class ZitadelIssuerAcceptanceTests(unittest.TestCase):
             path.write_text("fixture", encoding="utf-8")
             os.chmod(path, 0o700 if name in ("janusd_admin", "age") else 0o600)
             self.paths[name] = path
-        for name in ("store_dir", "export_root"):
+        for name in ("store_dir", "export_root", "invalidation_state_dir"):
             path = self.root / name
             path.mkdir()
             os.chmod(path, 0o700)
@@ -94,6 +94,7 @@ class ZitadelIssuerAcceptanceTests(unittest.TestCase):
             "janusd_admin_sha256": acceptance.sha256_file(self.paths["janusd_admin"]),
             "age_sha256": acceptance.sha256_file(self.paths["age"]),
             "profile": "lab",
+            "invalidation_operation_ref": "janus465-fixture-invalidate-1",
             "metadata_file": None,
             "scope": {"organization": "inspr", "project": "lab", "repository": "janus", "environment": "isolated"},
             "allowed_alias": "issuer:zitadel-oidc-client:INSPR Lab/acceptance",
@@ -240,6 +241,35 @@ printf '{"action":"agenix.create.generated","changed":true,"secret_name":"%s","s
             )
         self.assertFalse((self.paths["export_root"] / "JANUS465_DENIED.age").exists())
 
+    def test_invalidate_invokes_value_free_durable_provider_operation(self):
+        self.paths["janusd_admin"].write_text(
+            """#!/bin/sh
+set -eu
+[ "$#" -eq 12 ]
+[ "$1" = forge ] && [ "$2" = invalidate-issuer ]
+[ "$3" = --alias ] && [ "$4" = 'issuer:zitadel-oidc-client:INSPR Lab/acceptance' ]
+[ "$5" = --operation-ref ] && [ "$6" = janus465-fixture-invalidate-1 ]
+[ "$7" = --reason ] && [ "$8" = 'JANUS-465 isolated Zitadel acceptance cleanup' ]
+[ "$9" = --state-dir ] && [ "${10}" = '@STATE_DIR@' ]
+[ "${11}" = --issuer-config ] && [ "${12}" = '@ISSUER_CONFIG@' ]
+printf '%s\n' '{"action":"issuer.credential.invalidate","changed":true,"state":"committed","method":"regenerate-and-discard","operation_ref_sha256":"04160069274d90d32bf69c8282688279831d633c71a2dff73bfd500d9908c7e8","issuer_alias_sha256":"f70cca905bc8a9d2a42de3d0221fe6cf7ee7dee5d718c764d96f2ec6f2ccb462","connector_config_sha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","reason":"JANUS-465 isolated Zitadel acceptance cleanup","value_returned":false}'
+"""
+            .replace("@STATE_DIR@", str(self.paths["invalidation_state_dir"]))
+            .replace("@ISSUER_CONFIG@", str(self.paths["issuer_config"])),
+            encoding="utf-8",
+        )
+        os.chmod(self.paths["janusd_admin"], 0o700)
+        self.config["janusd_admin_sha256"] = acceptance.sha256_file(
+            self.paths["janusd_admin"]
+        )
+        self.config_path.write_text(json.dumps(self.config), encoding="utf-8")
+        loaded = acceptance.load_config(self.config_path)
+        paths = acceptance.validate(loaded, require_fresh=True)
+        with mock.patch.dict(os.environ, ADMISSION_ENV, clear=False):
+            outcome = acceptance.run_invalidate(loaded, paths)
+        self.assertEqual(outcome["method"], "regenerate-and-discard")
+        self.assertFalse(outcome["value_returned"])
+
     def test_run_orders_create_rotate_old_denial_and_scope_denial_value_free(self):
         calls = []
         probes = []
@@ -258,6 +288,13 @@ printf '{"action":"agenix.create.generated","changed":true,"secret_name":"%s","s
         with mock.patch.object(acceptance, "validate", return_value=self.paths), mock.patch.object(
             acceptance, "run_create", side_effect=create
         ), mock.patch.object(acceptance, "probe_ciphertext", side_effect=probe), mock.patch.object(
+            acceptance,
+            "run_invalidate",
+            return_value={
+                "method": "regenerate-and-discard",
+                "operation_ref_sha256": "a" * 64,
+            },
+        ), mock.patch.object(
             acceptance, "write_evidence", side_effect=lambda path, value: written.update(path=path, value=value)
         ):
             output = io.StringIO()
@@ -274,16 +311,19 @@ printf '{"action":"agenix.create.generated","changed":true,"secret_name":"%s","s
         )
         self.assertEqual(
             probes,
-            ["JANUS465_INITIAL", "JANUS465_REPLACEMENT", "JANUS465_INITIAL"],
+            [
+                "JANUS465_INITIAL",
+                "JANUS465_REPLACEMENT",
+                "JANUS465_INITIAL",
+                "JANUS465_REPLACEMENT",
+            ],
         )
         self.assertTrue(written["value"]["initial_token_denied_after_rotation"])
         self.assertTrue(written["value"]["configured_scope_denied"])
         self.assertFalse(written["value"]["value_returned"])
-        self.assertFalse(written["value"]["final_provider_secret_revoked"])
-        self.assertEqual(
-            written["value"]["final_provider_secret_revoke_reason"],
-            "unsupported_by_janus_0.1.39",
-        )
+        self.assertTrue(written["value"]["final_provider_credential_invalidated"])
+        self.assertTrue(written["value"]["replacement_token_denied_after_invalidation"])
+        self.assertFalse(written["value"]["provider_secret_absence_proven"])
         self.assertNotIn("sensitive", output.getvalue())
 
 

@@ -31,8 +31,9 @@ use zeroize::{Zeroize, Zeroizing};
 
 pub mod issuer;
 pub use issuer::{
-    IssuerAlias, IssuerConnectorCatalog, IssuerConnectorEntry, IssuerCredentialStore, IssuerKind,
-    IssuerResolution, IssuerResolutionEvidence, IssuerResolver,
+    invalidate_issuer_credential, IssuerAlias, IssuerConnectorCatalog, IssuerConnectorEntry,
+    IssuerCredentialStore, IssuerInvalidationEvidence, IssuerInvalidationOutcome,
+    IssuerInvalidator, IssuerKind, IssuerResolution, IssuerResolutionEvidence, IssuerResolver,
 };
 
 const URL_SAFE_ALPHABET: &[u8] =
