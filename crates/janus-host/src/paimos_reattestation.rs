@@ -280,9 +280,9 @@ impl ManagedCredentialReattestationRecordV1 {
 }
 
 pub fn run_from_system() -> Result<()> {
-    if !path_is_present(Path::new(SYSTEM_CAPABILITY_PATH))?
-        || !path_is_present(Path::new(SYSTEM_BINDING_PATH))?
-    {
+    let capability_present = path_is_present(Path::new(SYSTEM_CAPABILITY_PATH))?;
+    let binding_present = path_is_present(Path::new(SYSTEM_BINDING_PATH))?;
+    if !configuration_is_enabled(capability_present, binding_present)? {
         return Ok(());
     }
     run_from_paths(
@@ -350,15 +350,14 @@ where
         .map_err(|_| error("managed_credential_reattestation_record_unavailable"))?;
     let executor = host_executor()
         .map_err(|_| error("managed_credential_reattestation_host_state_refused"))?;
-    let record = if path_is_present(&evidence_path)? {
-        let record: ManagedCredentialReattestationRecordV1 = decode_private(
-            &evidence_path,
-            owner_uid,
-            owner_gid,
-            "managed_credential_reattestation_record_unavailable",
-        )?;
-        validate_existing_record(&record, &binding, &binding_digest)?;
-        validate_current_state(&binding, &executor, owner_uid)?;
+    let record = if let Some(record) = load_existing_record_for_retry(
+        &evidence_path,
+        &binding,
+        &binding_digest,
+        owner_uid,
+        owner_gid,
+        || validate_current_state(&binding, &executor, owner_uid),
+    )? {
         record
     } else {
         let before = executor
@@ -389,6 +388,41 @@ where
         allow_loopback_http,
     )
     .map_err(|_| error("managed_credential_reattestation_report_pending"))
+}
+
+fn configuration_is_enabled(capability_present: bool, binding_present: bool) -> Result<bool> {
+    match (capability_present, binding_present) {
+        (false, false) => Ok(false),
+        (true, true) => Ok(true),
+        _ => Err(error(
+            "managed_credential_reattestation_configuration_incomplete",
+        )),
+    }
+}
+
+fn load_existing_record_for_retry<F>(
+    evidence_path: &Path,
+    binding: &ManagedCredentialReattestationBindingV1,
+    binding_digest: &str,
+    owner_uid: u32,
+    owner_gid: u32,
+    live_check: F,
+) -> Result<Option<ManagedCredentialReattestationRecordV1>>
+where
+    F: FnOnce() -> Result<()>,
+{
+    if !path_is_present(evidence_path)? {
+        return Ok(None);
+    }
+    let record: ManagedCredentialReattestationRecordV1 = decode_private(
+        evidence_path,
+        owner_uid,
+        owner_gid,
+        "managed_credential_reattestation_record_unavailable",
+    )?;
+    validate_existing_record(&record, binding, binding_digest)?;
+    live_check()?;
+    Ok(Some(record))
 }
 
 fn validate_current_state(
@@ -482,23 +516,38 @@ fn validate_source_completion(
     )?;
     let source_record = decode_record(&source_record_raw)
         .map_err(|_| error("managed_credential_reattestation_source_invalid"))?;
-    if source_digest != binding.source_completion_binding_digest
-        || wire_sha256(&source_record_raw) != binding.source_completion_record_sha256
-        || !source_binding.matches_record(&source_record)
-        || !reporter_identity_is_distinct(&source_binding.reporter, &binding.reporter)
-        || source_record.host_ref != binding.host_ref
-        || source_record.service_ref != binding.service_ref
-        || source_record.slot_ref != binding.slot_ref
-        || source_record.operation_ref != binding.source_operation_ref
-        || source_record.secret_ref != binding.secret_ref
-        || source_record.declaration_fingerprint != binding.declaration_fingerprint
-        || source_record.generation != binding.generation
-        || source_record.revocation_epoch != binding.revocation_epoch
-        || source_record.producer_key_id != binding.producer_key_id
-    {
+    if !source_completion_matches(
+        binding,
+        &source_binding,
+        &source_digest,
+        &source_record,
+        &source_record_raw,
+    ) {
         return Err(error("managed_credential_reattestation_source_refused"));
     }
     Ok(())
+}
+
+fn source_completion_matches(
+    binding: &ManagedCredentialReattestationBindingV1,
+    source_binding: &ManagedCompletionBindingV2,
+    source_digest: &str,
+    source_record: &crate::paimos_completion::ManagedCompletionRecordV2,
+    source_record_raw: &[u8],
+) -> bool {
+    source_digest == binding.source_completion_binding_digest
+        && wire_sha256(source_record_raw) == binding.source_completion_record_sha256
+        && source_binding.matches_record(source_record)
+        && reporter_identity_is_distinct(&source_binding.reporter, &binding.reporter)
+        && source_record.host_ref == binding.host_ref
+        && source_record.service_ref == binding.service_ref
+        && source_record.slot_ref == binding.slot_ref
+        && source_record.operation_ref == binding.source_operation_ref
+        && source_record.secret_ref == binding.secret_ref
+        && source_record.declaration_fingerprint == binding.declaration_fingerprint
+        && source_record.generation == binding.generation
+        && source_record.revocation_epoch == binding.revocation_epoch
+        && source_record.producer_key_id == binding.producer_key_id
 }
 
 fn reporter_identity_is_distinct(
@@ -510,11 +559,19 @@ fn reporter_identity_is_distinct(
 }
 
 fn validate_source_record_directory(path: &Path) -> Result<()> {
+    validate_source_record_directory_for_owner(path, 100, 993)
+}
+
+fn validate_source_record_directory_for_owner(
+    path: &Path,
+    owner_uid: u32,
+    owner_gid: u32,
+) -> Result<()> {
     let metadata = fs::symlink_metadata(path)
         .map_err(|_| error("managed_credential_reattestation_source_unavailable"))?;
     if !metadata.file_type().is_dir()
-        || metadata.uid() != 100
-        || metadata.gid() != 993
+        || metadata.uid() != owner_uid
+        || metadata.gid() != owner_gid
         || metadata.mode() & 0o777 != 0o700
     {
         return Err(error("managed_credential_reattestation_source_unavailable"));
@@ -984,6 +1041,7 @@ pub mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
     const GOLDEN_OBSERVATION: &[u8] = include_bytes!(
@@ -1109,6 +1167,63 @@ mod tests {
         }
     }
 
+    fn sealed_record(
+        binding: &ManagedCredentialReattestationBindingV1,
+        binding_digest: String,
+        owner_uid: u32,
+        now: u64,
+    ) -> ManagedCredentialReattestationRecordV1 {
+        let mut record = ManagedCredentialReattestationRecordV1 {
+            schema: EVIDENCE_SCHEMA.to_string(),
+            schema_version: 1,
+            attestation_ref: binding.attestation_ref.clone(),
+            binding_digest,
+            source_completion_record_sha256: binding.source_completion_record_sha256.clone(),
+            handoff_id: binding.reporter.handoff_id.clone(),
+            execution_number: binding.reporter.execution_number,
+            authority_epoch: binding.reporter.authority_epoch,
+            credential_epoch: binding.reporter.credential_epoch,
+            host_status: HostCredentialAttestationStatusV1 {
+                host_ref: binding.host_ref.clone(),
+                service_ref: binding.service_ref.clone(),
+                slot_ref: binding.slot_ref.clone(),
+                operation_ref: binding.source_operation_ref.clone(),
+                envelope_ref: binding.envelope_ref.clone(),
+                secret_ref: binding.secret_ref.clone(),
+                declaration_fingerprint: binding.declaration_fingerprint.clone(),
+                generation: binding.generation,
+                revocation_epoch: binding.revocation_epoch,
+                producer_key_id: binding.producer_key_id.clone(),
+                packet_sha256: binding.expected_packet_sha256.clone(),
+                material_device: 1,
+                material_inode: 2,
+                material_size: binding.expected_material_size,
+                material_owner_uid: owner_uid,
+                phase: "active".to_string(),
+                value_returned: false,
+            },
+            observation: observation(now),
+            evidence_accepted_at_unix_secs: now,
+            integrity_hash: String::new(),
+        };
+        record.seal().expect("seal record");
+        record
+    }
+
+    #[test]
+    fn optional_configuration_is_inert_only_when_both_files_are_absent() {
+        assert!(!configuration_is_enabled(false, false).expect("both absent"));
+        assert!(configuration_is_enabled(true, true).expect("both present"));
+        for state in [(true, false), (false, true)] {
+            assert_eq!(
+                configuration_is_enabled(state.0, state.1)
+                    .expect_err("partial configuration refused")
+                    .reason_code(),
+                "managed_credential_reattestation_configuration_incomplete"
+            );
+        }
+    }
+
     #[test]
     fn reattestation_binding_refuses_source_operation_identity_aliases() {
         let mut aliased_operation = binding();
@@ -1148,6 +1263,164 @@ mod tests {
         source.handoff_id = "01ARZ3NDEKTSV4RRFFQ69G5FAW".to_string();
         source.execution_number = reattestation.execution_number;
         assert!(!reporter_identity_is_distinct(&source, &reattestation));
+    }
+
+    #[test]
+    fn source_completion_requires_digest_identity_and_closed_ready_directory() {
+        use crate::paimos_completion::{AcceptedActivationEvidenceV1, ManagedCompletionRecordV2};
+
+        let mut binding = binding();
+        let mut source_reporter = reporter();
+        source_reporter.handoff_id = "01ARZ3NDEKTSV4RRFFQ69G5FAW".to_string();
+        source_reporter.execution_number = 1;
+        source_reporter.evidence_source = "managed_completion_record".to_string();
+        let source_binding = ManagedCompletionBindingV2 {
+            schema: crate::paimos_completion::BINDING_SCHEMA.to_string(),
+            schema_version: 1,
+            operation_ref: binding.source_operation_ref.clone(),
+            operation_kind: "create".to_string(),
+            source: "generated".to_string(),
+            host_ref: binding.host_ref.clone(),
+            service_ref: binding.service_ref.clone(),
+            slot_ref: binding.slot_ref.clone(),
+            declaration_fingerprint: binding.declaration_fingerprint.clone(),
+            secret_ref: binding.secret_ref.clone(),
+            scope_ref: "scp_0123456789abcdef".to_string(),
+            generation: binding.generation,
+            revocation_epoch: binding.revocation_epoch,
+            plan_fingerprint: "a".repeat(64),
+            target_fingerprint: "b".repeat(64),
+            producer_key_id: binding.producer_key_id.clone(),
+            reporter: source_reporter,
+        };
+        let source_digest = source_binding.digest().expect("source binding digest");
+        let mut source_record = ManagedCompletionRecordV2 {
+            schema: crate::paimos_completion::RECORD_SCHEMA.to_string(),
+            schema_version: 1,
+            binding_digest: source_digest.clone(),
+            operation_ref: source_binding.operation_ref.clone(),
+            operation_id: "webtx_0123456789abcdef".to_string(),
+            operation_kind: source_binding.operation_kind.clone(),
+            source: source_binding.source.clone(),
+            host_ref: source_binding.host_ref.clone(),
+            service_ref: source_binding.service_ref.clone(),
+            slot_ref: source_binding.slot_ref.clone(),
+            declaration_fingerprint: source_binding.declaration_fingerprint.clone(),
+            secret_ref: source_binding.secret_ref.clone(),
+            scope_ref: source_binding.scope_ref.clone(),
+            generation: source_binding.generation,
+            revocation_epoch: source_binding.revocation_epoch,
+            plan_fingerprint: source_binding.plan_fingerprint.clone(),
+            target_fingerprint: source_binding.target_fingerprint.clone(),
+            producer_key_id: source_binding.producer_key_id.clone(),
+            prepared_at_unix_secs: 1_799_999_995,
+            preflighted_at_unix_secs: 1_799_999_990,
+            evidence_accepted_at_unix_secs: 1_800_000_000,
+            activation_evidence: AcceptedActivationEvidenceV1 {
+                generation: binding.generation,
+                materialized: true,
+                process_state: "running".to_string(),
+                probe_state: "healthy".to_string(),
+                heartbeat_observed_at_unix_secs: 1_800_000_000,
+                process_observed_at_unix_secs: 1_800_000_000,
+                probe_observed_at_unix_secs: 1_800_000_000,
+            },
+            integrity_hash: String::new(),
+        };
+        source_record.seal().expect("seal source record");
+        let source_record_raw =
+            crate::paimos::canonical_json_bytes(&source_record).expect("source record bytes");
+        binding.source_completion_binding_digest = source_digest.clone();
+        binding.source_completion_record_sha256 = wire_sha256(&source_record_raw);
+        assert!(source_completion_matches(
+            &binding,
+            &source_binding,
+            &source_digest,
+            &source_record,
+            &source_record_raw
+        ));
+
+        let mut wrong_digest = binding.clone();
+        wrong_digest.source_completion_record_sha256 = wire_sha256(b"other");
+        assert!(!source_completion_matches(
+            &wrong_digest,
+            &source_binding,
+            &source_digest,
+            &source_record,
+            &source_record_raw
+        ));
+        let mut aliased_handoff = source_binding.clone();
+        aliased_handoff.reporter.handoff_id = binding.reporter.handoff_id.clone();
+        assert!(!source_completion_matches(
+            &binding,
+            &aliased_handoff,
+            &source_digest,
+            &source_record,
+            &source_record_raw
+        ));
+
+        let temporary = tempfile::tempdir().expect("source completion directory");
+        fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o700))
+            .expect("private source directory");
+        File::create(temporary.path().join(".producer.lock")).expect("producer lock");
+        File::create(temporary.path().join("ready.json")).expect("ready record");
+        let metadata = fs::metadata(temporary.path()).expect("source directory metadata");
+        validate_source_record_directory_for_owner(
+            temporary.path(),
+            metadata.uid(),
+            metadata.gid(),
+        )
+        .expect("closed source directory");
+        File::create(temporary.path().join("unexpected.json")).expect("unexpected entry");
+        assert_eq!(
+            validate_source_record_directory_for_owner(
+                temporary.path(),
+                metadata.uid(),
+                metadata.gid(),
+            )
+            .expect_err("extra entry refused")
+            .reason_code(),
+            "managed_credential_reattestation_source_unavailable"
+        );
+    }
+
+    #[test]
+    fn report_retry_reuses_sealed_evidence_after_a_new_live_check() {
+        let temporary = tempfile::tempdir().expect("evidence directory");
+        fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o700))
+            .expect("private evidence directory");
+        let metadata = fs::metadata(temporary.path()).expect("directory metadata");
+        let mut binding = binding();
+        binding.expected_material_owner_uid = metadata.uid();
+        let digest = binding.digest().expect("binding digest");
+        let record = sealed_record(&binding, digest.clone(), metadata.uid(), 1_800_000_000);
+        let path = temporary.path().join("reattest_0123456789abcdef.json");
+        write_new_record(&path, &record, metadata.uid()).expect("create evidence");
+        let before = fs::read(&path).expect("read initial evidence");
+        let live_checks = Cell::new(0);
+
+        let retained = load_existing_record_for_retry(
+            &path,
+            &binding,
+            &digest,
+            metadata.uid(),
+            metadata.gid(),
+            || {
+                live_checks.set(live_checks.get() + 1);
+                Ok(())
+            },
+        )
+        .expect("load retry evidence")
+        .expect("existing evidence");
+
+        assert_eq!(live_checks.get(), 1);
+        assert_eq!(retained.evidence_accepted_at_unix_secs, 1_800_000_000);
+        assert_eq!(retained.observation, record.observation);
+        assert_eq!(
+            retained.observed_at().expect("retained observation"),
+            record.observed_at().expect("original observation")
+        );
+        assert_eq!(fs::read(path).expect("read retained evidence"), before);
     }
 
     #[test]
