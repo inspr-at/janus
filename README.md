@@ -767,3 +767,12 @@ You can run it, inspect it, modify it, and redistribute it under those terms.
 If you modify Janus and let users interact with that version over a network,
 AGPL section 13 requires an offer of corresponding source for that modified
 version.
+
+## Zitadel issuer API compatibility
+
+A reviewed `zitadel-oidc-client` connector may select `api_variant`:
+
+- `application-v2` (also the default when omitted): Application v2 `GenerateClientSecret`.
+- `management-v1`: the [Management v1 OIDC secret regeneration endpoint](https://zitadel.com/docs/reference/api/management/zitadel.management.v1.ManagementService.RegenerateOIDCClientSecret), for older Zitadel deployments.
+
+Selection is explicit; a failed request never triggers automatic fallback. Both paths retain the exact reviewed project/application IDs, machine identity and TLS trust. Changing the selection changes the connector fingerprint, so use a new operation record rather than replaying an interrupted reservation. Invalidation regenerates and discards the replacement; it does not prove that the provider retains no secret.

@@ -1179,6 +1179,31 @@ mod tests {
             .unwrap()
             .get("ca_file")
             .is_none());
+        let old_entry = serde_json::to_value(catalog.entry(&alias).unwrap()).unwrap();
+        assert!(old_entry.get("api_variant").is_none());
+        let mut compatibility_entry = old_entry;
+        compatibility_entry["api_variant"] = serde_json::json!("management-v1");
+        let compatibility_document = serde_json::json!({
+            "schema": "janus.issuer-connectors.v1", "connectors": [compatibility_entry]
+        });
+        let compatibility = IssuerConnectorCatalog::parse_json(
+            &serde_json::to_vec(&compatibility_document).unwrap(),
+        )
+        .unwrap();
+        assert_ne!(
+            catalog.entry_digest(&alias).unwrap(),
+            compatibility.entry_digest(&alias).unwrap()
+        );
+        assert_eq!(
+            compatibility.entry(&alias).unwrap().api_variant,
+            Some(issuer::ZitadelApiVariant::ManagementV1)
+        );
+        let mut invalid_variant = compatibility_document;
+        invalid_variant["connectors"][0]["api_variant"] = serde_json::json!("automatic");
+        assert!(
+            IssuerConnectorCatalog::parse_json(&serde_json::to_vec(&invalid_variant).unwrap())
+                .is_err()
+        );
         let pinned = IssuerConnectorCatalog::parse_json(
             br#"{"schema":"janus.issuer-connectors.v1","connectors":[{"kind":"zitadel-oidc-client","alias":"issuer:zitadel-oidc-client:AGM Platform/zulip","credential_ref":"janus-zitadel-machine","origin":"https://identity.example.test","project_id":"1","application_id":"2","timeout_seconds":10,"ca_file":"/run/janus/issuer-ca.pem","ca_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}"#,
         )

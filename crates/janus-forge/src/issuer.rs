@@ -23,8 +23,8 @@ pub use invalidation::{
 
 pub use tofu::{TofuOutputConfig, TofuOutputConnector};
 pub use zitadel::{
-    SystemIssuerClock, UreqZitadelTransport, ZitadelIssuerClock, ZitadelOidcClientConfig,
-    ZitadelOidcClientConnector, ZitadelTransport,
+    SystemIssuerClock, UreqZitadelTransport, ZitadelApiVariant, ZitadelIssuerClock,
+    ZitadelOidcClientConfig, ZitadelOidcClientConnector, ZitadelTransport,
 };
 
 /// Maximum bytes accepted from one issuer resolution.
@@ -162,6 +162,8 @@ pub struct IssuerConnectorEntry {
     pub ca_file: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ca_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_variant: Option<ZitadelApiVariant>,
     pub executable: Option<String>,
     pub executable_sha256: Option<String>,
     pub workdir: Option<String>,
@@ -212,7 +214,8 @@ impl IssuerConnectorCatalog {
                 || entry.project_id.is_some()
                 || entry.application_id.is_some()
                 || entry.ca_file.is_some()
-                || entry.ca_sha256.is_some();
+                || entry.ca_sha256.is_some()
+                || entry.api_variant.is_some();
             let tofu_fields_present = entry.executable.is_some()
                 || entry.executable_sha256.is_some()
                 || entry.workdir.is_some()
@@ -419,7 +422,8 @@ impl IssuerResolver for ConfiguredIssuerResolver {
                     entry.timeout_seconds.expect("validated timeout"),
                     entry.ca_file.as_deref(),
                     entry.ca_sha256.as_deref(),
-                )?;
+                )?
+                .with_api_variant(entry.api_variant.unwrap_or_default());
                 let credential_ref = entry
                     .credential_ref
                     .as_deref()
@@ -499,7 +503,8 @@ impl IssuerInvalidator for ConfiguredIssuerResolver {
             entry.timeout_seconds.expect("validated timeout"),
             entry.ca_file.as_deref(),
             entry.ca_sha256.as_deref(),
-        )?;
+        )?
+        .with_api_variant(entry.api_variant.unwrap_or_default());
         let credential_ref = entry
             .credential_ref
             .as_deref()
