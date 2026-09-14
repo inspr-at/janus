@@ -1098,7 +1098,7 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "janus-conformance"
-version = "0.1.41"
+version = "0.1.42"
 dependencies = [
  "janus-core",
  "janus-local",
@@ -1111,7 +1111,7 @@ dependencies = [
 
 [[package]]
 name = "janus-core"
-version = "0.1.41"
+version = "0.1.42"
 dependencies = [
  "async-trait",
  "ed25519-dalek",
@@ -1127,7 +1127,7 @@ dependencies = [
 
 [[package]]
 name = "janus-distribute"
-version = "0.1.41"
+version = "0.1.42"
 dependencies = [
  "age",
  "base64 0.21.7",
@@ -1144,7 +1144,7 @@ dependencies = [
 
 [[package]]
 name = "janus-executor"
-version = "0.1.41"
+version = "0.1.42"
 dependencies = [
  "fs2",
  "getrandom 0.2.17",
@@ -1158,7 +1158,7 @@ dependencies = [
 
 [[package]]
 name = "janus-forge"
-version = "0.1.41"
+version = "0.1.42"
 dependencies = [
  "age",
  "async-trait",
@@ -1182,7 +1182,7 @@ dependencies = [
 
 [[package]]
 name = "janus-host"
-version = "0.1.41"
+version = "0.1.42"
 dependencies = [
  "age",
  "base64 0.21.7",
@@ -1204,7 +1204,7 @@ dependencies = [
 
 [[package]]
 name = "janus-local"
-version = "0.1.41"
+version = "0.1.42"
 dependencies = [
  "ed25519-dalek",
  "fs2",
@@ -1222,7 +1222,7 @@ dependencies = [
 
 [[package]]
 name = "janus-mock"
-version = "0.1.41"
+version = "0.1.42"
 dependencies = [
  "async-trait",
  "janus-core",
@@ -1231,7 +1231,7 @@ dependencies = [
 
 [[package]]
 name = "janus-provider-age"
-version = "0.1.41"
+version = "0.1.42"
 dependencies = [
  "age",
  "async-trait",
@@ -1251,7 +1251,7 @@ dependencies = [
 
 [[package]]
 name = "janus-providers"
-version = "0.1.41"
+version = "0.1.42"
 dependencies = [
  "async-trait",
  "dotenvy",
@@ -1264,7 +1264,7 @@ dependencies = [
 
 [[package]]
 name = "janus-warden"
-version = "0.1.41"
+version = "0.1.42"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1284,7 +1284,7 @@ dependencies = [
 
 [[package]]
 name = "janusd"
-version = "0.1.41"
+version = "0.1.42"
 dependencies = [
  "age",
  "anyhow",
