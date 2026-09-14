@@ -13,11 +13,11 @@ agents - without making raw credentials part of prompts, command arguments,
 logs, or application code.
 
 [![License: AGPL-3.0-only](https://img.shields.io/badge/license-AGPL--3.0--only-1f7a72.svg)](LICENSE)
-[![Rust engine](https://img.shields.io/badge/Rust_engine-v0.1.43-cb7c28.svg)](https://github.com/inspr-at/janus/releases/tag/rust-engine-v0.1.43)
+[![Rust engine](https://img.shields.io/badge/Rust_engine-v0.1.44-cb7c28.svg)](https://github.com/inspr-at/janus/releases/tag/rust-engine-v0.1.44)
 
 [Product site](https://janus.inspr.at/) ·
 [Deutsch](https://janus.inspr.at/de/) ·
-[Rust engine v0.1.43](https://github.com/inspr-at/janus/releases/tag/rust-engine-v0.1.43) ·
+[Rust engine v0.1.44](https://github.com/inspr-at/janus/releases/tag/rust-engine-v0.1.44) ·
 [INSPR](https://www.inspr.at)
 
 Janus is part of the open INSPR product family and is authored and published
@@ -96,7 +96,7 @@ Janus has two layers with different histories:
 
 | Layer | Role | Language | Status |
 |---|---|---|---|
-| **Rust engine** | Secret store contracts, Warden, permits, approved-use execution, rotation, lifecycle, and operator CLI | Rust | Active and released. Current tag: `rust-engine-v0.1.43`. |
+| **Rust engine** | Secret store contracts, Warden, permits, approved-use execution, rotation, lifecycle, and operator CLI | Rust | Active and released. Current tag: `rust-engine-v0.1.44`. |
 | **Go envelope** | Existing governance, audit, evidence, and oversight surface | Go | Shipped, operational, and transitional. New core capability work lands in Rust. |
 
 The Rust engine is no longer a skeleton. Core execution paths ship with unit,
@@ -777,5 +777,7 @@ A reviewed `zitadel-oidc-client` connector may select `api_variant`:
 - `management-v1-api`: the Management v1 API application secret regeneration endpoint (`api_config/_generate_client_secret`). Select it only for an API application; API and OIDC applications have different v1 endpoints.
 
 Selection is explicit; a failed request never triggers automatic fallback. All paths retain the exact reviewed project/application IDs, machine identity and TLS trust. Changing the selection changes the connector fingerprint, so use a new operation record rather than replaying an interrupted reservation. Invalidation regenerates and discards the replacement; it does not prove that the provider retains no secret.
+
+Issuer failures identify the token-exchange or secret-generation stage and, when the provider returns one, its HTTP status. Provider response bodies, credentials, URLs and free-form transport errors are never included. A status is diagnostic information, not permission to retry a credential operation.
 
 For API applications, the isolated acceptance driver accepts `probe_kind: "introspection"` with `token_endpoint` ending in `/oauth/v2/introspect`. It submits a known inactive token with the generated client credential. A successful `active: false` response proves client authentication; rotated and invalidated credentials must be rejected. Evidence uses `janus.zitadel-issuer-introspection-acceptance.v1` and credential-authentication fields, never token-issuance claims. Omitting `probe_kind` preserves the existing client-credentials probe and evidence. See [Zitadel API client authentication](https://zitadel.com/docs/guides/integrate/token-introspection/basic-auth).
