@@ -20,6 +20,9 @@ SPEC.loader.exec_module(acceptance)
 ADMISSION_ENV = {
     "JANUS_IDENTITY_SOCKET": "/run/janus/identity.sock",
     "JANUS_DUTY_SURFACE_MANIFEST": "/etc/janus/duties.json",
+    "JANUS_DUTY_JOURNAL_ROOT": "/var/lib/janus/duty-journal",
+    "JANUS_DUTY_SIGNING_KEY_FILE": "/etc/janus/duty-signing.key",
+    "JANUS_RELEASE_EXECUTOR": "janus-465-zitadel-acceptance",
     "JANUS_RUNTIME_AUTHORITY_VERIFYING_KEY_FILE": "/etc/janus/runtime.pub",
     "JANUS_RUNTIME_AUTHORITY_AUDIENCE": "lab-audience",
     "JANUS_RELEASE_DIGEST": "sha256:" + "a" * 64,
@@ -196,6 +199,10 @@ class ZitadelIssuerAcceptanceTests(unittest.TestCase):
         self.paths["janusd_admin"].write_text(
             """#!/bin/sh
 set -eu
+[ "$JANUS_DUTY_JOURNAL_ROOT" = /var/lib/janus/duty-journal ]
+[ "$JANUS_DUTY_SIGNING_KEY_FILE" = /etc/janus/duty-signing.key ]
+[ "$JANUS_RELEASE_EXECUTOR" = janus-465-zitadel-acceptance ]
+[ "${UNRELATED_SECRET+x}" != x ]
 [ "$JANUS_SCOPE_PROJECT" = lab ]
 [ "$#" -eq 14 ]
 [ "$1" = forge ] && [ "$2" = create-generated ] && [ "$3" = --secret ]
@@ -225,7 +232,7 @@ printf '{"action":"agenix.create.generated","changed":true,"secret_name":"%s","s
         self.config_path.write_text(json.dumps(self.config), encoding="utf-8")
         loaded = acceptance.load_config(self.config_path)
         paths = acceptance.validate(loaded, require_fresh=True)
-        with mock.patch.dict(os.environ, ADMISSION_ENV, clear=False):
+        with mock.patch.dict(os.environ, {**ADMISSION_ENV, "UNRELATED_SECRET": "fixture"}, clear=False):
             outcome = acceptance.run_create(
                 loaded, paths, "initial_name", "allowed_alias", expect_success=True
             )
@@ -245,6 +252,10 @@ printf '{"action":"agenix.create.generated","changed":true,"secret_name":"%s","s
         self.paths["janusd_admin"].write_text(
             """#!/bin/sh
 set -eu
+[ "$JANUS_DUTY_JOURNAL_ROOT" = /var/lib/janus/duty-journal ]
+[ "$JANUS_DUTY_SIGNING_KEY_FILE" = /etc/janus/duty-signing.key ]
+[ "$JANUS_RELEASE_EXECUTOR" = janus-465-zitadel-acceptance ]
+[ "${UNRELATED_SECRET+x}" != x ]
 [ "$#" -eq 12 ]
 [ "$1" = forge ] && [ "$2" = invalidate-issuer ]
 [ "$3" = --alias ] && [ "$4" = 'issuer:zitadel-oidc-client:INSPR Lab/acceptance' ]
@@ -265,7 +276,7 @@ printf '%s\n' '{"action":"issuer.credential.invalidate","changed":true,"state":"
         self.config_path.write_text(json.dumps(self.config), encoding="utf-8")
         loaded = acceptance.load_config(self.config_path)
         paths = acceptance.validate(loaded, require_fresh=True)
-        with mock.patch.dict(os.environ, ADMISSION_ENV, clear=False):
+        with mock.patch.dict(os.environ, {**ADMISSION_ENV, "UNRELATED_SECRET": "fixture"}, clear=False):
             outcome = acceptance.run_invalidate(loaded, paths)
         self.assertEqual(outcome["method"], "regenerate-and-discard")
         self.assertFalse(outcome["value_returned"])
