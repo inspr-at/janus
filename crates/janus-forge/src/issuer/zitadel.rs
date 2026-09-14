@@ -161,6 +161,34 @@ fn unavailable() -> JanusError {
     }
 }
 
+// Preserve only a bounded HTTP status, never the response body, URL, token,
+// or a transport's free-form error text.
+fn http_failure(error: ureq::Error) -> JanusError {
+    match error {
+        ureq::Error::Status(status, _) => JanusError::StoreUnavailable {
+            detail: format!("Zitadel issuer HTTP status: {status}"),
+        },
+        ureq::Error::Transport(_) => unavailable(),
+    }
+}
+
+fn operation_failure(stage: &'static str, error: JanusError) -> JanusError {
+    let status = match &error {
+        JanusError::StoreUnavailable { detail } => detail
+            .strip_prefix("Zitadel issuer HTTP status: ")
+            .filter(|value| value.len() == 3 && value.bytes().all(|b| b.is_ascii_digit()))
+            .and_then(|value| value.parse::<u16>().ok())
+            .filter(|value| (100..=599).contains(value)),
+        _ => None,
+    };
+    let suffix = status
+        .map(|value| format!(", HTTP {value}"))
+        .unwrap_or_default();
+    JanusError::StoreUnavailable {
+        detail: format!("Zitadel issuer operation failed ({stage}{suffix})"),
+    }
+}
+
 /// Clock boundary used to make the signed assertion deterministic in tests.
 pub trait ZitadelIssuerClock: Send + Sync {
     /// Current Unix time in seconds.
@@ -254,7 +282,7 @@ impl ZitadelTransport for UreqZitadelTransport {
             .post(endpoint)
             .set("Content-Type", "application/x-www-form-urlencoded")
             .send_string(&body)
-            .map_err(|_| unavailable())?;
+            .map_err(http_failure)?;
         Self::bounded_response(response)
     }
 
@@ -276,7 +304,7 @@ impl ZitadelTransport for UreqZitadelTransport {
             .set("Connect-Protocol-Version", "1")
             .set("Content-Type", "application/json")
             .send_bytes(body)
-            .map_err(|_| unavailable())?;
+            .map_err(http_failure)?;
         Self::bounded_response(response)
     }
 }
@@ -377,15 +405,15 @@ where
                 &SecretValue::new(form.as_bytes().to_vec()),
                 remaining(config.timeout, started)?,
             )
-            .map_err(|_| unavailable())?;
-        let token: AccessTokenResponse =
-            serde_json::from_slice(token_body.expose_bytes()).map_err(|_| unavailable())?;
+            .map_err(|error| operation_failure("token exchange", error))?;
+        let token: AccessTokenResponse = serde_json::from_slice(token_body.expose_bytes())
+            .map_err(|_| operation_failure("token response", unavailable()))?;
         if token.token_type != "Bearer"
             || token.access_token.is_empty()
             || token.access_token.len() > MAX_ACCESS_TOKEN_BYTES
             || token.expires_in == 0
         {
-            return Err(unavailable());
+            return Err(operation_failure("token response", unavailable()));
         }
         let (endpoint, request) = match config.api_variant {
             ZitadelApiVariant::ApplicationV2 => (
@@ -419,9 +447,10 @@ where
                 &request,
                 remaining(config.timeout, started)?,
             )
-            .map_err(|_| unavailable())?;
+            .map_err(|error| operation_failure("secret generation", error))?;
         let generated: GenerateClientSecretResponse =
-            serde_json::from_slice(response.expose_bytes()).map_err(|_| unavailable())?;
+            serde_json::from_slice(response.expose_bytes())
+                .map_err(|_| operation_failure("secret response", unavailable()))?;
         if generated.client_secret.is_empty()
             || generated.client_secret.len() > MAX_CLIENT_SECRET_BYTES
             || generated
@@ -429,7 +458,7 @@ where
                 .bytes()
                 .any(|byte| matches!(byte, 0 | b'\n' | b'\r'))
         {
-            return Err(unavailable());
+            return Err(operation_failure("secret response", unavailable()));
         }
         Ok(SecretValue::new(
             generated.client_secret.as_bytes().to_vec(),
@@ -768,6 +797,7 @@ mod tests {
         form: Mutex<Option<(String, String)>>,
         generate: Mutex<Option<(String, String, Vec<u8>)>>,
         fail_with_secret: bool,
+        fail_generation: bool,
     }
 
     impl ZitadelTransport for FakeTransport {
@@ -799,6 +829,12 @@ mod tests {
             body: &[u8],
             _timeout: Duration,
         ) -> JanusResult<SecretValue> {
+            if self.fail_generation {
+                return Err(http_failure(ureq::Error::Status(
+                    403,
+                    ureq::Response::new(403, "Forbidden", "synthetic-sensitive-response").unwrap(),
+                )));
+            }
             *self.generate.lock().unwrap() = Some((
                 endpoint.to_string(),
                 String::from_utf8(bearer.expose_bytes().to_vec()).unwrap(),
@@ -964,9 +1000,61 @@ mod tests {
         };
         assert_eq!(
             error.to_string(),
-            "store unavailable: Zitadel issuer operation failed"
+            "store unavailable: Zitadel issuer operation failed (token exchange)"
         );
         assert!(!error.to_string().contains("synthetic-sensitive"));
+    }
+
+    #[test]
+    fn generation_rejection_reports_only_stage_and_http_status() {
+        let config =
+            ZitadelOidcClientConfig::new("https://identity.example.test", "1", "2", 10).unwrap();
+        let connector = ZitadelOidcClientConnector::new(
+            FakeTransport {
+                fail_generation: true,
+                ..FakeTransport::default()
+            },
+            FixedClock,
+        );
+        let error = connector
+            .resolve(&config, fixture_profile().0)
+            .err()
+            .expect("must fail closed");
+        assert_eq!(
+            error.to_string(),
+            "store unavailable: Zitadel issuer operation failed (secret generation, HTTP 403)"
+        );
+        assert!(!error.to_string().contains("synthetic-sensitive"));
+    }
+
+    #[test]
+    fn diagnostic_status_rejects_free_form_transport_details() {
+        for detail in [
+            "Zitadel issuer HTTP status: 403 synthetic-sensitive",
+            "Zitadel issuer HTTP status: 403\n",
+            "Zitadel issuer HTTP status: 999",
+            "https://user:synthetic-sensitive@identity.example.test",
+        ] {
+            let error = operation_failure(
+                "token exchange",
+                JanusError::StoreUnavailable {
+                    detail: detail.into(),
+                },
+            );
+            assert_eq!(
+                error.to_string(),
+                "store unavailable: Zitadel issuer operation failed (token exchange)"
+            );
+        }
+        for status in [401, 404, 429, 500] {
+            let response =
+                ureq::Response::new(status, "Failure", "synthetic-sensitive-response").unwrap();
+            let error = operation_failure(
+                "token exchange",
+                http_failure(ureq::Error::Status(status, response)),
+            );
+            assert_eq!(error.to_string(), format!("store unavailable: Zitadel issuer operation failed (token exchange, HTTP {status})"));
+        }
     }
 
     #[test]
