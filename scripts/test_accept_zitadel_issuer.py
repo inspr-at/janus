@@ -55,6 +55,7 @@ class Connection:
 
     def request(self, _method, _path, *, body, headers):
         self.__class__.request_headers = headers
+        self.__class__.request_body = body
         self.body = body
 
     def getresponse(self):
@@ -195,6 +196,35 @@ class ZitadelIssuerAcceptanceTests(unittest.TestCase):
             ):
                 acceptance.token_probe(self.config)
 
+    def test_introspection_checks_authentication_without_claiming_a_live_token(self):
+        self.config.update(probe_kind="introspection", token_endpoint="https://identity.example.test/oauth/v2/introspect")
+        for status, payload, accepted in [(200, b'{"active":false}', True), (401, b'{}', False)]:
+            with self.subTest(status=status), mock.patch.object(acceptance.sys, "stdin", Input(b"OIDC_CLIENT_SECRET=sensitive-canary\n")), mock.patch.object(
+                acceptance.http.client, "HTTPSConnection", Connection
+            ), mock.patch.object(Response, "status", status), mock.patch.object(Response, "payload", payload):
+                self.assertEqual(acceptance.token_probe(self.config), accepted)
+                self.assertEqual(Connection.request_body, b"token=janus-acceptance-known-inactive-token")
+        for payload in [b'{"active":true}', b'{"active":0}', b'{"token_type":"Bearer","access_token":"opaque"}']:
+            with mock.patch.object(acceptance.sys, "stdin", Input(b"OIDC_CLIENT_SECRET=sensitive-canary\n")), mock.patch.object(
+                acceptance.http.client, "HTTPSConnection", Connection
+            ), mock.patch.object(Response, "payload", payload):
+                with self.assertRaises(acceptance.AcceptanceError):
+                    acceptance.token_probe(self.config)
+
+    def test_probe_kind_is_explicit_and_introspection_requires_its_endpoint(self):
+        for kind in ["auto", [], None]:
+            self.config["probe_kind"] = kind
+            self.config_path.write_text(json.dumps(self.config))
+            with self.assertRaises(acceptance.AcceptanceError):
+                acceptance.load_config(self.config_path)
+        self.config["probe_kind"] = "introspection"
+        self.config_path.write_text(json.dumps(self.config))
+        with self.assertRaisesRegex(acceptance.AcceptanceError, "exact endpoint"):
+            acceptance.load_config(self.config_path)
+        self.config["token_endpoint"] = "https://identity.example.test/oauth/v2/introspect"
+        self.config_path.write_text(json.dumps(self.config))
+        self.assertEqual(acceptance.load_config(self.config_path)["probe_kind"], "introspection")
+
     def test_create_invokes_released_cli_shape_and_denied_alias_stays_absent(self):
         self.paths["janusd_admin"].write_text(
             """#!/bin/sh
@@ -282,6 +312,15 @@ printf '%s\n' '{"action":"issuer.credential.invalidate","changed":true,"state":"
         self.assertFalse(outcome["value_returned"])
 
     def test_run_orders_create_rotate_old_denial_and_scope_denial_value_free(self):
+        self.assert_run_evidence("client-credentials")
+
+    def test_introspection_evidence_distinguishes_client_authentication_from_issuance(self):
+        self.assert_run_evidence("introspection")
+
+    def assert_run_evidence(self, probe_kind):
+        if probe_kind == "introspection":
+            self.config.update(probe_kind=probe_kind, token_endpoint="https://identity.example.test/oauth/v2/introspect")
+            self.config_path.write_text(json.dumps(self.config))
         calls = []
         probes = []
 
@@ -329,12 +368,16 @@ printf '%s\n' '{"action":"issuer.credential.invalidate","changed":true,"state":"
                 "JANUS465_REPLACEMENT",
             ],
         )
-        self.assertTrue(written["value"]["initial_token_denied_after_rotation"])
+        subject = "credential" if probe_kind == "introspection" else "token"
+        self.assertTrue(written["value"][f"initial_{subject}_denied_after_rotation"])
         self.assertTrue(written["value"]["configured_scope_denied"])
         self.assertFalse(written["value"]["value_returned"])
         self.assertTrue(written["value"]["final_provider_credential_invalidated"])
-        self.assertTrue(written["value"]["replacement_token_denied_after_invalidation"])
+        self.assertTrue(written["value"][f"replacement_{subject}_denied_after_invalidation"])
         self.assertFalse(written["value"]["provider_secret_absence_proven"])
+        if probe_kind == "introspection":
+            self.assertEqual(written["value"]["schema"], acceptance.INTROSPECTION_SCHEMA)
+            self.assertFalse(any("_token_" in key for key in written["value"]))
         self.assertNotIn("sensitive", output.getvalue())
 
 
