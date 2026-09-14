@@ -38,6 +38,16 @@ pub struct ZitadelOidcClientConfig {
     application_id: String,
     timeout: Duration,
     custom_ca: Option<PinnedCa>,
+    api_variant: ZitadelApiVariant,
+}
+
+/// Reviewed API selection; an HTTP failure never triggers a protocol fallback.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ZitadelApiVariant {
+    #[default]
+    ApplicationV2,
+    ManagementV1,
 }
 
 /// Exact custom trust anchor selected by the reviewed connector catalog.
@@ -76,6 +86,7 @@ impl ZitadelOidcClientConfig {
             application_id: application_id.to_string(),
             timeout: Duration::from_secs(timeout_seconds),
             custom_ca: None,
+            api_variant: ZitadelApiVariant::ApplicationV2,
         })
     }
 
@@ -98,6 +109,12 @@ impl ZitadelOidcClientConfig {
 
     pub(crate) fn custom_ca(&self) -> Option<&PinnedCa> {
         self.custom_ca.as_ref()
+    }
+
+    /// Select a reviewed compatibility API without changing identity or scope.
+    pub fn with_api_variant(mut self, api_variant: ZitadelApiVariant) -> Self {
+        self.api_variant = api_variant;
+        self
     }
 
     fn endpoint(&self, path: &str) -> String {
@@ -369,15 +386,27 @@ where
         {
             return Err(unavailable());
         }
-        let request = serde_json::to_vec(&GenerateClientSecretRequest {
-            application_id: &config.application_id,
-            project_id: &config.project_id,
-        })
-        .map_err(|_| unavailable())?;
+        let (endpoint, request) = match config.api_variant {
+            ZitadelApiVariant::ApplicationV2 => (
+                config.endpoint("/zitadel.application.v2.ApplicationService/GenerateClientSecret"),
+                serde_json::to_vec(&GenerateClientSecretRequest {
+                    application_id: &config.application_id,
+                    project_id: &config.project_id,
+                })
+                .map_err(|_| unavailable())?,
+            ),
+            ZitadelApiVariant::ManagementV1 => (
+                config.endpoint(&format!(
+                    "/management/v1/projects/{}/apps/{}/oidc_config/_generate_client_secret",
+                    config.project_id, config.application_id
+                )),
+                b"{}".to_vec(),
+            ),
+        };
         let response = self
             .transport
             .post_generate(
-                &config.endpoint("/zitadel.application.v2.ApplicationService/GenerateClientSecret"),
+                &endpoint,
                 &SecretValue::new(token.access_token.as_bytes().to_vec()),
                 &request,
                 remaining(config.timeout, started)?,
@@ -755,6 +784,27 @@ mod tests {
             SecretValue::new(serde_json::to_vec(&profile).unwrap()),
             public,
         )
+    }
+
+    #[test]
+    fn explicit_management_api_keeps_exact_scope_for_create_and_invalidation() {
+        let config =
+            ZitadelOidcClientConfig::new("https://identity.example.test", "111", "222", 10)
+                .unwrap()
+                .with_api_variant(ZitadelApiVariant::ManagementV1);
+        let connector = ZitadelOidcClientConnector::new(FakeTransport::default(), FixedClock);
+        let value = connector.resolve(&config, fixture_profile().0).unwrap();
+        assert_eq!(value.expose_bytes(), b"synthetic-generated-value");
+        for invalidation in [false, true] {
+            if invalidation {
+                connector.invalidate(&config, fixture_profile().0).unwrap();
+            }
+            let (endpoint, bearer, request) =
+                connector.transport.generate.lock().unwrap().take().unwrap();
+            assert_eq!(endpoint, "https://identity.example.test/management/v1/projects/111/apps/222/oidc_config/_generate_client_secret");
+            assert_eq!(bearer, "synthetic-access-token");
+            assert_eq!(request, b"{}");
+        }
     }
 
     #[test]
