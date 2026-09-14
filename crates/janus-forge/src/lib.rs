@@ -1198,6 +1198,19 @@ mod tests {
             compatibility.entry(&alias).unwrap().api_variant,
             Some(issuer::ZitadelApiVariant::ManagementV1)
         );
+        let mut api_document = compatibility_document.clone();
+        api_document["connectors"][0]["api_variant"] = serde_json::json!("management-v1-api");
+        let api_catalog =
+            IssuerConnectorCatalog::parse_json(&serde_json::to_vec(&api_document).unwrap())
+                .unwrap();
+        assert_ne!(
+            api_catalog.entry_digest(&alias).unwrap(),
+            compatibility.entry_digest(&alias).unwrap()
+        );
+        assert_ne!(
+            api_catalog.entry_digest(&alias).unwrap(),
+            catalog.entry_digest(&alias).unwrap()
+        );
         let mut invalid_variant = compatibility_document;
         invalid_variant["connectors"][0]["api_variant"] = serde_json::json!("automatic");
         assert!(

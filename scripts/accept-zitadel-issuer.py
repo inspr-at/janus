@@ -7,7 +7,9 @@ credential works, regenerates the application secret, proves the replacement
 works and the first no longer works, then exercises a configured out-of-scope
 alias. Finally it invokes Janus's durable provider invalidation operation,
 which regenerates and discards the new secret, and proves the replacement can
-no longer obtain a token. This proves invalidation of the known credential; it
+no longer authenticate. API application credentials use an explicitly selected
+introspection probe; they do not mint service-account access tokens.
+This proves invalidation of the known credential; it
 does not claim that ZITADEL stores no current secret.
 """
 
@@ -27,6 +29,8 @@ import sys
 import urllib.parse
 
 SCHEMA = "janus.zitadel-issuer-acceptance.v1"
+INTROSPECTION_SCHEMA = "janus.zitadel-issuer-introspection-acceptance.v1"
+PROBE_KINDS = {"client-credentials", "introspection"}
 MAX_CONFIG_BYTES = 64 * 1024
 MAX_SECRET_BYTES = 4096
 MAX_HTTP_BYTES = 64 * 1024
@@ -177,8 +181,12 @@ def load_config(path: Path) -> dict[str, object]:
         config = json.loads(raw)
     except (UnicodeDecodeError, json.JSONDecodeError):
         fail("acceptance config is not valid JSON")
-    if not isinstance(config, dict) or set(config) != REQUIRED_KEYS or config.get("schema") != SCHEMA:
+    if (not isinstance(config, dict) or not REQUIRED_KEYS.issubset(config)
+            or set(config) - REQUIRED_KEYS - {"probe_kind"} or config.get("schema") != SCHEMA):
         fail("acceptance config schema or fields are invalid")
+    if (not isinstance(config.get("probe_kind", "client-credentials"), str)
+            or config.get("probe_kind", "client-credentials") not in PROBE_KINDS):
+        fail("credential probe kind is invalid")
     scope = config.get("scope")
     if not isinstance(scope, dict) or set(scope) != SCOPE_KEYS:
         fail("acceptance scope is invalid")
@@ -211,6 +219,8 @@ def load_config(path: Path) -> dict[str, object]:
         or endpoint.fragment
     ):
         fail("token_endpoint must be an exact HTTPS URL")
+    if config.get("probe_kind") == "introspection" and endpoint.path != "/oauth/v2/introspect":
+        fail("introspection requires its exact endpoint")
     if not isinstance(config["client_id"], str) or not config["client_id"] or len(config["client_id"]) > 256:
         fail("client_id is invalid")
     if not isinstance(config["token_scope"], str) or not config["token_scope"] or len(config["token_scope"]) > 1024:
@@ -505,7 +515,12 @@ def token_probe(config: dict[str, object]) -> bool:
     secret = bytearray(line[len(prefix):])
     try:
         endpoint = urllib.parse.urlsplit(str(config["token_endpoint"]))
-        body = urllib.parse.urlencode({"grant_type": "client_credentials", "scope": config["token_scope"]}).encode()
+        introspection = config.get("probe_kind") == "introspection"
+        # A known inactive token tests API-client authentication without claiming
+        # that an application client can mint service-account access tokens.
+        form = ({"token": "janus-acceptance-known-inactive-token"} if introspection else
+                {"grant_type": "client_credentials", "scope": config["token_scope"]})
+        body = urllib.parse.urlencode(form).encode()
         basic = base64.b64encode(str(config["client_id"]).encode() + b":" + bytes(secret)).decode("ascii")
         connection = http.client.HTTPSConnection(endpoint.hostname, endpoint.port or 443, timeout=30)
         connection.request(
@@ -527,6 +542,10 @@ def token_probe(config: dict[str, object]) -> bool:
             token = json.loads(response_body)
         except (UnicodeDecodeError, json.JSONDecodeError):
             fail("Zitadel token endpoint returned invalid JSON")
+        if introspection:
+            if not isinstance(token, dict) or token.get("active") is not False:
+                fail("introspection must report the known inactive token")
+            return True
         accepted = (
             isinstance(token, dict)
             and token.get("token_type") == "Bearer"
@@ -568,9 +587,7 @@ def run(config_path: Path) -> None:
     invalidation = run_invalidate(config, paths)
     if probe_ciphertext(config_path, config, paths, str(config["replacement_name"])):
         fail("replacement generated credential remained valid after invalidation")
-    write_evidence(
-        paths["evidence_file"],
-        {
+    evidence = {
             "schema": SCHEMA,
             "release_binary_sha256": config["janusd_admin_sha256"],
             "issuer_config_sha256": sha256_file(paths["issuer_config"]),
@@ -588,7 +605,18 @@ def run(config_path: Path) -> None:
             "value_returned": False,
             "initial_shape_sha256": first["shape_sha256"] if first else None,
             "replacement_shape_sha256": second["shape_sha256"] if second else None,
-        },
+        }
+    if config.get("probe_kind") == "introspection":
+        evidence["schema"] = INTROSPECTION_SCHEMA
+        evidence["probe_kind"] = "introspection"
+        # Separate evidence vocabulary: these prove client authentication,
+        # never token issuance or revocation of an already-issued bearer token.
+        for name in list(evidence):
+            if "_token_" in name:
+                evidence[name.replace("_token_", "_credential_")] = evidence.pop(name)
+    write_evidence(
+        paths["evidence_file"],
+        evidence,
     )
     print(
         json.dumps(

@@ -48,6 +48,7 @@ pub enum ZitadelApiVariant {
     #[default]
     ApplicationV2,
     ManagementV1,
+    ManagementV1Api,
 }
 
 /// Exact custom trust anchor selected by the reviewed connector catalog.
@@ -402,6 +403,13 @@ where
                 )),
                 b"{}".to_vec(),
             ),
+            ZitadelApiVariant::ManagementV1Api => (
+                config.endpoint(&format!(
+                    "/management/v1/projects/{}/apps/{}/api_config/_generate_client_secret",
+                    config.project_id, config.application_id
+                )),
+                b"{}".to_vec(),
+            ),
         };
         let response = self
             .transport
@@ -702,10 +710,44 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         let handle = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
             let connection = ureq::rustls::ServerConnection::new(Arc::new(server_config)).unwrap();
             let mut stream = ureq::rustls::StreamOwned::new(connection, stream);
-            let mut request = [0u8; 4096];
-            if std::io::Read::read(&mut stream, &mut request).is_ok() {
+            // Drain the complete request before closing. Headers and body can
+            // arrive in separate TLS records; closing with unread body bytes
+            // can reset the connection and make the positive TLS check flaky.
+            let request_complete = (|| -> std::io::Result<()> {
+                use std::io::{BufRead, Read};
+                let mut reader = std::io::BufReader::new(&mut stream);
+                let mut length = 0usize;
+                let mut header_bytes = 0usize;
+                loop {
+                    let mut line = String::new();
+                    let count = reader.read_line(&mut line)?;
+                    header_bytes += count;
+                    if count == 0 || header_bytes > 8192 {
+                        return Err(std::io::ErrorKind::InvalidData.into());
+                    }
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some((name, value)) = line.split_once(':') {
+                        if name.eq_ignore_ascii_case("content-length") {
+                            length = value
+                                .trim()
+                                .parse()
+                                .map_err(|_| std::io::ErrorKind::InvalidData)?;
+                        }
+                    }
+                }
+                if length > 4096 {
+                    return Err(std::io::ErrorKind::InvalidData.into());
+                }
+                reader.read_exact(&mut vec![0; length])
+            })();
+            if request_complete.is_ok() {
                 let body = br#"{"access_token":"fixture","token_type":"Bearer","expires_in":300}"#;
                 let response = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -788,22 +830,27 @@ mod tests {
 
     #[test]
     fn explicit_management_api_keeps_exact_scope_for_create_and_invalidation() {
-        let config =
-            ZitadelOidcClientConfig::new("https://identity.example.test", "111", "222", 10)
-                .unwrap()
-                .with_api_variant(ZitadelApiVariant::ManagementV1);
-        let connector = ZitadelOidcClientConnector::new(FakeTransport::default(), FixedClock);
-        let value = connector.resolve(&config, fixture_profile().0).unwrap();
-        assert_eq!(value.expose_bytes(), b"synthetic-generated-value");
-        for invalidation in [false, true] {
-            if invalidation {
-                connector.invalidate(&config, fixture_profile().0).unwrap();
+        for (variant, application_kind) in [
+            (ZitadelApiVariant::ManagementV1, "oidc_config"),
+            (ZitadelApiVariant::ManagementV1Api, "api_config"),
+        ] {
+            let config =
+                ZitadelOidcClientConfig::new("https://identity.example.test", "111", "222", 10)
+                    .unwrap()
+                    .with_api_variant(variant);
+            let connector = ZitadelOidcClientConnector::new(FakeTransport::default(), FixedClock);
+            let value = connector.resolve(&config, fixture_profile().0).unwrap();
+            assert_eq!(value.expose_bytes(), b"synthetic-generated-value");
+            for invalidation in [false, true] {
+                if invalidation {
+                    connector.invalidate(&config, fixture_profile().0).unwrap();
+                }
+                let (endpoint, bearer, request) =
+                    connector.transport.generate.lock().unwrap().take().unwrap();
+                assert_eq!(endpoint, format!("https://identity.example.test/management/v1/projects/111/apps/222/{application_kind}/_generate_client_secret"));
+                assert_eq!(bearer, "synthetic-access-token");
+                assert_eq!(request, b"{}");
             }
-            let (endpoint, bearer, request) =
-                connector.transport.generate.lock().unwrap().take().unwrap();
-            assert_eq!(endpoint, "https://identity.example.test/management/v1/projects/111/apps/222/oidc_config/_generate_client_secret");
-            assert_eq!(bearer, "synthetic-access-token");
-            assert_eq!(request, b"{}");
         }
     }
 
