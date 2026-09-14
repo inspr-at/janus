@@ -25,6 +25,7 @@ sha2 = "0.10"
 ureq = { version = "=2.12.1", default-features = false, features = ["tls"] }
 url = "2"
 wait-timeout = "0.2"
+webpki-roots = "=0.26.11"
 tokio = { version = "1", features = ["rt"] }
 zeroize = "1"
 

@@ -1175,6 +1175,22 @@ mod tests {
             catalog.entry(&alias).unwrap().credential_ref.as_deref(),
             Some("janus-zitadel-machine")
         );
+        assert!(serde_json::to_value(catalog.entry(&alias).unwrap())
+            .unwrap()
+            .get("ca_file")
+            .is_none());
+        let pinned = IssuerConnectorCatalog::parse_json(
+            br#"{"schema":"janus.issuer-connectors.v1","connectors":[{"kind":"zitadel-oidc-client","alias":"issuer:zitadel-oidc-client:AGM Platform/zulip","credential_ref":"janus-zitadel-machine","origin":"https://identity.example.test","project_id":"1","application_id":"2","timeout_seconds":10,"ca_file":"/run/janus/issuer-ca.pem","ca_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            pinned.entry(&alias).unwrap().ca_file.as_deref(),
+            Some("/run/janus/issuer-ca.pem")
+        );
+        assert!(IssuerConnectorCatalog::parse_json(
+            br#"{"schema":"janus.issuer-connectors.v1","connectors":[{"kind":"zitadel-oidc-client","alias":"issuer:zitadel-oidc-client:AGM Platform/zulip","credential_ref":"janus-zitadel-machine","origin":"https://identity.example.test","project_id":"1","application_id":"2","timeout_seconds":10,"ca_file":"/run/janus/issuer-ca.pem"}]}"#,
+        )
+        .is_err());
         assert!(IssuerConnectorCatalog::parse_json(
             br#"{"schema":"janus.issuer-connectors.v1","connectors":[{"kind":"zitadel-oidc-client","alias":"issuer:zitadel-oidc-client:AGM Platform/zulip","credential_ref":"a","origin":"https://identity.example.test","project_id":"1","application_id":"2","timeout_seconds":10},{"kind":"zitadel-oidc-client","alias":"issuer:zitadel-oidc-client:AGM Platform/zulip","credential_ref":"b","origin":"https://identity.example.test","project_id":"1","application_id":"2","timeout_seconds":10}]}"#,
         )

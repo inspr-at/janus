@@ -26,6 +26,14 @@ re-issuance after interruption; recovery requires an explicit reviewed action.
 The final provider operation remains create-only and never overwrites an
 existing ciphertext.
 
+A ZITADEL connector may add one private PKI trust anchor with the paired
+`ca_file` and `ca_sha256` fields. Janus accepts only an absolute file path and
+verifies the certificate bytes against the configured SHA-256 before each
+provider request. The pinned certificate extends the normal public root set;
+omitting both fields preserves the public trust configuration. Partial pairs,
+changed certificate bytes, invalid PEM, and TLS chains signed by another CA
+fail closed. This option does not disable certificate name or time checks.
+
 For a configured ZITADEL alias, `janusd-admin forge invalidate-issuer` provides
 the separate provider cleanup boundary. It first reserves an operator-supplied
 idempotency reference in a private state directory, regenerates the exact

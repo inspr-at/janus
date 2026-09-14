@@ -1176,6 +1176,7 @@ dependencies = [
  "ureq",
  "url",
  "wait-timeout",
+ "webpki-roots 0.26.11",
  "zeroize",
 ]
 

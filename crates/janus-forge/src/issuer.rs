@@ -158,6 +158,10 @@ pub struct IssuerConnectorEntry {
     pub project_id: Option<String>,
     pub application_id: Option<String>,
     pub timeout_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ca_file: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ca_sha256: Option<String>,
     pub executable: Option<String>,
     pub executable_sha256: Option<String>,
     pub workdir: Option<String>,
@@ -206,7 +210,9 @@ impl IssuerConnectorCatalog {
             let kind = IssuerKind::parse(&entry.kind)?;
             let zitadel_fields_present = entry.origin.is_some()
                 || entry.project_id.is_some()
-                || entry.application_id.is_some();
+                || entry.application_id.is_some()
+                || entry.ca_file.is_some()
+                || entry.ca_sha256.is_some();
             let tofu_fields_present = entry.executable.is_some()
                 || entry.executable_sha256.is_some()
                 || entry.workdir.is_some()
@@ -246,7 +252,7 @@ impl IssuerConnectorCatalog {
             }
             match kind {
                 IssuerKind::ZitadelOidcClient => {
-                    ZitadelOidcClientConfig::new(
+                    ZitadelOidcClientConfig::new_with_optional_ca(
                         entry.origin.as_deref().expect("validated origin"),
                         entry.project_id.as_deref().expect("validated project id"),
                         entry
@@ -254,6 +260,8 @@ impl IssuerConnectorCatalog {
                             .as_deref()
                             .expect("validated application id"),
                         entry.timeout_seconds.expect("validated timeout"),
+                        entry.ca_file.as_deref(),
+                        entry.ca_sha256.as_deref(),
                     )?;
                 }
                 IssuerKind::TofuOutput => {
@@ -401,7 +409,7 @@ impl IssuerResolver for ConfiguredIssuerResolver {
             })?;
         let value = match alias.kind() {
             IssuerKind::ZitadelOidcClient => {
-                let config = ZitadelOidcClientConfig::new(
+                let config = ZitadelOidcClientConfig::new_with_optional_ca(
                     entry.origin.as_deref().expect("validated origin"),
                     entry.project_id.as_deref().expect("validated project id"),
                     entry
@@ -409,6 +417,8 @@ impl IssuerResolver for ConfiguredIssuerResolver {
                         .as_deref()
                         .expect("validated application id"),
                     entry.timeout_seconds.expect("validated timeout"),
+                    entry.ca_file.as_deref(),
+                    entry.ca_sha256.as_deref(),
                 )?;
                 let credential_ref = entry
                     .credential_ref
@@ -416,7 +426,10 @@ impl IssuerResolver for ConfiguredIssuerResolver {
                     .expect("validated credential reference")
                     .to_string();
                 let profile = credential_store.load(&credential_ref).await?;
-                let connector = ZitadelOidcClientConnector::default();
+                let connector = ZitadelOidcClientConnector::new(
+                    UreqZitadelTransport::new(config.custom_ca().cloned()),
+                    SystemIssuerClock,
+                );
                 tokio::task::spawn_blocking(move || connector.resolve(&config, profile))
                     .await
                     .map_err(|_| JanusError::StoreUnavailable {
@@ -476,7 +489,7 @@ impl IssuerInvalidator for ConfiguredIssuerResolver {
                 name: alias.as_str().to_string(),
             })?;
         let connector_config_digest = self.catalog.entry_digest(alias)?;
-        let config = ZitadelOidcClientConfig::new(
+        let config = ZitadelOidcClientConfig::new_with_optional_ca(
             entry.origin.as_deref().expect("validated origin"),
             entry.project_id.as_deref().expect("validated project id"),
             entry
@@ -484,6 +497,8 @@ impl IssuerInvalidator for ConfiguredIssuerResolver {
                 .as_deref()
                 .expect("validated application id"),
             entry.timeout_seconds.expect("validated timeout"),
+            entry.ca_file.as_deref(),
+            entry.ca_sha256.as_deref(),
         )?;
         let credential_ref = entry
             .credential_ref
@@ -491,7 +506,10 @@ impl IssuerInvalidator for ConfiguredIssuerResolver {
             .expect("validated credential reference")
             .to_string();
         let profile = credential_store.load(&credential_ref).await?;
-        let connector = ZitadelOidcClientConnector::default();
+        let connector = ZitadelOidcClientConnector::new(
+            UreqZitadelTransport::new(config.custom_ca().cloned()),
+            SystemIssuerClock,
+        );
         tokio::task::spawn_blocking(move || connector.invalidate(&config, profile))
             .await
             .map_err(|_| JanusError::StoreUnavailable {
