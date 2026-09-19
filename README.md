@@ -775,6 +775,9 @@ decides whether to merge; passing checks never grants an agent merge authority.
 
 The required `dco` check validates every commit introduced by a PR, including
 merge commits on the contributor branch. An empty or incomplete range fails.
+Local checks require Python 3 and full Git history; deepen a shallow checkout
+with `git fetch --unshallow` first. When merging upstream updates into your
+branch, use `git merge --signoff upstream/main` after fetching upstream.
 It reads real Git trailers, so a sign-off quoted in prose does not count.
 Missing sign-offs must be supplied by the contributor, not invented by a reviewer
 or agent. Do not rewrite shared history to repair them without explicit agreement.

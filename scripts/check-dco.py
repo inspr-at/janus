@@ -40,7 +40,7 @@ def check(base, head):
         expected = {f"{name} <{email}>"}
         if (name, email) == DEPENDABOT_AUTHOR:
             expected.add(DEPENDABOT_SIGNOFF)
-        trailers = git("interpret-trailers", "--parse", input_text=message)
+        trailers = git("interpret-trailers", "--parse", "--no-divider", input_text=message)
         signoffs = {
             value.strip()
             for line in trailers.splitlines()

@@ -31,7 +31,7 @@ class DCOTests(unittest.TestCase):
         self.git("commit", "-q", "--allow-empty", "--author", author, "-m", message)
 
     def result(self, base=None, head="HEAD"):
-        return subprocess.run(["python3", str(CHECKER), base or self.base, head],
+        return subprocess.run(["python3", "-I", str(CHECKER), base or self.base, head],
                               cwd=self.cwd, env=self.env, text=True, capture_output=True)
 
     def test_signed_contribution_ignores_unsigned_history(self):
@@ -52,6 +52,26 @@ class DCOTests(unittest.TestCase):
     def test_signoff_in_prose_is_not_a_trailer(self):
         self.commit("Change\n\nSigned-off-by: " + AUTHOR + "\n\nThis is prose after the example.")
         self.assertEqual(self.result().returncode, 1)
+
+    def test_signoff_after_divider_is_a_valid_trailer(self):
+        self.git("commit", "-q", "--allow-empty", "--signoff", "-m",
+                 "Change\n\n---\nAdditional explanation.")
+        self.assertEqual(self.result().returncode, 0)
+
+    def test_signoff_before_divider_and_prose_is_not_a_trailer(self):
+        self.commit("Change\n\nSigned-off-by: " + AUTHOR + "\n\n---\nAdditional explanation.")
+        self.assertEqual(self.result().returncode, 1)
+
+    def test_repository_module_cannot_shadow_standard_library(self):
+        self.commit("Unsigned change")
+        scripts = Path(self.cwd) / "scripts"
+        scripts.mkdir()
+        checker = scripts / "check-dco.py"
+        checker.write_bytes(CHECKER.read_bytes())
+        (scripts / "subprocess.py").write_text("raise SystemExit(0)\n")
+        result = subprocess.run(["python3", "-I", str(checker), self.base, "HEAD"],
+                                cwd=self.cwd, env=self.env, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 1)
 
     def test_multiple_signoffs_preserve_the_author(self):
         self.commit("Change\n\nSigned-off-by: " + AUTHOR + "\nSigned-off-by: Other <other@example.test>")
@@ -80,8 +100,9 @@ class DCOTests(unittest.TestCase):
         self.commit("Change\n\nSigned-off-by: " + AUTHOR)
         clone = tempfile.TemporaryDirectory()
         self.addCleanup(clone.cleanup)
-        self.git("clone", "-q", "--no-local", "--depth", "1", self.cwd, clone.name)
+        self.git("clone", "-q", "--no-local", "--depth", "2", self.cwd, clone.name)
         self.cwd = clone.name
+        self.git("cat-file", "-e", self.base + "^{commit}")
         self.assertEqual(self.result().returncode, 2)
 
     def test_indented_squash_history_is_not_a_final_signoff(self):
