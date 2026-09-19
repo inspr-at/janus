@@ -345,7 +345,9 @@ The container smoke builds the engine image and requires a working Docker CLI
 and daemon. It verifies the scratch filesystem (no runtime package database or
 shell), exact numeric non-root identity, ten installed static binaries,
 read-only/capability-free/no-new-privileges/network-isolated execution, and
-value-free Warden MCP behavior. The security gate adds pinned Cargo Audit,
+value-free Warden MCP behavior. The shared Rustls dependency is pinned to
+0.23.45 or later to include the TLS handshake fix for RUSTSEC-2026-0285.
+The security gate adds pinned Cargo Audit,
 Gitleaks, staticcheck, govulncheck, immutable-base verification, and Trivy. The
 gate probes the actual local scanner invocations and fails before scanning when
 any binary version differs from the reviewed policy. CI repeats that check on
