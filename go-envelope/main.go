@@ -855,7 +855,8 @@ func (app *App) routes() http.Handler {
 		}
 		mux.HandleFunc(route.pattern, handler)
 	}
-	return app.securityHeaders(app.requestIDs(app.stripPublicBase(app.rateLimit(app.limitRequestBody(app.safeHTTPBoundary(app.flowPageWrap(mux)))))))
+	guarded := app.flowPageWrap(app.flowViewerBoundary(app.safeHTTPBoundary(mux)))
+	return app.securityHeaders(app.requestIDs(app.stripPublicBase(app.rateLimit(app.limitRequestBody(guarded)))))
 }
 
 func (app *App) safeHTTPBoundary(next http.Handler) http.Handler {

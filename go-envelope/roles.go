@@ -8,6 +8,8 @@ import (
 )
 
 const (
+	// Browser-only role: it grants no canonical engine permission or viewer baseline.
+	RoleFlowViewer      = "flow_viewer"
 	RoleViewer          = "viewer"
 	RoleOperator        = "operator"
 	RoleOwner           = "owner"
@@ -24,6 +26,8 @@ const (
 )
 
 type RolePolicy struct {
+	FlowViewerSubjects      map[string]bool
+	FlowViewerGroups        map[string]bool
 	ViewerSubjects          map[string]bool
 	OwnerSubjects           map[string]bool
 	ApproverSubjects        map[string]bool
@@ -267,6 +271,8 @@ type SessionRoleGateSignal struct {
 
 func LoadRolePolicyFromEnv() RolePolicy {
 	return RolePolicy{
+		FlowViewerSubjects:      splitSet(envDefault("JANUS_FLOW_VIEWER_SUBJECTS", "")),
+		FlowViewerGroups:        splitSet(envDefault("JANUS_FLOW_VIEWER_GROUPS", "")),
 		ViewerSubjects:          splitSet(envDefault("JANUS_VIEWER_SUBJECTS", "")),
 		OwnerSubjects:           splitSet(envDefault("JANUS_OWNER_SUBJECTS", "")),
 		ApproverSubjects:        splitSet(envDefault("JANUS_APPROVER_SUBJECTS", "")),
@@ -290,7 +296,7 @@ func LoadRolePolicyFromEnv() RolePolicy {
 }
 
 func (p RolePolicy) Configured() bool {
-	return roleSubjectBindingCount(p)+roleGroupBindingCount(p) > 0
+	return roleSubjectBindingCount(p)+roleGroupBindingCount(p)+len(p.FlowViewerSubjects)+len(p.FlowViewerGroups) > 0
 }
 
 func DeriveRoles(subject, email string, claimValues []string, policy RolePolicy) []string {
@@ -312,6 +318,8 @@ func DeriveRolesChecked(subject, email string, claimValues []string, policy Role
 	}
 
 	roles := map[string]bool{}
+	// Restricted subject bindings use only the immutable subject, never email.
+	flowViewer := policy.FlowViewerSubjects[normalizeRoleToken(subject)]
 	identityKeys := []string{normalizeRoleToken(subject)}
 	if emailKey := normalizeRoleToken(email); emailKey != "" && emailKey != identityKeys[0] {
 		identityKeys = append(identityKeys, emailKey)
@@ -336,6 +344,7 @@ func DeriveRolesChecked(subject, email string, claimValues []string, policy Role
 			return nil, fmt.Errorf("duplicate role claim")
 		}
 		seenClaims[key] = true
+		flowViewer = flowViewer || policy.FlowViewerGroups[key]
 		matches := matchingRoles(key, policy, true)
 		if ambiguousRoleMatches(matches) {
 			return nil, fmt.Errorf("ambiguous exact group role binding")
@@ -343,6 +352,12 @@ func DeriveRolesChecked(subject, email string, claimValues []string, policy Role
 		for _, role := range matches {
 			roles[role] = true
 		}
+	}
+	if flowViewer {
+		if len(roles) > 0 {
+			return nil, fmt.Errorf("restricted Flow role cannot be combined with core roles")
+		}
+		return []string{RoleFlowViewer}, nil
 	}
 	if len(roles) > 0 {
 		roles[RoleViewer] = true

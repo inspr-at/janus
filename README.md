@@ -149,6 +149,19 @@ with the API key. Optional `paimos_browser_url` is the browser navigation
 address and may include a native Paimos prefix independent of that
 upstream.
 
+For a sandbox-only browser reviewer, map an exact immutable subject with
+`JANUS_FLOW_VIEWER_SUBJECTS`, or a dedicated OIDC project role claim with
+`JANUS_FLOW_VIEWER_GROUPS` (for example `janus:flow_viewer`). The browser-only
+`flow_viewer` role does not inherit `viewer` or any secret-engine permission;
+combining it with another Janus role is rejected. Configure that same subject
+in exactly the permitted `JANUS_FLOW_CONFIG_FILE` project binding. Missing,
+disabled, ambiguous or mismatched bindings fail closed. The account can open
+the Flow landing page, its read-only project projection and embedded Flow
+assets, plus ordinary authentication/logout routes. Catalog, general dashboard,
+posture, audit, administration and all other mutation routes remain denied,
+including new routes added later. The existing viewer role is not sandbox
+scoped and must not be used as a substitute.
+
 Janus has no local-password route. Browser sign-in uses the OIDC authorization
 code flow with a nonce and S256 PKCE. Break-glass recovery remains out of band
 and does not create a second human login surface.
