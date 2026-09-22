@@ -11,6 +11,7 @@ pub mod accountability;
 pub mod audit;
 pub mod break_glass;
 pub mod broker;
+mod calendar_version;
 pub mod consumer;
 pub mod delegation;
 pub mod duty;
@@ -28,6 +29,13 @@ pub mod principal;
 pub mod recovery;
 pub mod refs;
 pub mod release;
+/// Canonical product coordinate; commit provenance remains separate.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+/// Explicit version grammar used by this engine release.
+pub const VERSION_SCHEME: &str = env!("JANUS_VERSION_SCHEME");
+/// Monotonic ordinal within the stable release channel.
+pub const RELEASE_SEQUENCE: &str = env!("JANUS_RELEASE_SEQUENCE");
+
 pub mod retention;
 pub mod roles;
 pub mod rotation;

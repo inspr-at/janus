@@ -5,7 +5,7 @@ const port = 18082;
 
 export default defineConfig({
   testDir: ".",
-  testMatch: "managed-secret-ux.spec.mjs",
+  testMatch: ["managed-secret-ux.spec.mjs", "calendar-version.spec.mjs", "flow-viewer.spec.mjs"],
   fullyParallel: false,
   forbidOnly: true,
   retries: process.env.CI ? 1 : 0,

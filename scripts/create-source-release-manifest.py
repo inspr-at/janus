@@ -8,6 +8,7 @@ import json
 import pathlib
 import re
 import sys
+from calendar_version import metadata_for_tag
 
 
 def main() -> int:
@@ -35,6 +36,11 @@ def main() -> int:
         "image": args.image,
         "image_digest": args.image_digest,
     }
+    try:
+        manifest.update(metadata_for_tag(args.tag))
+    except ValueError as error:
+        print(str(error), file=sys.stderr)
+        return 1
     args.output.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
     return 0
 

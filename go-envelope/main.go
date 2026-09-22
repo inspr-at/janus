@@ -613,6 +613,11 @@ type DescriptorFocus struct {
 }
 
 func main() {
+	if len(os.Args) == 2 && os.Args[1] == "--version" {
+		receipt := BuildProvenanceFor()
+		fmt.Printf("janus %s version_scheme=%s release_channel=%s release_sequence=%d commit=%s\n", receipt.Version, receipt.VersionScheme, receipt.ReleaseChannel, receipt.ReleaseSequence, receipt.Commit)
+		return
+	}
 	cfg, err := loadConfig()
 	if err != nil {
 		log.Fatalf("config error: %v", err)
@@ -855,7 +860,8 @@ func (app *App) routes() http.Handler {
 		}
 		mux.HandleFunc(route.pattern, handler)
 	}
-	return app.securityHeaders(app.requestIDs(app.stripPublicBase(app.rateLimit(app.limitRequestBody(app.safeHTTPBoundary(app.flowPageWrap(mux)))))))
+	guarded := app.calendarPageWrap(app.flowPageWrap(app.flowViewerBoundary(app.safeHTTPBoundary(mux))))
+	return app.securityHeaders(app.requestIDs(app.stripPublicBase(app.rateLimit(app.limitRequestBody(guarded)))))
 }
 
 func (app *App) safeHTTPBoundary(next http.Handler) http.Handler {
@@ -962,6 +968,8 @@ func (app *App) securityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("Expires", "0")
 		w.Header().Set("Origin-Agent-Cluster", "?1")
 		w.Header().Set("Pragma", "no-cache")
+		w.Header().Set("X-Janus-Version", canonicalVersion())
+		w.Header().Set("X-Janus-Version-Scheme", canonicalScheme())
 		w.Header().Set("X-Janus-Build-Commit", shortCommit(buildCommit))
 		w.Header().Set("X-Janus-Build-Time", cleanBuildField(buildTime))
 		w.Header().Set("Referrer-Policy", "no-referrer")
@@ -3564,6 +3572,7 @@ func templatesFor(publicBasePath string) *template.Template {
 		return joined
 	}
 	t := template.Must(template.New("janus").Funcs(template.FuncMap{
+		"calendarVersion":    calendarControl,
 		"buildCommitShort":   func() string { return shortCommit(buildCommit) },
 		"since":              humanSince,
 		"permitActionLabel":  permitActionLabel,

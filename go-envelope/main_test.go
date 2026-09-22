@@ -3345,7 +3345,11 @@ func assertCoreSecurityHeaders(t *testing.T, name string, out *httptest.Response
 		}
 	}
 	csp := headers.Get("Content-Security-Policy")
-	for _, want := range []string{"default-src 'self'", "script-src 'none'", "object-src 'none'", "worker-src 'none'", "base-uri 'self'", "frame-ancestors 'none'", "form-action 'self'", "connect-src 'self'", "font-src 'self'", "img-src 'self' data:", "manifest-src 'self'", "style-src 'self' 'nonce-", "upgrade-insecure-requests"} {
+	scriptPolicy := "script-src 'none'"
+	if strings.Contains(out.Body.String(), "data-janus-version") {
+		scriptPolicy = "script-src 'nonce-"
+	}
+	for _, want := range []string{"default-src 'self'", scriptPolicy, "object-src 'none'", "worker-src 'none'", "base-uri 'self'", "frame-ancestors 'none'", "form-action 'self'", "connect-src 'self'", "font-src 'self'", "img-src 'self' data:", "manifest-src 'self'", "style-src 'self' 'nonce-", "upgrade-insecure-requests"} {
 		if !strings.Contains(csp, want) {
 			t.Fatalf("%s: CSP should include %q: %s", name, want, csp)
 		}

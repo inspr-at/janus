@@ -94,6 +94,10 @@ func rolesForPermission(permission string) []string {
 }
 
 func validateSessionRoles(roles []string) bool {
+	// This envelope-only role is deliberately outside the engine role matrix.
+	if len(roles) == 1 && roles[0] == RoleFlowViewer {
+		return true
+	}
 	if len(roles) == 0 {
 		return false
 	}

@@ -4,6 +4,7 @@ on:
     branches: [main]
     paths:
       - 'crates/**'
+      - 'go-envelope/internal/versioninfo/release.json'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
@@ -74,6 +75,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           components: rustfmt, clippy
+      - name: calendar source and migration contracts
+        run: |
+          python3 scripts/check-calendar-release.py
+          python3 scripts/test-calendar-version.py
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: install pinned security tools
         run: |

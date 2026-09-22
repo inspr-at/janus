@@ -1657,7 +1657,7 @@ mod tests {
             health.release_policy_id.as_deref(),
             Some("janus-engine-release-v1")
         );
-        assert_eq!(health.release_policy_version, Some(3));
+        assert_eq!(health.release_policy_version, Some(4));
         assert_eq!(health.release_channel.as_deref(), Some("stable"));
         assert!(health
             .release_artifact_id

@@ -81,8 +81,8 @@ func TestDisabledFlowPreservesExistingDashboard(t *testing.T) {
 		t.Fatal("disabled configuration must not wrap existing pages")
 	}
 	csp := out.Header().Get("Content-Security-Policy")
-	if !strings.Contains(csp, "script-src 'none'") {
-		t.Fatalf("disabled CSP changed: %s", csp)
+	if !strings.Contains(csp, "script-src 'nonce-") || !strings.Contains(body, "calendar-version.mjs") {
+		t.Fatalf("dashboard must enable only the nonce-bound version module: %s", csp)
 	}
 }
 

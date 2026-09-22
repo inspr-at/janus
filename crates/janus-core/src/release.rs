@@ -4,6 +4,7 @@
 //! Runtime consumes the resulting policy-bound receipt and refuses to reuse it
 //! across channels, artifacts, policy revisions, or product modes.
 
+use crate::calendar_version::valid_calendar;
 use std::collections::BTreeSet;
 
 use serde::Deserialize;
@@ -17,6 +18,8 @@ const POLICY_SCHEMA_VERSION: u8 = 1;
 const RECEIPT_SCHEMA_VERSION: u8 = 1;
 const GO_TAG_PATTERN: &str = r"go-envelope-v[1-9][0-9]*\.[0-9]+";
 const RUST_TAG_PATTERN: &str = r"rust-engine-v[0-9]+\.[0-9]+\.[0-9]+";
+const CALENDAR_GO_PATTERN: &str = r"go-envelope-v([1-9][0-9]*\.[0-9]+|[1-9][0-9]{11}\.0\.0)";
+const CALENDAR_RUST_PATTERN: &str = r"rust-engine-v([0-9]+\.[0-9]+\.[0-9]+|[1-9][0-9]{11}\.0\.0)";
 const MAX_SAFE_FIELD_BYTES: usize = 512;
 
 /// Runtime product mode relevant to release-channel enforcement.
@@ -187,6 +190,17 @@ struct AdmittedArtifact {
     tag: String,
     digest: String,
     development: bool,
+    #[serde(default)]
+    release: Option<ReleaseCoordinate>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReleaseCoordinate {
+    version_scheme: String,
+    version: String,
+    release_channel: String,
+    release_sequence: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
@@ -362,6 +376,7 @@ impl ReleaseAdmission {
             &channel.tag_prefix,
             &channel.tag_pattern,
             &receipt.artifact.tag,
+            receipt.artifact.release.as_ref(),
         ) {
             return base.deny("release_channel_denied");
         }
@@ -565,23 +580,62 @@ fn full_commit(value: &str) -> bool {
 fn valid_tag_contract(prefix: &str, pattern: &str) -> bool {
     matches!(
         (prefix, pattern),
-        ("go-envelope-v", GO_TAG_PATTERN) | ("rust-engine-v", RUST_TAG_PATTERN)
+        ("go-envelope-v", GO_TAG_PATTERN | CALENDAR_GO_PATTERN)
+            | ("rust-engine-v", RUST_TAG_PATTERN | CALENDAR_RUST_PATTERN)
     )
 }
 
-fn valid_release_tag(prefix: &str, pattern: &str, tag: &str) -> bool {
+fn valid_release_tag(
+    prefix: &str,
+    pattern: &str,
+    tag: &str,
+    release: Option<&ReleaseCoordinate>,
+) -> bool {
     let Some(version) = tag.strip_prefix(prefix) else {
         return false;
     };
+    let calendar_policy = matches!(pattern, CALENDAR_GO_PATTERN | CALENDAR_RUST_PATTERN);
+    if let Some(release) = release {
+        let expected_channel = if prefix == "go-envelope-v" {
+            "envelope-stable"
+        } else {
+            "stable"
+        };
+        return calendar_policy
+            && release.version_scheme == "inspr-calendar-v2"
+            && release.version == version
+            && release.release_channel == expected_channel
+            && release.release_sequence >= 1
+            && valid_calendar(version)
+            && version >= env!("JANUS_FIRST_CALENDAR_VERSION")
+            && ((version == env!("JANUS_FIRST_CALENDAR_VERSION"))
+                == (release.release_sequence == 1));
+    }
+    // Historical receipts deliberately retain their old schema and grammar.
+    // The new policy bounds that compatibility window by the migration anchor;
+    // a calendar-looking string without its declared scheme never enters it.
     let components = version.split('.').collect::<Vec<_>>();
-    let valid_number =
-        |value: &str| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit());
+    let valid_number = |value: &str| !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit());
     match (prefix, pattern, components.as_slice()) {
-        ("go-envelope-v", GO_TAG_PATTERN, [major, minor]) => {
-            valid_number(major) && !major.starts_with('0') && valid_number(minor)
+        ("go-envelope-v", GO_TAG_PATTERN | CALENDAR_GO_PATTERN, [major, minor]) => {
+            let valid = valid_number(major) && !major.starts_with('0') && valid_number(minor);
+            valid
+                && (!calendar_policy
+                    || (major.parse::<u64>().ok() == Some(1)
+                        && minor.parse::<u64>().is_ok_and(|v| v <= 185)))
         }
-        ("rust-engine-v", RUST_TAG_PATTERN, [major, minor, patch]) => {
-            valid_number(major) && valid_number(minor) && valid_number(patch)
+        ("rust-engine-v", RUST_TAG_PATTERN | CALENDAR_RUST_PATTERN, [major, minor, patch]) => {
+            let valid = valid_number(major) && valid_number(minor) && valid_number(patch);
+            valid
+                && (!calendar_policy
+                    || match (
+                        major.parse::<u64>(),
+                        minor.parse::<u64>(),
+                        patch.parse::<u64>(),
+                    ) {
+                        (Ok(a), Ok(b), Ok(c)) => (a, b, c) <= (0, 1, 44),
+                        _ => false,
+                    })
         }
         _ => false,
     }
@@ -929,5 +983,113 @@ mod tests {
             .reason_code(),
             "release_development_artifact"
         );
+    }
+}
+
+#[cfg(test)]
+mod calendar_tests {
+    use super::*;
+    #[test]
+    fn declared_calendar_receipt_round_trips_through_admission() {
+        let policy = ReleaseChannelPolicy::parse_json(include_str!(
+            "../../../config/release-channels/v1.json"
+        ))
+        .unwrap();
+        let mut value: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../fixtures/release-admission/trusted.json"
+        ))
+        .unwrap();
+        let tag = "rust-engine-v260922094507.0.0";
+        value["artifact"]["tag"] = tag.into();
+        value["artifact"]["release"] = serde_json::json!({"version_scheme":"inspr-calendar-v2", "version":"260922094507.0.0", "release_channel":"stable", "release_sequence":1});
+        value["signature"]["identity"] =
+            format!("https://github.com/inspr-at/janus/.github/workflows/rust.yml@refs/tags/{tag}")
+                .into();
+        value["provenance"]["source_ref"] = format!("refs/tags/{tag}").into();
+        let receipt = ReleaseAdmissionReceipt::parse_json(&value.to_string()).unwrap();
+        let digest = receipt.artifact.digest.clone();
+        assert_eq!(
+            ReleaseAdmission::evaluate(&policy, &receipt, ProductMode::Enterprise, Some(&digest))
+                .decision(),
+            ReleaseAdmissionDecision::Trusted
+        );
+        value["artifact"].as_object_mut().unwrap().remove("release");
+        let missing = ReleaseAdmissionReceipt::parse_json(&value.to_string()).unwrap();
+        assert_eq!(
+            ReleaseAdmission::evaluate(&policy, &missing, ProductMode::Enterprise, Some(&digest))
+                .reason_code(),
+            "release_channel_denied"
+        );
+    }
+
+    #[test]
+    fn calendar_dates_are_exact_utc_coordinates() {
+        for version in ["260922094507.0.0", "280229235959.0.0", "991231235959.0.0"] {
+            assert!(valid_calendar(version));
+        }
+        for version in [
+            "26.09.22",
+            "0.1.44",
+            "260229120000.0.0",
+            "260431120000.0.0",
+            "260922240000.0.0",
+            "260922126000.0.0",
+            "260922125960.0.0",
+            "090922120000.0.0",
+            "260922094507.0.1",
+            "260922094507.0.0-rc1",
+            "260922094507.0.0+sha",
+        ] {
+            assert!(!valid_calendar(version), "{version}");
+        }
+    }
+    #[test]
+    fn calendar_admission_requires_explicit_scheme_and_preserves_legacy_rollback() {
+        for (prefix, pattern, channel, legacy) in [
+            (
+                "go-envelope-v",
+                CALENDAR_GO_PATTERN,
+                "envelope-stable",
+                "1.185",
+            ),
+            ("rust-engine-v", CALENDAR_RUST_PATTERN, "stable", "0.1.44"),
+        ] {
+            assert!(valid_tag_contract(prefix, pattern));
+            assert!(valid_release_tag(
+                prefix,
+                pattern,
+                &format!("{prefix}{legacy}"),
+                None
+            ));
+            let version = "260922094507.0.0";
+            let tag = format!("{prefix}{version}");
+            let mut release = ReleaseCoordinate {
+                version_scheme: "inspr-calendar-v2".into(),
+                version: version.into(),
+                release_channel: channel.into(),
+                release_sequence: 1,
+            };
+            assert!(valid_release_tag(prefix, pattern, &tag, Some(&release)));
+            assert!(!valid_release_tag(prefix, pattern, &tag, None));
+            release.version_scheme = "legacy".into();
+            assert!(!valid_release_tag(prefix, pattern, &tag, Some(&release)));
+            release.version_scheme = "unknown".into();
+            assert!(!valid_release_tag(prefix, pattern, &tag, Some(&release)));
+            release.version_scheme = "inspr-calendar-v2".into();
+            release.release_sequence = 2;
+            assert!(!valid_release_tag(prefix, pattern, &tag, Some(&release)));
+        }
+        assert!(valid_release_tag(
+            "rust-engine-v",
+            RUST_TAG_PATTERN,
+            "rust-engine-v0.1.44",
+            None
+        ));
+        assert!(valid_release_tag(
+            "go-envelope-v",
+            GO_TAG_PATTERN,
+            "go-envelope-v1.185",
+            None
+        ));
     }
 }
