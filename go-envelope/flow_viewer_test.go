@@ -69,6 +69,13 @@ func TestFlowViewerReadsOnlyBoundProjectWithoutCatalog(t *testing.T) {
 		if path == "/" && !strings.Contains(w.Body.String(), `action="/logout"`) {
 			t.Fatal("missing ordinary sign-out control")
 		}
+		wantReferrer := "no-referrer"
+		if path == "/" {
+			wantReferrer = "origin"
+		}
+		if w.Header().Get("Referrer-Policy") != wantReferrer {
+			t.Fatalf("%s: unexpected referrer policy", path)
+		}
 		for _, forbidden := range []string{"Janus Zitadel application", "csb1 age identity", "zitadel-janus-oidc", "secrets/csb1-"} {
 			if strings.Contains(w.Body.String(), forbidden) {
 				t.Fatalf("catalog in %s", path)

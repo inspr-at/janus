@@ -374,6 +374,8 @@ type managedBrowserAuthorization struct {
 type managedBrowserHarness struct {
 	app              *App
 	routes           http.Handler
+	flowApp          *App
+	flowRoutes       http.Handler
 	authority        *managedBrowserAuthority
 	dynamicAuthority *managedBrowserDynamicAuthority
 	executor         *managedBrowserExecutor
@@ -431,9 +433,15 @@ func newManagedBrowserHarness(t *testing.T, baseURL, authBaseURL string) *manage
 	app.managedDynamicCustody = &fakeManagedDynamicCustodyExecutor{}
 	app.managedDynamicDelivery = &fakeManagedDynamicDeliveryExecutor{}
 	app.managedDynamicTransport = &fakeManagedDynamicTransport{status: managedDynamicActivationActive}
+	flowApp, flowUpstream := enabledFlowApp(t, sampleFlowState())
+	t.Cleanup(flowUpstream.Close)
+	flowApp.cfg.PublicURL = baseURL
+	withPublicBase(t, flowApp, "/janus")
 	return &managedBrowserHarness{
 		app:              app,
 		routes:           app.routes(),
+		flowApp:          flowApp,
+		flowRoutes:       flowApp.routes(),
 		authority:        authority,
 		dynamicAuthority: dynamicAuthority,
 		executor:         executor,
@@ -445,6 +453,15 @@ func newManagedBrowserHarness(t *testing.T, baseURL, authBaseURL string) *manage
 
 func (harness *managedBrowserHarness) ServeHTTP(response http.ResponseWriter, request *http.Request) {
 	switch request.URL.Path {
+	case "/__managed-browser/flow-session":
+		// Test-only fixture: all subsequent rendering and sign-out use the real
+		// mounted application middleware, session cookie and CSRF validation.
+		harness.flowApp.writeSession(response, Session{
+			Subject: "operator-a",
+			Roles:   []string{RoleFlowViewer},
+			Expiry:  time.Now().UTC().Add(time.Hour),
+		})
+		http.Redirect(response, request, "/janus/", http.StatusFound)
 	case "/__managed-browser/session":
 		harness.session(response, request)
 	case "/__managed-browser/expired":
@@ -458,6 +475,10 @@ func (harness *managedBrowserHarness) ServeHTTP(response http.ResponseWriter, re
 	case "/__managed-browser/evidence":
 		harness.evidence(response)
 	default:
+		if request.URL.Path == "/janus" || strings.HasPrefix(request.URL.Path, "/janus/") {
+			harness.flowRoutes.ServeHTTP(response, request)
+			return
+		}
 		if strings.HasPrefix(request.URL.Path, "/managed-service/operations/") {
 			harness.operation(response, request)
 			return
