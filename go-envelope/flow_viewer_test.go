@@ -116,7 +116,7 @@ func TestFlowViewerDeniesEveryOtherRegisteredRouteAndFutureRoute(t *testing.T) {
 		r.AddCookie(cookie)
 		w := httptest.NewRecorder()
 		app.routes().ServeHTTP(w, r)
-		if w.Code != http.StatusForbidden {
+		if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), "flow_scope_only") {
 			t.Fatalf("%s returned %d", route.pattern, w.Code)
 		}
 	}
@@ -136,8 +136,21 @@ func TestFlowViewerDeniesEveryOtherRegisteredRouteAndFutureRoute(t *testing.T) {
 	r.AddCookie(cookie)
 	w := httptest.NewRecorder()
 	app.routes().ServeHTTP(w, r)
-	if w.Code < 400 {
+	if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), "logout_integrity_check_failed") {
 		t.Fatal("logout skipped CSRF")
+	}
+	r = httptest.NewRequest(http.MethodPost, "/logout", nil)
+	r.AddCookie(cookie)
+	r.Header.Set("Origin", app.cfg.PublicURL)
+	r.Header.Set("X-CSRF-Token", app.csrfToken(session))
+	w = httptest.NewRecorder()
+	app.routes().ServeHTTP(w, r)
+	cleared := false
+	for _, cookie := range w.Result().Cookies() {
+		cleared = cleared || (cookie.Name == app.cfg.SessionCookieName() && cookie.MaxAge < 0)
+	}
+	if w.Code != http.StatusFound || w.Header().Get("Location") != "/" || !cleared {
+		t.Fatalf("valid logout failed: %d", w.Code)
 	}
 }
 
