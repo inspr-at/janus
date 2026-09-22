@@ -66,6 +66,9 @@ func TestFlowViewerReadsOnlyBoundProjectWithoutCatalog(t *testing.T) {
 		if path == "/" && (!strings.Contains(w.Body.String(), "Flow review") || !strings.Contains(w.Body.String(), "inspr-flow-shell")) {
 			t.Fatal("missing Flow landing")
 		}
+		if path == "/" && !strings.Contains(w.Body.String(), `action="/logout"`) {
+			t.Fatal("missing ordinary sign-out control")
+		}
 		for _, forbidden := range []string{"Janus Zitadel application", "csb1 age identity", "zitadel-janus-oidc", "secrets/csb1-"} {
 			if strings.Contains(w.Body.String(), forbidden) {
 				t.Fatalf("catalog in %s", path)
