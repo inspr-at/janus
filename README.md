@@ -13,11 +13,11 @@ agents - without making raw credentials part of prompts, command arguments,
 logs, or application code.
 
 [![License: AGPL-3.0-only](https://img.shields.io/badge/license-AGPL--3.0--only-1f7a72.svg)](LICENSE)
-[![Rust engine](https://img.shields.io/badge/Rust_engine-v0.1.44-cb7c28.svg)](https://github.com/inspr-at/janus/releases/tag/rust-engine-v0.1.44)
+[![Rust engine](https://img.shields.io/badge/Rust_engine-v260922094507.0.0-cb7c28.svg)](https://github.com/inspr-at/janus/releases/tag/rust-engine-v260922094507.0.0)
 
 [Product site](https://janus.inspr.at/) ·
 [Deutsch](https://janus.inspr.at/de/) ·
-[Rust engine v0.1.44](https://github.com/inspr-at/janus/releases/tag/rust-engine-v0.1.44) ·
+[Rust engine v260922094507.0.0](https://github.com/inspr-at/janus/releases/tag/rust-engine-v260922094507.0.0) ·
 [INSPR](https://www.inspr.at)
 
 Janus is part of the open INSPR product family and is authored and published
@@ -96,7 +96,7 @@ Janus has two layers with different histories:
 
 | Layer | Role | Language | Status |
 |---|---|---|---|
-| **Rust engine** | Secret store contracts, Warden, permits, approved-use execution, rotation, lifecycle, and operator CLI | Rust | Active and released. Current tag: `rust-engine-v0.1.44`. |
+| **Rust engine** | Secret store contracts, Warden, permits, approved-use execution, rotation, lifecycle, and operator CLI | Rust | Active and released. Current tag: `rust-engine-v260922094507.0.0`. |
 | **Go envelope** | Existing governance, audit, evidence, and oversight surface | Go | Shipped, operational, and transitional. New core capability work lands in Rust. |
 
 The Rust engine is no longer a skeleton. Core execution paths ship with unit,
@@ -415,11 +415,30 @@ The reviewed offline schema upgrade is documented in the
 That runbook also covers value-free scope-state recovery and transfer; encrypted
 provider payload and key-custody disaster recovery remain separate concerns.
 
+JANUS-471 reserves the canonical UTC coordinate in
+`go-envelope/internal/versioninfo/release.json` for both independently published
+channels. `Cargo.toml` and `Cargo.lock` are checked mirrors, not independent
+clocks. The signed source manifest carries `version_scheme`, `version`,
+`release_channel` and `release_sequence`; source commit remains separate.
+`janusd-admin --version`, `janusd-use --version`, envelope `--version`,
+`/buildz` and the product footer expose that declared coordinate. Historical
+release artifacts retain their original names and bytes.
+
+The envelope's one presentation adapter uses the complete offline INSPR
+bundle at `317f872bc061576fc0b45d274d3a22f69bcd4c8a`. The saved Pretty display,
+SemVer option, keyboard/canonical clipboard behavior, hover/focus animation,
+reduced motion and INSPR-VER2 label come from the shared renderer and table.
+`go-envelope/build.sh` is the supported local/CI/container build entry point:
+it checks the exact regular-file set, hashes and sizes before compilation.
+The embedded closure also fails closed at binary initialization, including
+ad-hoc `go run` or direct `go build` invocations. No presentation setting is
+fetched from an upstream service at runtime.
+
 The transitional envelope remains independently testable:
 
 ```bash
 cd go-envelope
-go build ./...
+./build.sh ./...
 go test ./...
 cd ..
 python3 scripts/run-minimization-proof.py --stack go

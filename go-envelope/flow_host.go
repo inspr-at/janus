@@ -4,6 +4,7 @@ package main
 // projection, Janus-issued local_host identity, and guarded review navigation.
 
 import (
+	"barta.cm/janus/internal/versioninfo"
 	"bytes"
 	"crypto/sha256"
 	"embed"
@@ -854,7 +855,8 @@ func mergeShellState(upstream map[string]any, config flowHostConfig, context flo
 	}
 	header["appName"] = "Janus"
 	header["instanceLabel"] = config.InstanceLabel
-	header["version"] = shortCommit(buildCommit)
+	header["version"] = versioninfo.Current.Version
+	header["versionScheme"] = versioninfo.Scheme
 	header["projectName"] = context.binding.Label
 	header["projectSubtitle"] = "Janus host projection · upstream observations"
 	header["userLabel"] = flowHostVerifiedHumanLabel

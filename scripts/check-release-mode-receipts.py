@@ -10,6 +10,7 @@ import pathlib
 import re
 import sys
 from typing import Any
+from calendar_version import validate_release
 
 
 class ReceiptError(RuntimeError):
@@ -65,7 +66,7 @@ def require_closed_receipt(receipt: dict[str, Any]) -> None:
     require(set(receipt) == TOP_LEVEL_KEYS, "receipt_shape")
     for field, keys in NESTED_KEYS.items():
         value = receipt.get(field)
-        require(isinstance(value, dict) and set(value) == keys, f"{field}_shape")
+        require(isinstance(value, dict) and (set(value) == keys or field == "artifact" and set(value) == keys | {"release"}), f"{field}_shape")
     require(
         isinstance(receipt.get("schema_version"), int)
         and not isinstance(receipt["schema_version"], bool)
@@ -88,6 +89,10 @@ def require_closed_receipt(receipt: dict[str, Any]) -> None:
     )
 
     artifact = receipt["artifact"]
+    try:
+        validate_release(artifact.get("tag", ""), artifact.get("release"))
+    except (ValueError, KeyError, TypeError) as error:
+        raise ReceiptError("release_coordinate") from error
     require(
         isinstance(artifact["image"], str) and bool(artifact["image"]),
         "artifact_image",

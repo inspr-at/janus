@@ -106,6 +106,15 @@ async fn main() -> Result<()> {
 
 /// Run one hard-coded process plane. `None` is the retired mixed entry point.
 pub async fn run_for_plane(selected_plane: Option<RuntimePlane>) -> Result<()> {
+    if std::env::args().skip(1).collect::<Vec<_>>() == ["--version"] {
+        println!(
+            "janus {} version_scheme={} release_channel=stable release_sequence={}",
+            janus_core::VERSION,
+            janus_core::VERSION_SCHEME,
+            janus_core::RELEASE_SEQUENCE
+        );
+        return Ok(());
+    }
     let args = env::args().skip(1).collect::<Vec<_>>();
     if args.is_empty() || args == ["--help"] || args == ["help"] {
         print_usage(selected_plane);

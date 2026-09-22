@@ -1,6 +1,7 @@
 package main
 
 import (
+	"barta.cm/janus/internal/versioninfo"
 	"runtime"
 	"runtime/debug"
 	"strings"
@@ -14,6 +15,10 @@ var (
 )
 
 type BuildProvenanceReceipt struct {
+	Version               string                   `json:"version"`
+	VersionScheme         string                   `json:"version_scheme"`
+	ReleaseChannel        string                   `json:"release_channel"`
+	ReleaseSequence       uint64                   `json:"release_sequence"`
 	Label                 string                   `json:"label"`
 	Summary               string                   `json:"summary"`
 	Status                string                   `json:"status"`
@@ -89,6 +94,7 @@ func buildProvenanceFor(builder, modulePath, goVersion, commit, builtAt string) 
 	}
 
 	receipt := BuildProvenanceReceipt{
+		Version: versioninfo.Current.Version, VersionScheme: versioninfo.Scheme, ReleaseChannel: "envelope-stable", ReleaseSequence: versioninfo.Current.Channels["envelope-stable"].ReleaseSequence,
 		Label:                 "Build provenance receipt",
 		Summary:               summary,
 		Status:                status,

@@ -41,6 +41,7 @@ GO_ONLY_PREFIXES = (
 # skipped Rust assurance phase.
 GO_ONLY_EXCLUDED_FILES = frozenset(
     {
+        "go-envelope/internal/versioninfo/release.json",
         "docs/durable-duty-journal.md",
         "docs/runtime-accountability-runbook.md",
     }
@@ -110,6 +111,7 @@ FIXTURES = {
         "docs/durable-duty-journal.md",
         "docs/runtime-accountability-runbook.md",
     ],
+    "calendar_source": ["go-envelope/internal/versioninfo/release.json"],
     "rust": ["crates/janus-core/src/lib.rs"],
     "rust_lock": ["Cargo.lock"],
     "rust_toolchain": ["rust-toolchain.toml"],
@@ -132,6 +134,7 @@ def self_test() -> None:
     result = classify(FIXTURES["go_only"])
     assert result["go_only"] is True, "the reviewed go-only family failed to classify as go-only"
     for name in (
+        "calendar_source",
         "rust",
         "assurance_docs",
         "rust_lock",

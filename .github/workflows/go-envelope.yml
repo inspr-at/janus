@@ -13,7 +13,7 @@ on:
   # Always report the branch-required Go check on pull requests. Pushes retain
   # the focused path filter above.
   pull_request:
-  # Release the envelope image by pushing a tag like `go-envelope-v1.144`.
+  # Publish a GitHub release for a reserved go-envelope-v calendar tag.
   release:
     types: [published]
 
@@ -32,6 +32,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+      - name: reserved envelope release coordinate
+        if: github.event_name == 'release' && startsWith(github.event.release.tag_name, 'go-envelope-v')
+        working-directory: .
+        env:
+          JANUS_RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: python3 scripts/check-calendar-release.py --tag "$JANUS_RELEASE_TAG"
       - name: verify protected-main release ancestry
         if: github.event_name == 'release'
         working-directory: .
@@ -59,7 +65,12 @@ jobs:
       - name: verify installed source scanner versions
         working-directory: .
         run: GITLEAKS_BIN="$(go env GOPATH)/bin/gitleaks" python3 scripts/check-security-gates.py --check-installed-tools --tool gitleaks --tool govulncheck --tool staticcheck
-      - run: go build ./...
+      - name: calendar release bindings
+        working-directory: .
+        run: |
+          python3 scripts/check-calendar-release.py
+          python3 scripts/test-calendar-version.py
+      - run: ./build.sh ./...
       - name: staticcheck
         run: go run honnef.co/go/tools/cmd/staticcheck@v0.7.0 ./...
       - name: govulncheck

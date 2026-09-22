@@ -3,5 +3,10 @@
 .git
 .github
 docs
-go-envelope
+go-envelope/*
+!go-envelope/internal
+go-envelope/internal/*
+!go-envelope/internal/versioninfo
+go-envelope/internal/versioninfo/*
+!go-envelope/internal/versioninfo/release.json
 target

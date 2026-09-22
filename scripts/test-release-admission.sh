@@ -9,7 +9,7 @@ tag="rust-engine-v0.1.21"
 digest="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 revoked="sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
 work="$(mktemp -d)"
-trap 'rm -rf -- "${work}"' EXIT
+trap 'if command -v trash >/dev/null 2>&1; then trash "${work}"; fi' EXIT
 source_manifest="${work}/source-release.json"
 source_bundle="${work}/source-release.sigstore.json"
 scanner_summary="${work}/trivy-summary.json"
@@ -63,7 +63,7 @@ jq -e '
   .policy_id == "janus-engine-release-v1" and
   .channel == "stable" and
   .mode == "enterprise" and
-  .policy_version == 3 and
+  .policy_version == 4 and
   .artifact.digest == "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" and
   .signature.verified and .provenance.verified and .sbom.verified and
   .source.verified and .source.commit == "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" and
@@ -158,5 +158,17 @@ expect_denied release_scanner_untrusted \
   --image "${image}" --tag "${tag}" --digest "${digest}" \
   --source-manifest "${source_manifest}" --source-bundle "${source_bundle}" \
   --scanner-summary "${work}/wrong-subject-summary.json"
+
+calendar_tag="rust-engine-v$(python3 -c 'import json; print(json.load(open("go-envelope/internal/versioninfo/release.json"))["version"])')"
+python3 "${repo}/scripts/create-source-release-manifest.py" --repository inspr-at/janus \
+  --tag "${calendar_tag}" --commit bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+  --workflow .github/workflows/rust.yml --image "${image}" --image-digest "${digest}" \
+  --output "${work}/calendar-source.json"
+JANUS_COSIGN_BIN=true JANUS_GH_BIN=true "${admit}" \
+  --policy "${policy}" --channel stable --mode enterprise --previous-mode enterprise \
+  --image "${image}" --tag "${calendar_tag}" --digest "${digest}" \
+  --source-manifest "${work}/calendar-source.json" --source-bundle "${source_bundle}" \
+  --scanner-summary "${scanner_summary}" --output "${work}/calendar-admission.json" >/dev/null
+jq -e '.artifact.release.version_scheme == "inspr-calendar-v2" and .artifact.release.release_channel == "stable" and .artifact.release.release_sequence == 1' "${work}/calendar-admission.json" >/dev/null
 
 printf 'ok: release admission fixtures passed\n'

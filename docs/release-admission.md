@@ -17,7 +17,7 @@ repository changes and increment `policy_version` when their meaning changes.
 Admission runs outside the image being admitted:
 
 ```bash
-JANUS_ENGINE_RELEASE_TAG="rust-engine-v0.1.44" # replace with the reviewed release
+JANUS_ENGINE_RELEASE_TAG="rust-engine-v260922094507.0.0" # replace with the reviewed release
 scripts/admit-engine-release.sh \
   --policy config/release-channels/v1.json \
   --channel stable \
@@ -131,3 +131,45 @@ To revoke an artifact, add its exact digest to `revoked_digests`, increment the
 policy version, review and deploy the policy, and regenerate admission receipts
 for allowed artifacts. Existing receipts then fail policy-version or revocation
 checks at the next runtime start.
+
+
+## Calendar migration and exact rollback (JANUS-471)
+
+`go-envelope/internal/versioninfo/release.json` is the authoritative reservation
+and migration record. The engine's last legacy coordinate is `0.1.44`, peeled
+commit `8e90ce57d8cb41c7a920f72549712122b6d6ea8b`; the envelope's is `1.185`,
+peeled commit `cff766fd94b1e2e677d1ee836b9eee582d5091f7`. Both channels start
+`inspr-calendar-v2` at `260922094507.0.0`, channel sequence 1. These are distinct
+channels; sequence numbers compare only within their declared channel.
+
+New release tags retain their existing `rust-engine-v` and `go-envelope-v`
+prefixes. Release CI rejects a tag that differs from the one reserved UTC
+coordinate, signs all four declared version fields with the source/image
+binding, and carries those fields into the admission receipt's `artifact.release`.
+Old manifests/receipts remain supported only within the bounded legacy window.
+Missing, unknown or mismatched declarations cannot admit a calendar artifact;
+an invalid UTC date or a same-second reservation is rejected. No tag,
+attestation, image or historical release is rewritten.
+
+The new channel policy is revision 4. Old production engine readers keep their
+exact existing policy, receipt and image until a separately reviewed engine
+cutover. An envelope-only deployment uses the new external admission verifier
+and the published envelope receipt without replacing that engine's runtime
+policy or permissions. Runtime policy/receipt versions must always match.
+
+Before publication run `python3 scripts/check-calendar-release.py`,
+`python3 scripts/test-calendar-version.py`, the source-signing/admission checks,
+the normal engine release tests, and `go-envelope/build.sh`. A release build
+must report the same coordinate through each applicable CLI. GitHub **published
+release** events (not merely pushing tags) build/sign each channel. Record the
+final signed image digest and immutable source commit in the owning ticket;
+only then bump the selected deployment pin.
+
+Rollback uses the unchanged prior image **by exact digest**, its signed source
+manifest/bundle and the receipt/policy pair that admitted it. Revalidate that
+image/digest binding; never resolve `latest`, retag an old image, decrement the
+canonical source or reuse a coordinate for a fix. A fix reserves a later UTC
+second and the next channel sequence. `scripts/test-calendar-version.py`
+exercises both legacy and calendar exact-artifact rollback, rejects mismatched
+digests, and preserves the cross-era ordering boundary. Existing source-signing
+cutoff and grandfathered-release restrictions continue to apply.

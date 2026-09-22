@@ -4,6 +4,7 @@ WORKDIR /src
 ARG TARGETARCH
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates ./crates
+COPY go-envelope/internal/versioninfo/release.json ./go-envelope/internal/versioninfo/release.json
 COPY config/release-channels/v1.json ./config/release-channels/v1.json
 COPY config/authorization/role-matrix-v1.json ./config/authorization/role-matrix-v1.json
 COPY config/authorization/duty-surface-manifest-v1.json ./config/authorization/duty-surface-manifest-v1.json

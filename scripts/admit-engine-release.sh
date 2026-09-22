@@ -200,7 +200,7 @@ identity="${identity_prefix}${tag}"
   --arg workflow "${source_workflow}" \
   --arg image "${image}" \
   --arg digest "${digest}" '
-    (keys | sort) == ([
+    ((keys | sort) == ([
       "commit",
       "image",
       "image_digest",
@@ -208,7 +208,7 @@ identity="${identity_prefix}${tag}"
       "schema_version",
       "tag",
       "workflow"
-    ] | sort) and
+    ] | sort) or (keys | sort) == (["commit", "image", "image_digest", "repository", "schema_version", "tag", "workflow", "version_scheme", "version", "release_channel", "release_sequence"] | sort)) and
     .schema_version == 1 and
     .repository == $repository and
     .tag == $tag and
@@ -218,6 +218,7 @@ identity="${identity_prefix}${tag}"
     (.commit | type == "string" and test("^[0-9a-f]{40}$"))
   ' "${source_manifest}" >/dev/null ||
   fail "release_source_untrusted"
+python3 "$(dirname "$0")/check-calendar-release.py" --manifest "${source_manifest}" >/dev/null 2>&1 || fail "release_source_untrusted"
 "${jq_bin}" empty "${source_bundle}" >/dev/null 2>&1 ||
   fail "release_source_untrusted"
 "${cosign_bin}" verify-blob \
@@ -295,6 +296,7 @@ trap cleanup EXIT
   --arg source_commit "${source_commit}" \
   --arg source_manifest_sha256 "${source_manifest_sha256}" \
   --arg source_bundle_sha256 "${source_bundle_sha256}" \
+  --argjson release_metadata "$("${jq_bin}" -c 'if has("version_scheme") then {version_scheme, version, release_channel, release_sequence} else null end' "${source_manifest}")" \
   --arg scanner_summary_sha256 "${scanner_summary_sha256}" '
   {
     schema_version: 1,
@@ -303,12 +305,12 @@ trap cleanup EXIT
     channel: $channel,
     mode: $mode,
     previous_mode: $previous_mode,
-    artifact: {
+    artifact: ({
       image: $image,
       tag: $tag,
       digest: $digest,
       development: false
-    },
+    } + (if $release_metadata == null then {} else {release: $release_metadata} end)),
     signature: {
       verified: true,
       identity: $identity,

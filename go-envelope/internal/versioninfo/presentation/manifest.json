@@ -1,0 +1,59 @@
+{
+  "repository": "inspr-at/inspr",
+  "revision": "317f872bc061576fc0b45d274d3a22f69bcd4c8a",
+  "expectedConfigSha256": "7843f3515ce329277d2d576000bd60ac410d725b241d502a9a3fecb2533d956d",
+  "schema": "inspr.calendar-version-display.v2",
+  "mode": "build-time-only",
+  "consumers": [],
+  "runtimeConsumers": false,
+  "files": [
+    {
+      "sourcePath": "packages/versioning/config/display.json",
+      "outputPath": "display.json",
+      "sha256": "7843f3515ce329277d2d576000bd60ac410d725b241d502a9a3fecb2533d956d",
+      "size": 1656
+    },
+    {
+      "sourcePath": "packages/versioning/public/version.js",
+      "outputPath": "version.js",
+      "sha256": "9a09693e0cef3af586f617ba24cdae96165d95d12f5c447b1d2e67d35a70c9b8",
+      "size": 4871
+    },
+    {
+      "sourcePath": "packages/versioning/public/presentation.js",
+      "outputPath": "presentation.js",
+      "sha256": "fd0354837edd05179aeeaa86c271bced25031a3f29e148c448b684116b7dd3ca",
+      "size": 2769
+    },
+    {
+      "sourcePath": "packages/versioning/public/version-interaction.js",
+      "outputPath": "version-interaction.js",
+      "sha256": "cfe539ad84651666d18b192f37659dab7c36aa8e68c43c9bdd42b42e85de2ba1",
+      "size": 7671
+    },
+    {
+      "sourcePath": "packages/versioning/public/auto-animate.js",
+      "outputPath": "auto-animate.js",
+      "sha256": "2fae336f3ed3e814356df4721cfa747a393ff037fee2644d95bbbe1236551753",
+      "size": 28022
+    },
+    {
+      "sourcePath": "packages/versioning/public/auto-animate-license.js",
+      "outputPath": "auto-animate-license.js",
+      "sha256": "57677685789ebe6233671cef7f78b37f74942936b0d42ef2168d6a2195acf606",
+      "size": 1100
+    },
+    {
+      "sourcePath": "packages/versioning/config/schemes.json",
+      "outputPath": "schemes.json",
+      "sha256": "4c903f9f4dc63ae141f48131b6e5150d86e8381d50ecde89782cf77ad2f4a5b7",
+      "size": 169
+    },
+    {
+      "sourcePath": null,
+      "outputPath": "package.json",
+      "sha256": "1239d4d885dcad42201a27ed9324f8f0f760b78700d8db9ced39a511cffe7eae",
+      "size": 18
+    }
+  ]
+}

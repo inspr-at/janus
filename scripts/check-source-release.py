@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 from typing import Any
+from calendar_version import FIELDS, GO_PATTERN, RUST_PATTERN, validate_release
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 POLICY = ROOT / "config/assurance/source-release-signing-v1.json"
@@ -64,8 +65,7 @@ def validate_policy(policy: dict[str, Any]) -> None:
     require(
         {item.get("tag_pattern") for item in subset}
         == {
-            r"go-envelope-v[1-9][0-9]*\.[0-9]+",
-            r"rust-engine-v[0-9]+\.[0-9]+\.[0-9]+",
+            GO_PATTERN, RUST_PATTERN,
         },
         "released-source tag grammar changed",
     )
@@ -173,7 +173,11 @@ def matching_rule(policy: dict[str, Any], manifest: dict[str, Any]) -> dict[str,
 
 
 def validate_manifest(policy: dict[str, Any], manifest: dict[str, Any], bundle: pathlib.Path | None, check_git: bool) -> None:
-    require(set(manifest) == MANIFEST_KEYS, "source release manifest fields changed")
+    require(set(manifest) in (MANIFEST_KEYS, MANIFEST_KEYS | FIELDS), "source release manifest fields changed")
+    try:
+        validate_release(manifest.get("tag", ""), {k: manifest[k] for k in FIELDS if k in manifest} or None)
+    except (ValueError, KeyError, TypeError) as error:
+        raise SourcePolicyError("release version metadata invalid") from error
     require(manifest.get("schema_version") == 1, "unsupported source manifest schema")
     require(manifest.get("repository") == policy["repository"], "source repository mismatch")
     require(re.fullmatch(r"[0-9a-f]{40}", manifest.get("commit", "")) is not None, "source commit is invalid")

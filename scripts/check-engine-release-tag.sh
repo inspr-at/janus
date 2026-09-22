@@ -7,6 +7,7 @@ if [ "$#" -ne 1 ]; then
 fi
 
 release_tag="$1"
+python3 scripts/check-calendar-release.py --tag "$release_tag"
 workspace_version="$(
   awk '
     /^\[workspace\.package\]$/ { in_workspace_package = 1; next }

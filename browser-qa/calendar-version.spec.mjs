@@ -1,0 +1,41 @@
+import {expect,test} from '@playwright/test';
+import fs from 'node:fs';
+const {version}=JSON.parse(fs.readFileSync(new URL('../go-envelope/internal/versioninfo/release.json',import.meta.url),'utf8'));
+test('calendar adapter uses saved presentation, keyboard copy and reduced motion',async({page,context},testInfo)=>{
+ if(testInfo.project.name.includes("mobile")) await page.setViewportSize({width:390,height:844});
+ await page.emulateMedia({reducedMotion:'reduce'});
+ const errors=[];page.on('pageerror',error=>errors.push(error.message));
+ await context.grantPermissions(['clipboard-read','clipboard-write']);
+ await page.goto('/__managed-browser/session?kind=create');await page.goto('/');
+ expect(await page.evaluate(()=>matchMedia('(prefers-reduced-motion: reduce)').matches)).toBe(true);
+ const host=page.locator('[data-janus-version]'), coordinate=host.locator('[data-coordinate]');
+ await expect(coordinate).toHaveAttribute('data-version-view','pretty');
+ await expect(host).toHaveAttribute('title',/INSPR-VER2/);
+ await expect(coordinate).toHaveAttribute('data-canonical',version);
+ await coordinate.focus();await expect(coordinate).toHaveAttribute('data-version-view','technical');
+ await expect.poll(()=>coordinate.locator('.yy,.mm,.dd,.hh,.mi,.ss').evaluateAll(nodes=>nodes.map(n=>Number(getComputedStyle(n).opacity)))).toEqual([1,.97,.94,.91,.88,.85]);
+ expect(await coordinate.locator('.mm').evaluate(el=>el.style.transition)).toBe('none');
+ await coordinate.press('Enter');await expect(coordinate).toHaveAttribute('data-copy-state','copied');
+ expect(await page.evaluate(()=>navigator.clipboard.readText())).toBe(version);
+ await host.locator('select').selectOption('semver');
+ await expect(coordinate).toHaveAttribute('data-canonical',version);
+ expect(await coordinate.locator('.separator').count()).toBe(0);
+ await coordinate.focus();await coordinate.press('Space');
+ expect(await page.evaluate(()=>navigator.clipboard.readText())).toBe(version);
+ await host.locator('select').selectOption('pretty');
+ await expect(coordinate).toHaveAttribute('data-version-view','pretty');
+ expect(errors).toEqual([]);
+ expect(await host.evaluate(el=>el.getBoundingClientRect().right<=innerWidth)).toBe(true);
+});
+
+test('calendar hover retains the shared one-second motion without changing the coordinate',async({page})=>{
+ await page.emulateMedia({reducedMotion:'no-preference'});
+ await page.goto('/__managed-browser/session?kind=create');await page.goto('/');
+ const coordinate=page.locator('[data-coordinate]');
+ await expect(coordinate).toHaveAttribute('data-version-view','pretty');
+ await coordinate.focus();await expect(coordinate).toHaveAttribute('data-version-view','technical');
+ expect(await coordinate.locator('.mm').evaluate(el=>el.style.transition)).toBe('opacity 1000ms ease-in-out, color 1000ms ease-in-out');
+ await expect.poll(()=>coordinate.locator('.mm').evaluate(el=>Number(getComputedStyle(el).opacity))).toBe(.97);
+ await page.locator('[data-version-format]').focus();await expect(coordinate).toHaveAttribute('data-version-view','pretty');
+ await expect(coordinate).toHaveAttribute('data-canonical',version);
+});
