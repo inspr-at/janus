@@ -723,7 +723,10 @@ The pinned contract is Aeon `v260926083057.0.0`, commit
 `4f968808157d1d5c35c096b683bd332a2ee15d8d`, whose `api/openapi.yaml` has
 SHA-256 `5332184da86c52f42c988431c994814d4418c2a6f986b879a62662967e2160b0`.
 The relevant excerpt lives under `contracts/aeon-stage-handoff-v1/` and is
-checked by `scripts/check-aeon-stage-handoff-pins.py` (add
+checked by `scripts/check-aeon-stage-handoff-pins.py`. Journals written under
+an earlier pin stay replayable only when that pin is listed in the reviewed
+`AEON_COMPATIBLE_JOURNAL_PINS` (currently `v260926071154.0.0`, whose wire
+contract is identical); any other pin fails closed. The check script (add
 `--aeon-checkout <path>` to re-derive it from the Aeon repository).
 
 ### Service env file

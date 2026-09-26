@@ -49,6 +49,28 @@ pub const AEON_STAGE_COMMIT: &str = "4f968808157d1d5c35c096b683bd332a2ee15d8d";
 pub const AEON_OPENAPI_SHA256: &str =
     "5332184da86c52f42c988431c994814d4418c2a6f986b879a62662967e2160b0";
 
+/// Earlier pins whose journals stay replayable: (release, commit, OpenAPI
+/// SHA-256). Add an entry only after reviewing that the stage-handoff, `/me`
+/// and journey wire contract Janus journals against is unchanged, so the
+/// exact journaled request bytes remain valid. New journals always carry the
+/// current pin.
+const AEON_COMPATIBLE_JOURNAL_PINS: [(&str, &str, &str); 1] = [
+    // JANUS-481: v260926083057 (AEON-169) only adds the server-side routed
+    // principal check and journey gate_live; handoff, evidence, result and
+    // /me shapes are identical.
+    (
+        "v260926071154.0.0",
+        "482c563482c014c2097e65f7ef528444e12ec7af",
+        "4420f2d269af7477bcb41a7fa0d670f28376a151145c71ebb368c61ade370493",
+    ),
+];
+
+fn journal_pin_accepted(release: &str, commit: &str, openapi_sha256: &str) -> bool {
+    (release, commit, openapi_sha256)
+        == (AEON_STAGE_RELEASE, AEON_STAGE_COMMIT, AEON_OPENAPI_SHA256)
+        || AEON_COMPATIBLE_JOURNAL_PINS.contains(&(release, commit, openapi_sha256))
+}
+
 pub(crate) const CONFIG_SCHEMA: &str = "inspr.janus.aeon-stage-reporter-config.v1";
 pub(crate) const MANAGED_CONFIG_SCHEMA: &str =
     "inspr.janus.aeon-managed-completion-reporter-config.v1";
@@ -911,9 +933,11 @@ impl Reporter {
         if journal.schema != JOURNAL_SCHEMA
             || journal.schema_version != 1
             || journal.contract != AEON_STAGE_CONTRACT
-            || journal.aeon_commit != AEON_STAGE_COMMIT
-            || journal.aeon_release != AEON_STAGE_RELEASE
-            || journal.openapi_sha256 != AEON_OPENAPI_SHA256
+            || !journal_pin_accepted(
+                &journal.aeon_release,
+                &journal.aeon_commit,
+                &journal.openapi_sha256,
+            )
             || journal.handoff_id != self.config.handoff.handoff_id
             || journal.config_digest != self.config.config_digest
             || !valid_hex64(&journal.prerequisite_seal_sha256)
