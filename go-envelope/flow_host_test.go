@@ -1095,9 +1095,9 @@ func TestAeonImportedOrDerivedHistoryIsNotEvidence(t *testing.T) {
 	}
 	digest := strings.Repeat("a", 64)
 	for name, journey := range map[string]map[string]any{
-		"derived":  {"stage": "deploy", "stage_source": "derived", "imported": false, "requirements_revision": 3, "requirements_digest_sha256": digest, "stages": done()},
-		"imported": {"stage": "deploy", "stage_source": "journey", "imported": true, "requirements_revision": 3, "requirements_digest_sha256": digest, "stages": done()},
-		"unagreed": {"stage": "deploy", "stage_source": "journey", "imported": false, "requirements_revision": 0, "requirements_digest_sha256": digest, "stages": done()},
+		"derived":  {"stage": "deploy", "stage_source": "derived", "imported": false, "requirements_revision": float64(3), "requirements_digest_sha256": digest, "stages": done()},
+		"imported": {"stage": "deploy", "stage_source": "journey", "imported": true, "requirements_revision": float64(3), "requirements_digest_sha256": digest, "stages": done()},
+		"unagreed": {"stage": "deploy", "stage_source": "journey", "imported": false, "requirements_revision": float64(0), "requirements_digest_sha256": digest, "stages": done()},
 	} {
 		shell := aeonShellState(journey, binding, 1_700_000_000)
 		gate := shell["prerequisites"].(map[string]any)["requirementsBaseline"].(map[string]any)
@@ -1111,6 +1111,14 @@ func TestAeonImportedOrDerivedHistoryIsNotEvidence(t *testing.T) {
 		if name == "imported" && (evidence[1] != "performed" || evidence[3] != "not_in_batch") {
 			t.Fatalf("imported recorded stages=%v", evidence)
 		}
+	}
+	// The positive case: recorded, agreed requirements are a pass.
+	agreed := aeonShellState(map[string]any{"stage": "deploy", "stage_source": "journey", "imported": false, "requirements_revision": float64(3), "requirements_digest_sha256": digest, "stages": done()}, binding, 1_700_000_000)
+	if gate := agreed["prerequisites"].(map[string]any)["requirementsBaseline"].(map[string]any); gate["status"] != "pass" {
+		t.Fatalf("agreed requirements=%v", gate)
+	}
+	if evidence := agreed["delivery"].(map[string]any)["stageEvidence"].([]any); evidence[0] != "performed" {
+		t.Fatalf("agreed define evidence=%v", evidence)
 	}
 }
 
