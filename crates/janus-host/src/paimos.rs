@@ -371,8 +371,15 @@ impl Drop for Reporter {
 }
 
 /// Read the fixed root-owned request and execute at most one dependency report.
+/// A config carrying the Aeon schema selects the Aeon stage-handoff adapter;
+/// every other config takes the unchanged classic path.
 pub fn run_from_system() -> ReporterResult<()> {
-    let config = load_system_config()?;
+    let raw = read_system_config()?;
+    if crate::aeon_stage::selects_aeon(&raw, crate::aeon_stage::CONFIG_SCHEMA) {
+        return crate::aeon_stage::run_static_config(&raw, 0, false)
+            .map_err(|error| PaimosReporterError::new(error.reason_code()));
+    }
+    let config = decode_strict::<ReporterConfigV1>(&raw, "paimos_reporter_config_invalid")?;
     Reporter::new(config, 0, false)?.run()
 }
 
@@ -403,14 +410,18 @@ pub(crate) fn run_managed_completion_from_path(
 }
 
 fn load_system_config() -> ReporterResult<ReporterConfigV1> {
-    let raw = read_private_regular(
+    let raw = read_system_config()?;
+    decode_strict::<ReporterConfigV1>(&raw, "paimos_reporter_config_invalid")
+}
+
+fn read_system_config() -> ReporterResult<Vec<u8>> {
+    read_private_regular(
         Path::new(SYSTEM_CONFIG_PATH),
         MAX_CONFIG_BYTES,
         Some(0),
         "paimos_reporter_config_unavailable",
     )
-    .map_err(|_| PaimosReporterError::new("paimos_reporter_config_unavailable"))?;
-    decode_strict::<ReporterConfigV1>(&raw, "paimos_reporter_config_invalid")
+    .map_err(|_| PaimosReporterError::new("paimos_reporter_config_unavailable"))
 }
 
 fn load_managed_config(path: &Path, owner_uid: u32) -> ReporterResult<ManagedReporterConfigV1> {
@@ -974,7 +985,10 @@ fn validate_managed_config(
     Ok(())
 }
 
-fn build_http_agent(ca_file: Option<&str>, owner_uid: u32) -> ReporterResult<ureq::Agent> {
+pub(crate) fn build_http_agent(
+    ca_file: Option<&str>,
+    owner_uid: u32,
+) -> ReporterResult<ureq::Agent> {
     let mut builder = ureq::AgentBuilder::new()
         .timeout_connect(Duration::from_secs(3))
         .timeout_read(Duration::from_secs(8))
@@ -1085,7 +1099,7 @@ fn parse_ca_certificates(
     Ok(certificates)
 }
 
-fn normalized_origin(raw: &str, allow_loopback_http: bool) -> ReporterResult<String> {
+pub(crate) fn normalized_origin(raw: &str, allow_loopback_http: bool) -> ReporterResult<String> {
     let parsed =
         Url::parse(raw).map_err(|_| PaimosReporterError::new("paimos_reporter_origin_refused"))?;
     let loopback_http = allow_loopback_http
@@ -1159,7 +1173,7 @@ fn read_credentials(config: &ReporterConfigV1, owner_uid: u32) -> ReporterResult
     })
 }
 
-fn validate_private_directory(path: &Path, owner_uid: u32) -> ReporterResult<()> {
+pub(crate) fn validate_private_directory(path: &Path, owner_uid: u32) -> ReporterResult<()> {
     let metadata = fs::symlink_metadata(path)
         .map_err(|_| PaimosReporterError::new("paimos_reporter_journal_directory_unavailable"))?;
     if !metadata.file_type().is_dir()
@@ -1173,7 +1187,11 @@ fn validate_private_directory(path: &Path, owner_uid: u32) -> ReporterResult<()>
     Ok(())
 }
 
-fn acquire_lock(directory: &Path, handoff_id: &str, owner_uid: u32) -> ReporterResult<File> {
+pub(crate) fn acquire_lock(
+    directory: &Path,
+    handoff_id: &str,
+    owner_uid: u32,
+) -> ReporterResult<File> {
     let path = directory.join(format!(".{handoff_id}.lock"));
     if let Ok(metadata) = fs::symlink_metadata(&path) {
         if !metadata.file_type().is_file()
@@ -1377,7 +1395,7 @@ impl<'de> Visitor<'de> for DuplicateVisitor {
     }
 }
 
-fn wire_digest(raw: &[u8]) -> String {
+pub(crate) fn wire_digest(raw: &[u8]) -> String {
     format!("sha256:{:x}", Sha256::digest(raw))
 }
 
@@ -1410,7 +1428,7 @@ fn valid_wire_digest(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
-fn valid_timestamp(value: &str) -> bool {
+pub(crate) fn valid_timestamp(value: &str) -> bool {
     let bytes = value.as_bytes();
     if bytes.len() < 20 || bytes.len() > 30 || bytes.last() != Some(&b'Z') {
         return false;
@@ -1461,7 +1479,7 @@ fn valid_timestamp(value: &str) -> bool {
     day > 0 && day <= days && hour <= 23 && minute <= 59 && second <= 59
 }
 
-fn absolute_path(value: &str) -> bool {
+pub(crate) fn absolute_path(value: &str) -> bool {
     let path = Path::new(value);
     path.is_absolute()
         && !value.as_bytes().contains(&0)

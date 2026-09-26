@@ -6,6 +6,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod aeon_stage;
 pub mod agent;
 mod dynamic;
 pub mod paimos;
