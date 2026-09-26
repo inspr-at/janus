@@ -2,6 +2,8 @@ package main
 
 // JANUS-458: opt-in bounded @inspr/flow-shell host with read-only Paimos
 // projection, Janus-issued local_host identity, and guarded review navigation.
+// JANUS-480: schema v2 selects an Aeon journey upstream. Schema v1 stays the
+// classic Paimos contract.
 
 import (
 	"barta.cm/janus/internal/versioninfo"
@@ -18,6 +20,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -31,6 +34,10 @@ const (
 	flowLoopbackOriginEnv      = "JANUS_FLOW_ALLOW_LOOPBACK_ORIGIN"
 	flowConfigSchema           = "inspr.janus.flow-host-config.v1"
 	flowConfigSchemaVersion    = uint16(1)
+	flowConfigSchemaV2         = "inspr.janus.flow-host-config.v2"
+	flowConfigSchemaVersionV2  = uint16(2)
+	flowUpstreamAeonName       = "aeon"
+	flowAeonReviewQuery        = "view=journey"
 	flowIdentityContract       = "inspr.flow-identity/0.1-draft"
 	flowAuthorityDisclaimer    = "Schema validity is not authentication. Host must issue this context from a verified principal and revalidate on every consequential intent."
 	flowUserAgent              = "janus-flow-host/1"
@@ -44,6 +51,19 @@ const (
 	flowHostVerifiedHumanLabel = "Host-verified human"
 	flowEvaluationMaxAgeSecs   = int64(15 * 60)
 	flowIntentMaxBytes         = 4 * 1024
+)
+
+var (
+	flowProjectKeyPattern = regexp.MustCompile(`^[A-Z][A-Z0-9]{1,9}$`)
+	flowNodeKeyPattern    = regexp.MustCompile(`^[A-Z][A-Z0-9]{1,9}-[1-9][0-9]*$`)
+	flowTenantSlugPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
+)
+
+type flowUpstreamKind uint8
+
+const (
+	flowUpstreamClassic flowUpstreamKind = iota
+	flowUpstreamAeon
 )
 
 //go:embed ui/flow-host-bootstrap.mjs ui/vendor/flow-shell
@@ -86,8 +106,39 @@ type flowBindingDocument struct {
 	PrincipalRefs []string `json:"principal_refs"`
 }
 
+type flowConfigProbe struct {
+	Schema        string `json:"schema"`
+	SchemaVersion uint16 `json:"schema_version"`
+}
+
+type flowConfigDocumentV2 struct {
+	Schema        string                    `json:"schema"`
+	SchemaVersion uint16                    `json:"schema_version"`
+	Enabled       bool                      `json:"enabled"`
+	HostID        string                    `json:"host_id"`
+	Upstream      string                    `json:"upstream"`
+	AeonOrigin    string                    `json:"aeon_origin"`
+	AeonPublicURL *string                   `json:"aeon_public_url"`
+	APIKeyFile    string                    `json:"api_key_file"`
+	InstanceLabel *string                   `json:"instance_label"`
+	TenantSlug    string                    `json:"tenant_slug"`
+	Bindings      []flowAeonBindingDocument `json:"bindings"`
+}
+
+type flowAeonBindingDocument struct {
+	ProjectNodeID string   `json:"project_node_id"`
+	ProjectKey    string   `json:"project_key"`
+	NodeKey       string   `json:"node_key"`
+	Label         string   `json:"label"`
+	PrincipalRefs []string `json:"principal_refs"`
+}
+
 type flowBinding struct {
+	Key                string
 	ProjectID          uint64
+	ProjectNodeID      string
+	ProjectKey         string
+	NodeKey            string
 	ExpectedProjectRef string
 	Label              string
 	PrincipalRefs      map[string]struct{}
@@ -95,6 +146,8 @@ type flowBinding struct {
 
 type flowHostConfig struct {
 	Enabled          bool
+	Upstream         flowUpstreamKind
+	TenantSlug       string
 	HostID           string
 	PaimosOrigin     *url.URL
 	PaimosBrowserURL *url.URL
@@ -112,12 +165,13 @@ type flowHostService struct {
 }
 
 type flowProjectionCache struct {
-	mu      sync.Mutex
-	entries map[flowCacheKey]flowCachedProjection
+	mu        sync.Mutex
+	entries   map[flowCacheKey]flowCachedProjection
+	revisions map[string]uint64
 }
 
 type flowCacheKey struct {
-	projectID    uint64
+	bindingKey   string
 	principalRef string
 }
 
@@ -143,7 +197,8 @@ type flowProjectionMeta struct {
 	SourceRevision  string `json:"sourceRevision"`
 	ContextRevision string `json:"contextRevision"`
 	BindingRef      string `json:"bindingRef"`
-	ProjectID       uint64 `json:"projectId"`
+	ProjectID       uint64 `json:"projectId,omitempty"`
+	ProjectNodeID   string `json:"projectNodeId,omitempty"`
 	Generation      uint64 `json:"generation"`
 }
 
@@ -193,8 +248,11 @@ func newFlowHostService(cfg flowHostConfig) *flowHostService {
 				return errors.New("redirect refused")
 			},
 		},
-		cache: &flowProjectionCache{entries: map[flowCacheKey]flowCachedProjection{}},
-		now:   func() int64 { return time.Now().UTC().Unix() },
+		cache: &flowProjectionCache{
+			entries:   map[flowCacheKey]flowCachedProjection{},
+			revisions: map[string]uint64{},
+		},
+		now: func() int64 { return time.Now().UTC().Unix() },
 	}
 }
 
@@ -203,6 +261,22 @@ func loadFlowHostConfig(path string) (flowHostConfig, error) {
 	if err != nil {
 		return flowHostConfig{}, errors.New("invalid flow host configuration")
 	}
+	var probe flowConfigProbe
+	if json.Unmarshal(raw, &probe) != nil {
+		return flowHostConfig{}, errors.New("invalid flow host configuration")
+	}
+	allowLoopback := envBoolTrue(flowLoopbackOriginEnv)
+	switch {
+	case probe.Schema == flowConfigSchema && probe.SchemaVersion == flowConfigSchemaVersion:
+		return decodeFlowHostConfigV1(raw, allowLoopback)
+	case probe.Schema == flowConfigSchemaV2 && probe.SchemaVersion == flowConfigSchemaVersionV2:
+		return decodeFlowHostConfigV2(raw, allowLoopback)
+	default:
+		return flowHostConfig{}, errors.New("invalid flow host configuration")
+	}
+}
+
+func decodeFlowHostConfigV1(raw []byte, allowLoopback bool) (flowHostConfig, error) {
 	var document flowConfigDocument
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
@@ -212,7 +286,6 @@ func loadFlowHostConfig(path string) (flowHostConfig, error) {
 	if document.Schema != flowConfigSchema || document.SchemaVersion != flowConfigSchemaVersion || !validFlowHostID(document.HostID) || len(document.Bindings) == 0 || len(document.Bindings) > 32 {
 		return flowHostConfig{}, errors.New("invalid flow host configuration")
 	}
-	allowLoopback := envBoolTrue(flowLoopbackOriginEnv)
 	origin, err := parseFlowOrigin(document.PaimosOrigin, allowLoopback)
 	if err != nil {
 		return flowHostConfig{}, errors.New("invalid flow host configuration")
@@ -241,6 +314,67 @@ func loadFlowHostConfig(path string) (flowHostConfig, error) {
 	}
 	return flowHostConfig{
 		Enabled:          document.Enabled,
+		Upstream:         flowUpstreamClassic,
+		HostID:           document.HostID,
+		PaimosOrigin:     origin,
+		PaimosBrowserURL: browser,
+		APIKeyFile:       document.APIKeyFile,
+		InstanceLabel:    label,
+		Bindings:         bindings,
+		ConfigDigest:     "sha256:" + hex.EncodeToString(sha256Sum(raw)),
+	}, nil
+}
+
+func decodeFlowHostConfigV2(raw []byte, allowLoopback bool) (flowHostConfig, error) {
+	var document flowConfigDocumentV2
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&document); err != nil {
+		return flowHostConfig{}, errors.New("invalid flow host configuration")
+	}
+	if document.Schema != flowConfigSchemaV2 || document.SchemaVersion != flowConfigSchemaVersionV2 || document.Upstream != flowUpstreamAeonName || !validFlowHostID(document.HostID) || !flowTenantSlugPattern.MatchString(document.TenantSlug) || len(document.Bindings) == 0 || len(document.Bindings) > 32 {
+		return flowHostConfig{}, errors.New("invalid flow host configuration")
+	}
+	origin, err := parseFlowOrigin(document.AeonOrigin, allowLoopback)
+	if err != nil {
+		return flowHostConfig{}, errors.New("invalid flow host configuration")
+	}
+	var browser *url.URL
+	if document.AeonPublicURL != nil && strings.TrimSpace(*document.AeonPublicURL) != "" {
+		browser, err = parseFlowBrowserURL(strings.TrimSpace(*document.AeonPublicURL), allowLoopback)
+		if err != nil {
+			return flowHostConfig{}, errors.New("invalid flow host configuration")
+		}
+	}
+	if !filepath.IsAbs(document.APIKeyFile) {
+		return flowHostConfig{}, errors.New("invalid flow host configuration")
+	}
+	bindings := make([]flowBinding, 0, len(document.Bindings))
+	seenNode := make(map[string]struct{}, len(document.Bindings))
+	seenKey := make(map[string]struct{}, len(document.Bindings))
+	for _, item := range document.Bindings {
+		binding, err := flowBindingFromAeonDocument(item)
+		if err != nil {
+			return flowHostConfig{}, err
+		}
+		if _, ok := seenNode[binding.ProjectNodeID]; ok {
+			return flowHostConfig{}, errors.New("invalid flow host configuration")
+		}
+		if _, ok := seenKey[binding.ProjectKey]; ok {
+			return flowHostConfig{}, errors.New("invalid flow host configuration")
+		}
+		seenNode[binding.ProjectNodeID] = struct{}{}
+		seenKey[binding.ProjectKey] = struct{}{}
+		bindings = append(bindings, binding)
+	}
+	label := document.HostID
+	if document.InstanceLabel != nil && strings.TrimSpace(*document.InstanceLabel) != "" {
+		label = strings.TrimSpace(*document.InstanceLabel)
+	}
+	return flowHostConfig{
+		Enabled:          document.Enabled,
+		Upstream:         flowUpstreamAeon,
+		TenantSlug:       document.TenantSlug,
 		HostID:           document.HostID,
 		PaimosOrigin:     origin,
 		PaimosBrowserURL: browser,
@@ -255,30 +389,65 @@ func flowBindingFromDocument(document flowBindingDocument) (flowBinding, error) 
 	if document.ProjectID == 0 || strings.TrimSpace(document.Label) == "" || len(document.PrincipalRefs) == 0 || len(document.PrincipalRefs) > 64 {
 		return flowBinding{}, errors.New("invalid flow host configuration")
 	}
-	expected := paimosOpaqueRef("proj", strconv.FormatUint(document.ProjectID, 10))
+	key := strconv.FormatUint(document.ProjectID, 10)
+	expected := paimosOpaqueRef("proj", key)
 	if document.ProjectRef != nil && strings.TrimSpace(*document.ProjectRef) != "" {
 		expected = strings.TrimSpace(*document.ProjectRef)
 	}
 	if !strings.HasPrefix(expected, flowPaimosHostID+":proj-") {
 		return flowBinding{}, errors.New("invalid flow host configuration")
 	}
-	refs := make(map[string]struct{}, len(document.PrincipalRefs))
-	for _, raw := range document.PrincipalRefs {
-		value := strings.TrimSpace(raw)
-		if value == "" || strings.Contains(value, "@") || strings.ContainsAny(value, " \t\r\n") || len(value) > 128 {
-			return flowBinding{}, errors.New("invalid flow host configuration")
-		}
-		refs[value] = struct{}{}
-	}
-	if len(refs) == 0 {
-		return flowBinding{}, errors.New("invalid flow host configuration")
+	refs, err := flowPrincipalRefs(document.PrincipalRefs)
+	if err != nil {
+		return flowBinding{}, err
 	}
 	return flowBinding{
+		Key:                key,
 		ProjectID:          document.ProjectID,
 		ExpectedProjectRef: expected,
 		Label:              strings.TrimSpace(document.Label),
 		PrincipalRefs:      refs,
 	}, nil
+}
+
+func flowBindingFromAeonDocument(document flowAeonBindingDocument) (flowBinding, error) {
+	nodeID := strings.TrimSpace(document.ProjectNodeID)
+	projectKey := strings.TrimSpace(document.ProjectKey)
+	nodeKey := strings.TrimSpace(document.NodeKey)
+	if !canonicalUUID(nodeID) || !flowProjectKeyPattern.MatchString(projectKey) || !flowNodeKeyPattern.MatchString(nodeKey) || strings.TrimSpace(document.Label) == "" {
+		return flowBinding{}, errors.New("invalid flow host configuration")
+	}
+	refs, err := flowPrincipalRefs(document.PrincipalRefs)
+	if err != nil {
+		return flowBinding{}, err
+	}
+	return flowBinding{
+		Key:                nodeID,
+		ProjectNodeID:      nodeID,
+		ProjectKey:         projectKey,
+		NodeKey:            nodeKey,
+		ExpectedProjectRef: "aeon:" + nodeID + ":" + projectKey,
+		Label:              strings.TrimSpace(document.Label),
+		PrincipalRefs:      refs,
+	}, nil
+}
+
+func flowPrincipalRefs(raw []string) (map[string]struct{}, error) {
+	if len(raw) == 0 || len(raw) > 64 {
+		return nil, errors.New("invalid flow host configuration")
+	}
+	refs := make(map[string]struct{}, len(raw))
+	for _, item := range raw {
+		value := strings.TrimSpace(item)
+		if value == "" || strings.Contains(value, "@") || strings.ContainsAny(value, " \t\r\n") || len(value) > 128 {
+			return nil, errors.New("invalid flow host configuration")
+		}
+		refs[value] = struct{}{}
+	}
+	if len(refs) == 0 {
+		return nil, errors.New("invalid flow host configuration")
+	}
+	return refs, nil
 }
 
 func (app *App) handleFlowShellState(w http.ResponseWriter, r *http.Request) {
@@ -295,7 +464,7 @@ func (app *App) handleFlowShellState(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	projectID, err := parseOptionalFlowProject(r)
+	projectKey, err := parseOptionalFlowProject(r)
 	if err != nil {
 		writeJSON(w, http.StatusOK, flowShellResponse{
 			Enabled:           true,
@@ -305,7 +474,7 @@ func (app *App) handleFlowShellState(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := app.flow.clock()
-	writeJSON(w, http.StatusOK, app.flow.shellState(session, projectID, now, app.envelopeReady()))
+	writeJSON(w, http.StatusOK, app.flow.shellState(session, projectKey, now, app.envelopeReady()))
 }
 
 func (app *App) handleFlowIntent(w http.ResponseWriter, r *http.Request) {
@@ -329,12 +498,12 @@ func (app *App) handleFlowIntent(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, r, http.StatusBadRequest, "bad_json", "Request body must be JSON")
 		return
 	}
-	projectID, err := parseOptionalFlowProject(r)
+	projectKey, err := parseOptionalFlowProject(r)
 	if err != nil {
 		writeJSON(w, http.StatusConflict, flowIntentResponse{Error: "No configured Flow binding matches this principal."})
 		return
 	}
-	status, response := app.flow.handleIntent(r, session, projectID, request, app.flow.clock(), app.envelopeReady())
+	status, response := app.flow.handleIntent(r, session, projectKey, request, app.flow.clock(), app.envelopeReady())
 	writeJSON(w, status, response)
 }
 
@@ -345,14 +514,14 @@ func (s *flowHostService) clock() int64 {
 	return time.Now().UTC().Unix()
 }
 
-func (s *flowHostService) shellState(session Session, projectID uint64, now int64, envelopeReady bool) flowShellResponse {
-	context, reason := s.resolveContext(session, projectID)
+func (s *flowHostService) shellState(session Session, projectKey string, now int64, envelopeReady bool) flowShellResponse {
+	context, reason := s.resolveContext(session, projectKey)
 	if reason != "" {
 		return flowShellResponse{Enabled: true, MountShell: false, UnavailableReason: reason}
 	}
 	projection, err := s.fetchProjection(context, now)
 	if err != nil {
-		message := "Configured Paimos projection is unavailable right now."
+		message := s.projectionUnavailableMessage()
 		var flowErr flowError
 		if errors.As(err, &flowErr) && flowErr.kind == flowErrUnavailable {
 			message = flowErr.message
@@ -373,12 +542,20 @@ func (s *flowHostService) shellState(session Session, projectID uint64, now int6
 			ContextRevision: contextRevision,
 			BindingRef:      context.bindingRef,
 			ProjectID:       context.binding.ProjectID,
+			ProjectNodeID:   context.binding.ProjectNodeID,
 			Generation:      projection.generation,
 		},
 	}
 }
 
-func (s *flowHostService) handleIntent(r *http.Request, session Session, projectID uint64, request flowIntentRequest, now int64, envelopeReady bool) (int, flowIntentResponse) {
+func (s *flowHostService) projectionUnavailableMessage() string {
+	if s.config.Upstream == flowUpstreamAeon {
+		return "Configured Aeon journey is unavailable right now."
+	}
+	return "Configured Paimos projection is unavailable right now."
+}
+
+func (s *flowHostService) handleIntent(r *http.Request, session Session, projectKey string, request flowIntentRequest, now int64, envelopeReady bool) (int, flowIntentResponse) {
 	_ = envelopeReady
 	intentType := strings.TrimSpace(request.Type)
 	if intentType == "" {
@@ -390,7 +567,7 @@ func (s *flowHostService) handleIntent(r *http.Request, session Session, project
 			Issues: []string{"Machine operator credentials cannot act as a Flow human."},
 		}
 	}
-	context, reason := s.resolveContext(session, projectID)
+	context, reason := s.resolveContext(session, projectKey)
 	if reason != "" {
 		return http.StatusConflict, flowIntentResponse{Error: reason}
 	}
@@ -418,7 +595,7 @@ func (s *flowHostService) handleIntent(r *http.Request, session Session, project
 			return status, flowIntentResponse{Error: issues[0], Issues: issues}
 		}
 	}
-	reviewURL := s.reviewURL(context.binding.ProjectID)
+	reviewURL := s.reviewURL(context.binding)
 	confirmed := confirmedStartAction(request)
 	if confirmed == "" && projection != nil {
 		confirmed = stringField(projection.shellState, "selectedAction", "selected_action")
@@ -437,19 +614,40 @@ func (s *flowHostService) handleIntent(r *http.Request, session Session, project
 				Notice: "Start stays blocked until requirements and current context are fresh. Review remains available.",
 			}
 		}
+		if s.config.Upstream == flowUpstreamAeon {
+			return http.StatusOK, flowIntentResponse{
+				Routed:   "aeon-project-journey",
+				Location: s.validNavigationLocation(reviewURL),
+				Notice:   "Start stays on the configured Aeon project journey. Janus does not start delivery.",
+			}
+		}
 		return http.StatusOK, flowIntentResponse{
 			Routed:   "paimos-project-overview-baseline",
 			Location: s.validNavigationLocation(reviewURL),
 			Notice:   "Start stays on the configured Paimos project overview baseline controls. Janus does not start delivery.",
 		}
 	case "flow:review-batch", "flow:view-drafts", "flow:save-proposal":
+		if s.config.Upstream == flowUpstreamAeon {
+			return http.StatusOK, flowIntentResponse{
+				Routed:   "aeon-project-journey",
+				Location: s.validNavigationLocation(reviewURL),
+				Notice:   "Review stays on the configured Aeon project journey.",
+			}
+		}
 		return http.StatusOK, flowIntentResponse{
 			Routed:   "paimos-project-overview-baseline",
 			Location: s.validNavigationLocation(reviewURL),
 			Notice:   "Review stays on the configured Paimos project overview baseline controls.",
 		}
 	case "flow:header-project":
-		location := s.projectOverviewURL(context.binding.ProjectID)
+		location := s.projectOverviewURL(context.binding)
+		if s.config.Upstream == flowUpstreamAeon {
+			return http.StatusOK, flowIntentResponse{
+				Routed:   "aeon-project-journey",
+				Location: s.validNavigationLocation(location),
+				Notice:   "Project navigation stays in configured Aeon.",
+			}
+		}
 		return http.StatusOK, flowIntentResponse{
 			Routed:   "paimos-project-overview",
 			Location: s.validNavigationLocation(location),
@@ -466,22 +664,22 @@ func (s *flowHostService) handleIntent(r *http.Request, session Session, project
 	}
 }
 
-func (s *flowHostService) resolveContext(session Session, projectID uint64) (flowResolvedContext, string) {
-	binding, err := s.selectBinding(session.Subject, projectID)
+func (s *flowHostService) resolveContext(session Session, projectKey string) (flowResolvedContext, string) {
+	binding, err := s.selectBinding(session.Subject, projectKey)
 	if err != nil {
 		return flowResolvedContext{}, err.Error()
 	}
-	bindingRef := janusOpaqueRef(s.config.HostID, "bind", s.config.ConfigDigest, session.Subject, strconv.FormatUint(binding.ProjectID, 10))
+	bindingRef := janusOpaqueRef(s.config.HostID, "bind", s.config.ConfigDigest, session.Subject, binding.Key)
 	return flowResolvedContext{subject: session.Subject, binding: binding, bindingRef: bindingRef}, ""
 }
 
-func (s *flowHostService) selectBinding(subject string, projectID uint64) (flowBinding, error) {
+func (s *flowHostService) selectBinding(subject string, projectKey string) (flowBinding, error) {
 	matches := make([]flowBinding, 0, 1)
 	for _, binding := range s.config.Bindings {
 		if _, ok := binding.PrincipalRefs[subject]; !ok {
 			continue
 		}
-		if projectID != 0 && binding.ProjectID != projectID {
+		if projectKey != "" && binding.Key != projectKey {
 			continue
 		}
 		matches = append(matches, binding)
@@ -502,21 +700,42 @@ func (s *flowHostService) mountEnabledFor(session Session, r *http.Request) bool
 	if !flowHumanSession(r, session) {
 		return false
 	}
-	projectID, err := parseOptionalFlowProject(r)
+	projectKey, err := parseOptionalFlowProject(r)
 	if err != nil {
 		return false
 	}
-	_, reason := s.resolveContext(session, projectID)
+	_, reason := s.resolveContext(session, projectKey)
 	return reason == ""
 }
 
 func (s *flowHostService) fetchProjection(context flowResolvedContext, now int64) (flowCachedProjection, error) {
-	key := flowCacheKey{projectID: context.binding.ProjectID, principalRef: context.subject}
+	key := flowCacheKey{bindingKey: context.binding.Key, principalRef: context.subject}
 	s.cache.mu.Lock()
 	cached, ok := s.cache.entries[key]
 	s.cache.mu.Unlock()
 	if ok && cached.fetchedAt >= floorTenMinuteBoundary(now) {
 		return cached, nil
+	}
+	if s.config.Upstream == flowUpstreamAeon {
+		fetched, revision, err := s.fetchAeonJourney(context, now)
+		if err != nil {
+			return flowCachedProjection{}, err
+		}
+		evaluatedAt := stringField(fetched, "evaluatedAt", "evaluated_at")
+		if evaluatedAt == "" {
+			evaluatedAt = isoTimestamp(now)
+		}
+		entry := flowCachedProjection{
+			generation:        flowFetchGeneration.Add(1),
+			fetchedAt:         now,
+			sourceRevision:    janusOpaqueRef(s.config.HostID, "src", context.binding.Key, evaluatedAt, strconv.FormatUint(revision, 10)),
+			shellState:        fetched,
+			paimosEvaluatedAt: evaluatedAt,
+		}
+		if err := s.storeProjection(key, context.binding.Key, revision, true, entry); err != nil {
+			return flowCachedProjection{}, err
+		}
+		return entry, nil
 	}
 	fetched, err := s.fetchPaimosState(context)
 	if err != nil {
@@ -533,10 +752,26 @@ func (s *flowHostService) fetchProjection(context flowResolvedContext, now int64
 		shellState:        fetched,
 		paimosEvaluatedAt: evaluatedAt,
 	}
-	s.cache.mu.Lock()
-	s.cache.entries[key] = entry
-	s.cache.mu.Unlock()
+	if err := s.storeProjection(key, context.binding.Key, 0, false, entry); err != nil {
+		return flowCachedProjection{}, err
+	}
 	return entry, nil
+}
+
+func (s *flowHostService) storeProjection(key flowCacheKey, bindingKey string, revision uint64, checkRevision bool, entry flowCachedProjection) error {
+	s.cache.mu.Lock()
+	defer s.cache.mu.Unlock()
+	if checkRevision {
+		if s.cache.revisions == nil {
+			s.cache.revisions = map[string]uint64{}
+		}
+		if last, ok := s.cache.revisions[bindingKey]; ok && revision < last {
+			return flowError{kind: flowErrUnavailable, message: "Configured Aeon journey reported an older revision than the last accepted one."}
+		}
+		s.cache.revisions[bindingKey] = revision
+	}
+	s.cache.entries[key] = entry
+	return nil
 }
 
 func (s *flowHostService) fetchPaimosState(context flowResolvedContext) (map[string]any, error) {
@@ -544,7 +779,7 @@ func (s *flowHostService) fetchPaimosState(context flowResolvedContext) (map[str
 	if err != nil {
 		return nil, flowError{kind: flowErrCredential, message: "credential"}
 	}
-	endpoint, err := url.JoinPath(strings.TrimRight(s.config.PaimosOrigin.String(), "/"), "api", "projects", strconv.FormatUint(context.binding.ProjectID, 10), "baseline-batches", "flow-state")
+	endpoint, err := url.JoinPath(strings.TrimRight(s.config.PaimosOrigin.String(), "/"), "api", "projects", context.binding.Key, "baseline-batches", "flow-state")
 	if err != nil {
 		return nil, flowError{kind: flowErrConfiguration, message: "configuration"}
 	}
@@ -582,6 +817,270 @@ func (s *flowHostService) fetchPaimosState(context flowResolvedContext) (map[str
 		return nil, err
 	}
 	return stripPaimosIdentity(object), nil
+}
+
+func (s *flowHostService) fetchAeonJourney(context flowResolvedContext, now int64) (map[string]any, uint64, error) {
+	apiKey, err := readFlowAPIKey(s.config.APIKeyFile)
+	if err != nil {
+		return nil, 0, flowError{kind: flowErrCredential, message: "credential"}
+	}
+	endpoint, err := url.JoinPath(strings.TrimRight(s.config.PaimosOrigin.String(), "/"), "api", "projects", context.binding.ProjectNodeID, "journey")
+	if err != nil {
+		return nil, 0, flowError{kind: flowErrConfiguration, message: "configuration"}
+	}
+	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, 0, flowError{kind: flowErrTransport, message: "transport"}
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", flowUserAgent)
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return nil, 0, flowError{kind: flowErrTransport, message: "transport"}
+	}
+	defer resp.Body.Close()
+	payload, err := boundedResponseBytes(resp.Body, resp.ContentLength)
+	if err != nil {
+		return nil, 0, err
+	}
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return nil, 0, flowError{kind: flowErrUnavailable, message: "Configured Aeon key cannot read this project journey."}
+	}
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, 0, flowError{kind: flowErrUnavailable, message: "Configured Aeon project journey is unavailable for this binding."}
+	}
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return nil, 0, flowError{kind: flowErrUnavailable, message: "Configured Aeon journey refused the upstream request."}
+	}
+	if !jsonContentType(resp.Header.Get("Content-Type")) {
+		return nil, 0, flowError{kind: flowErrTransport, message: "transport"}
+	}
+	var parsed any
+	if json.Unmarshal(payload, &parsed) != nil {
+		return nil, 0, flowError{kind: flowErrTransport, message: "transport"}
+	}
+	object, ok := parsed.(map[string]any)
+	if !ok {
+		return nil, 0, flowError{kind: flowErrUnavailable, message: "configured project binding mismatch"}
+	}
+	if err := validateAeonBinding(object, context.binding, s.config.TenantSlug); err != nil {
+		return nil, 0, err
+	}
+	revision, ok := wholeUint(object["revision"])
+	if !ok || revision < 1 {
+		return nil, 0, flowError{kind: flowErrUnavailable, message: "Configured Aeon journey has no usable revision."}
+	}
+	shell := aeonShellState(object, context.binding, now)
+	stripForbiddenKeys(shell)
+	return shell, revision, nil
+}
+
+func jsonContentType(header string) bool {
+	media := strings.ToLower(strings.TrimSpace(header))
+	if i := strings.Index(media, ";"); i >= 0 {
+		media = strings.TrimSpace(media[:i])
+	}
+	return media == "application/json"
+}
+
+func validateAeonBinding(journey map[string]any, binding flowBinding, tenantSlug string) error {
+	if strings.ToLower(stringField(journey, "project_node_id")) != binding.ProjectNodeID || stringField(journey, "project_key") != binding.ProjectKey || stringField(journey, "node_key") != binding.NodeKey {
+		return flowError{kind: flowErrUnavailable, message: "configured project binding mismatch"}
+	}
+	if stringField(journey, "tenant_slug") != tenantSlug {
+		return flowError{kind: flowErrUnavailable, message: "configured tenant binding mismatch"}
+	}
+	return nil
+}
+
+func aeonShellState(journey map[string]any, binding flowBinding, now int64) map[string]any {
+	stage := stringField(journey, "stage")
+	stages := []any{}
+	if raw, ok := journey["stages"].([]any); ok {
+		stages = raw
+	}
+	stageState := func(key string) string {
+		for _, item := range stages {
+			entry, ok := item.(map[string]any)
+			if !ok || stringField(entry, "key") != key {
+				continue
+			}
+			if state := stringField(entry, "state"); state != "" {
+				return state
+			}
+			return "later"
+		}
+		return "later"
+	}
+	canAdmit := false
+	if launch, ok := journey["launch_readiness"].(map[string]any); ok {
+		if value, ok := launch["can_admit"].(bool); ok {
+			canAdmit = value
+		}
+	}
+	status := "pending"
+	switch stage {
+	case "deploy", "access":
+		if canAdmit {
+			status = "authorized"
+		} else {
+			status = "draft"
+		}
+	case "plan", "build":
+		status = "draft"
+	case "live":
+		status = "live"
+	}
+	var batchRef any
+	if release, ok := canonicalReleaseID(stringField(journey, "current_release_id")); ok {
+		batchRef = "release:" + release
+	}
+	requirementsRevision, _ := wholeUint(journey["requirements_revision"])
+	digest := stringField(journey, "requirements_digest_sha256")
+	digestOK := isLowerHexString(digest, 64)
+	var baselineDigest any
+	var requirementsEvidence any
+	if digestOK {
+		baselineDigest = "sha256:" + digest
+		requirementsEvidence = "aeon:req-" + digest[:16]
+	}
+	evaluatedAt := isoTimestamp(now)
+	freshUntil := isoTimestamp(nextTenMinuteBoundary(now))
+	requirementsStatus := "pending"
+	if stageState("requirements") == "done" && digestOK {
+		requirementsStatus = "pass"
+	}
+	prerequisites := map[string]any{
+		"requirementsBaseline": map[string]any{
+			"status":      requirementsStatus,
+			"gateKind":    "requirements_baseline",
+			"evidenceRef": requirementsEvidence,
+			"observedAt":  evaluatedAt,
+			"freshUntil":  freshUntil,
+		},
+	}
+	deployState := stageState("deploy")
+	readiness := ""
+	switch {
+	case stage == "live":
+		readiness = "live"
+	case deployState == "done":
+		readiness = "ready"
+	case deployState == "current":
+		readiness = "preliminary"
+	}
+	if readiness != "" {
+		if prefix, ok := uuidHexPrefix(stageField(stages, "deploy", "handoff_id")); ok {
+			prerequisites["pharosTarget"] = map[string]any{
+				"status":      "pass",
+				"gateKind":    "pharos_target",
+				"readiness":   readiness,
+				"evidenceRef": "aeon:deploy-" + prefix,
+				"observedAt":  evaluatedAt,
+				"freshUntil":  freshUntil,
+			}
+		}
+	}
+	janusGate := map[string]any{
+		"status":      "pending",
+		"gateKind":    "janus_gate",
+		"evidenceRef": nil,
+		"observedAt":  evaluatedAt,
+		"freshUntil":  freshUntil,
+	}
+	if prefix, ok := uuidHexPrefix(stageField(stages, "access", "gate_approval_id")); ok {
+		janusGate["status"] = "pass"
+		janusGate["evidenceRef"] = "aeon:gate-" + prefix
+	}
+	prerequisites["janusGate"] = janusGate
+	var stageSource any
+	if value, ok := journey["stage_source"]; ok {
+		stageSource = value
+	}
+	imported := false
+	if value, ok := journey["imported"].(bool); ok {
+		imported = value
+	}
+	var nextAction any
+	if value, ok := journey["next_action"]; ok {
+		nextAction = value
+	}
+	var launchReadiness any
+	if value, ok := journey["launch_readiness"]; ok {
+		launchReadiness = value
+	}
+	return map[string]any{
+		"evaluatedAt": evaluatedAt,
+		"header": map[string]any{
+			"appName":     "Aeon",
+			"projectName": binding.Label,
+		},
+		"health": map[string]any{"status": "available", "label": "Aeon journey"},
+		"delivery": map[string]any{
+			"status":         status,
+			"batchRef":       batchRef,
+			"baselineRef":    fmt.Sprintf("requirements:%d", requirementsRevision),
+			"baselineDigest": baselineDigest,
+		},
+		"prerequisites": prerequisites,
+		"progress": map[string]any{
+			"stages":          stages,
+			"nextAction":      nextAction,
+			"launchReadiness": launchReadiness,
+			"revision":        journey["revision"],
+			"stage":           stage,
+			"stageSource":     stageSource,
+			"imported":        imported,
+			"projectNodeId":   binding.ProjectNodeID,
+			"projectKey":      binding.ProjectKey,
+		},
+		"executionModes":        []string{"manual"},
+		"selectedExecutionMode": "manual",
+	}
+}
+
+func stageField(stages []any, key, field string) string {
+	for _, item := range stages {
+		entry, ok := item.(map[string]any)
+		if !ok || stringField(entry, "key") != key {
+			continue
+		}
+		return stringField(entry, field)
+	}
+	return ""
+}
+
+func canonicalReleaseID(value string) (string, bool) {
+	lower := strings.ToLower(strings.TrimSpace(value))
+	if !canonicalUUID(lower) {
+		return "", false
+	}
+	return lower, true
+}
+
+func uuidHexPrefix(value string) (string, bool) {
+	lower := strings.ToLower(strings.TrimSpace(value))
+	if !canonicalUUID(lower) {
+		return "", false
+	}
+	hex := strings.ReplaceAll(lower, "-", "")
+	if len(hex) < 16 {
+		return "", false
+	}
+	return hex[:16], true
+}
+
+func wholeUint(value any) (uint64, bool) {
+	number, ok := value.(float64)
+	if !ok || number < 0 || number > 9007199254740991 {
+		return 0, false
+	}
+	whole := uint64(number)
+	if float64(whole) != number {
+		return 0, false
+	}
+	return whole, true
 }
 
 func (s *flowHostService) validateSubmittedIdentity(context flowResolvedContext, session Session, submitted map[string]any, sourceRevision string, now int64) []string {
@@ -641,15 +1140,28 @@ func (s *flowHostService) paimosBrowserString() string {
 	return strings.TrimRight(browser.String(), "/")
 }
 
-func (s *flowHostService) reviewURL(projectID uint64) string {
-	return fmt.Sprintf("%s/projects/%d?tab=overview%s", s.paimosBrowserString(), projectID, flowReviewFragment)
+func (s *flowHostService) reviewURL(binding flowBinding) string {
+	if s.config.Upstream == flowUpstreamAeon {
+		return s.aeonJourneyURL(binding.ProjectKey)
+	}
+	return fmt.Sprintf("%s/projects/%d?tab=overview%s", s.paimosBrowserString(), binding.ProjectID, flowReviewFragment)
 }
 
-func (s *flowHostService) projectOverviewURL(projectID uint64) string {
-	return fmt.Sprintf("%s/projects/%d?tab=overview", s.paimosBrowserString(), projectID)
+func (s *flowHostService) projectOverviewURL(binding flowBinding) string {
+	if s.config.Upstream == flowUpstreamAeon {
+		return s.aeonJourneyURL(binding.ProjectKey)
+	}
+	return fmt.Sprintf("%s/projects/%d?tab=overview", s.paimosBrowserString(), binding.ProjectID)
+}
+
+func (s *flowHostService) aeonJourneyURL(projectKey string) string {
+	return s.paimosBrowserString() + "/p/" + projectKey + "?" + flowAeonReviewQuery
 }
 
 func (s *flowHostService) validNavigationLocation(location string) string {
+	if s.config.Upstream == flowUpstreamAeon {
+		return s.validAeonNavigationLocation(location)
+	}
 	parsed, err := url.Parse(location)
 	if err != nil {
 		return ""
@@ -686,6 +1198,34 @@ func (s *flowHostService) validNavigationLocation(location string) string {
 	return location
 }
 
+func (s *flowHostService) validAeonNavigationLocation(location string) string {
+	parsed, err := url.Parse(location)
+	if err != nil {
+		return ""
+	}
+	browser := s.paimosBrowser()
+	if browser == nil {
+		return ""
+	}
+	if parsed.Scheme != browser.Scheme || parsed.Host != browser.Host || parsed.User != nil || parsed.Fragment != "" {
+		return ""
+	}
+	if parsed.RawQuery != flowAeonReviewQuery {
+		return ""
+	}
+	basePath := strings.TrimSuffix(browser.Path, "/")
+	key, ok := strings.CutPrefix(parsed.Path, basePath+"/p/")
+	if !ok || key == "" || strings.Contains(key, "/") || !flowProjectKeyPattern.MatchString(key) {
+		return ""
+	}
+	for _, binding := range s.config.Bindings {
+		if binding.ProjectKey == key {
+			return location
+		}
+	}
+	return ""
+}
+
 func (app *App) injectFlowShell(r *http.Request, html string) (string, bool) {
 	if app == nil || app.flow == nil {
 		return html, false
@@ -701,14 +1241,21 @@ func (app *App) injectFlowShell(r *http.Request, html string) (string, bool) {
 	if nonce == "" {
 		return html, false
 	}
-	projectID, _ := parseOptionalFlowProject(r)
-	context, reason := app.flow.resolveContext(session, projectID)
+	projectKey, err := parseOptionalFlowProject(r)
+	if err != nil {
+		return html, false
+	}
+	context, reason := app.flow.resolveContext(session, projectKey)
 	if reason != "" {
 		return html, false
 	}
 	origin := htmlEscapeAttr(app.flow.paimosBrowserString())
-	project := htmlEscapeAttr(strconv.FormatUint(context.binding.ProjectID, 10))
-	wrapped := strings.Replace(html, "<main", `<inspr-flow-shell layout-mode="bounded" content-padding="24px" data-flow-host data-flow-project="`+project+`" data-flow-paimos-origin="`+origin+`"><main`, 1)
+	project := htmlEscapeAttr(context.binding.Key)
+	attrs := `data-flow-host data-flow-project="` + project + `" data-flow-paimos-origin="` + origin + `"`
+	if app.flow.config.Upstream == flowUpstreamAeon {
+		attrs += ` data-flow-upstream="aeon" data-flow-project-key="` + htmlEscapeAttr(context.binding.ProjectKey) + `"`
+	}
+	wrapped := strings.Replace(html, "<main", `<inspr-flow-shell layout-mode="bounded" content-padding="24px" `+attrs+`><main`, 1)
 	wrapped = strings.Replace(wrapped, "</main>", "</main></inspr-flow-shell>", 1)
 	bootstrap := `<script type="module" src="` + htmlEscapeAttr(app.cfg.PublicPath("/static/flow-host-bootstrap.mjs")) + `" nonce="` + nonce + `"></script>`
 	if index := strings.LastIndex(wrapped, "</body>"); index >= 0 {
@@ -906,7 +1453,7 @@ func mergeShellState(upstream map[string]any, config flowHostConfig, context flo
 func issueFlowIdentity(config flowHostConfig, context flowResolvedContext, contextRevision string, now int64) map[string]any {
 	issued := isoTimestamp(now)
 	principalRef := janusOpaqueRef(config.HostID, "prin", context.subject)
-	projectRef := janusOpaqueRef(config.HostID, "proj", strconv.FormatUint(context.binding.ProjectID, 10))
+	projectRef := janusOpaqueRef(config.HostID, "proj", context.binding.Key)
 	return map[string]any{
 		"contract_version":     flowIdentityContract,
 		"evaluated_at":         issued,
@@ -1018,7 +1565,7 @@ func contextRevisionFor(config flowHostConfig, context flowResolvedContext, sess
 		config.ConfigDigest,
 		context.subject,
 		session.Expiry.UTC().Format(time.RFC3339Nano),
-		strconv.FormatUint(context.binding.ProjectID, 10),
+		context.binding.Key,
 		context.binding.ExpectedProjectRef,
 		sourceRevision,
 	)
@@ -1161,16 +1708,15 @@ func gateStale(entry map[string]any, now int64) bool {
 	return fresh == 0 || now > fresh
 }
 
-func parseOptionalFlowProject(r *http.Request) (uint64, error) {
+func parseOptionalFlowProject(r *http.Request) (string, error) {
 	raw := strings.TrimSpace(r.URL.Query().Get("flow_project"))
 	if raw == "" {
-		return 0, nil
+		return "", nil
 	}
-	id, err := strconv.ParseUint(raw, 10, 64)
-	if err != nil || id == 0 {
-		return 0, errors.New("invalid project")
+	if !canonicalFlowProjectKey(raw) {
+		return "", errors.New("invalid project")
 	}
-	return id, nil
+	return raw, nil
 }
 
 func htmlEscapeAttr(value string) string {

@@ -174,6 +174,19 @@ if (shell) {
       return false;
     }
     const basePath = allowed.pathname.replace(/\/$/, '');
+    if (shell.dataset.flowUpstream === 'aeon') {
+      const key = shell.dataset.flowProjectKey || '';
+      if (!/^[A-Z][A-Z0-9]{1,9}$/.test(key)) {
+        return false;
+      }
+      if (target.username || target.password) {
+        return false;
+      }
+      if (target.pathname !== `${basePath}/p/${key}`) {
+        return false;
+      }
+      return target.search === '?view=journey' && target.hash === '';
+    }
     const prefix = (basePath === '' ? '' : basePath) + '/projects/';
     if (!target.pathname.startsWith(prefix)) {
       return false;

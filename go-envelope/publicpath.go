@@ -239,11 +239,37 @@ func safeReturnQuery(raw string) (string, bool) {
 	if strings.Contains(project, "://") || strings.HasPrefix(project, "//") || encodedDotSegment.FindStringIndex(project) != nil {
 		return "", false
 	}
-	parsed, err := strconv.ParseUint(project, 10, 64)
-	if err != nil || parsed == 0 || strconv.FormatUint(parsed, 10) != project {
+	if !canonicalFlowProjectKey(project) {
 		return "", false
 	}
 	return "flow_project=" + project, true
+}
+
+func canonicalFlowProjectKey(project string) bool {
+	if id, err := strconv.ParseUint(project, 10, 64); err == nil && id > 0 && strconv.FormatUint(id, 10) == project {
+		return true
+	}
+	return canonicalUUID(project)
+}
+
+func canonicalUUID(value string) bool {
+	if len(value) != 36 {
+		return false
+	}
+	for i := 0; i < 36; i++ {
+		switch i {
+		case 8, 13, 18, 23:
+			if value[i] != '-' {
+				return false
+			}
+		default:
+			c := value[i]
+			if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func safeLoginReturnPath(raw string) (string, bool) {
