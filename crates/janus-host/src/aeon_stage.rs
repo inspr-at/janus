@@ -42,12 +42,12 @@ use crate::paimos::{
 /// Aeon stage-handoff wire contract Janus is pinned to.
 pub const AEON_STAGE_CONTRACT: &str = "inspr.aeon.stage-handoff.v1";
 /// Aeon release carrying the pinned stage-handoff and journey contract.
-pub const AEON_STAGE_RELEASE: &str = "v260926071154.0.0";
+pub const AEON_STAGE_RELEASE: &str = "v260926083057.0.0";
 /// Aeon commit of [`AEON_STAGE_RELEASE`].
-pub const AEON_STAGE_COMMIT: &str = "482c563482c014c2097e65f7ef528444e12ec7af";
+pub const AEON_STAGE_COMMIT: &str = "4f968808157d1d5c35c096b683bd332a2ee15d8d";
 /// SHA-256 of `api/openapi.yaml` at [`AEON_STAGE_COMMIT`].
 pub const AEON_OPENAPI_SHA256: &str =
-    "4420f2d269af7477bcb41a7fa0d670f28376a151145c71ebb368c61ade370493";
+    "5332184da86c52f42c988431c994814d4418c2a6f986b879a62662967e2160b0";
 
 pub(crate) const CONFIG_SCHEMA: &str = "inspr.janus.aeon-stage-reporter-config.v1";
 pub(crate) const MANAGED_CONFIG_SCHEMA: &str =

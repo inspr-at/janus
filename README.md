@@ -158,8 +158,9 @@ with an Aeon agent key holding `journey.read`, refuses the answer unless its
 `project_node_id`, `project_key`, `node_key` and `tenant_slug` all equal the
 binding, refuses an older journey revision, and projects only the supported
 Flow stage fields (the eight Aeon stages fold onto the four Flow stages; the
-Access permit always shows as decided in Aeon, never as a Janus pass, because
-the journey names the approval but not whether it is still live; only
+Access permit shows as passed only when Aeon's server-derived `gate_live`
+reports a currently valid approval and grant, never from the historical
+approval id alone; only
 recorded journey history counts as stage or requirements evidence, never a
 derived rail or the pre-Plan stages of an imported project). Browser
 links go to `/p/{project_key}?view=journey` on the
@@ -718,9 +719,9 @@ or operation, a closed or expired handoff, a missing or revoked grant, a
 divergent replay, a changed seal, or another terminal result all fail closed
 with value-free `aeon_reporter_*` reason codes.
 
-The pinned contract is Aeon `v260926071154.0.0`, commit
-`482c563482c014c2097e65f7ef528444e12ec7af`, whose `api/openapi.yaml` has
-SHA-256 `4420f2d269af7477bcb41a7fa0d670f28376a151145c71ebb368c61ade370493`.
+The pinned contract is Aeon `v260926083057.0.0`, commit
+`4f968808157d1d5c35c096b683bd332a2ee15d8d`, whose `api/openapi.yaml` has
+SHA-256 `5332184da86c52f42c988431c994814d4418c2a6f986b879a62662967e2160b0`.
 The relevant excerpt lives under `contracts/aeon-stage-handoff-v1/` and is
 checked by `scripts/check-aeon-stage-handoff-pins.py` (add
 `--aeon-checkout <path>` to re-derive it from the Aeon repository).

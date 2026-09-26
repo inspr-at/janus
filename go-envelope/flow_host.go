@@ -997,16 +997,10 @@ func aeonShellState(journey map[string]any, binding flowBinding, now int64) map[
 			"observedAt":  evaluatedAt,
 			"freshUntil":  freshUntil,
 		},
-		// The journey names the Access gate's approval but not whether that
-		// permit is still live (expiry, revocation). Aeon decides and
-		// enforces it on every Janus write, so Flow never shows it as passed.
-		"janusGate": map[string]any{
-			"status":     "unknown",
-			"gateKind":   "janus_gate",
-			"message":    "Aeon decides the Access permit. Open the project journey in Aeon.",
-			"observedAt": evaluatedAt,
-			"freshUntil": freshUntil,
-		},
+		// The Access permit is shown as passed only from Aeon's server-derived
+		// gate_live (a currently valid approval and grant). The approval id
+		// alone is history. Aeon still enforces the permit on every write.
+		"janusGate": aeonJanusGate(stages, evaluatedAt, freshUntil),
 	}
 	deployState := stageState("deploy")
 	readiness := ""
@@ -1055,6 +1049,33 @@ func aeonShellState(journey map[string]any, binding flowBinding, now int64) map[
 		"prerequisites":         prerequisites,
 		"executionModes":        []string{"manual"},
 		"selectedExecutionMode": "manual",
+	}
+}
+
+func aeonJanusGate(stages []any, evaluatedAt, freshUntil string) map[string]any {
+	for _, item := range stages {
+		entry, ok := item.(map[string]any)
+		if !ok || stringField(entry, "key") != "access" {
+			continue
+		}
+		live, _ := entry["gate_live"].(bool)
+		prefix, idOK := uuidHexPrefix(stringField(entry, "gate_approval_id"))
+		if live && idOK {
+			return map[string]any{
+				"status":      "pass",
+				"gateKind":    "janus_gate",
+				"evidenceRef": "aeon:gate-" + prefix,
+				"observedAt":  evaluatedAt,
+				"freshUntil":  freshUntil,
+			}
+		}
+	}
+	return map[string]any{
+		"status":     "unknown",
+		"gateKind":   "janus_gate",
+		"message":    "Aeon decides the Access permit. Open the project journey in Aeon.",
+		"observedAt": evaluatedAt,
+		"freshUntil": freshUntil,
 	}
 }
 

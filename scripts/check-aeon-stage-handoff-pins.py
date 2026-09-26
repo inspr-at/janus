@@ -27,12 +27,12 @@ CONTRACT_DIRECTORY = Path("contracts/aeon-stage-handoff-v1")
 EXCERPT = "openapi-excerpt-v1.yaml"
 MANIFEST = "manifest-v1.json"
 RUST_SOURCE = Path("crates/janus-host/src/aeon_stage.rs")
-EXPECTED_MANIFEST_SHA256 = "ffd0f0d3c1cf18e51a8d696a8feaa72d87452330fdb143d3dc09e9211ad13a35"
-EXPECTED_EXCERPT = (15122, "0d41ad7d259a509d05696d3f3d48d71996d91e247d82909ea7d7cba3aa2811aa")
+EXPECTED_MANIFEST_SHA256 = "77fe3ab2abc18872c9ad2c529266329a43d78cd2ef895fa540f3f33718e404aa"
+EXPECTED_EXCERPT = (15284, "096a89327604078630f89fc360b3b38686b2b9c75a248b8b0edcb1aab67eaef1")
 CONTRACT = "inspr.aeon.stage-handoff.v1"
-RELEASE = "v260926071154.0.0"
-COMMIT = "482c563482c014c2097e65f7ef528444e12ec7af"
-SPEC_SHA256 = "4420f2d269af7477bcb41a7fa0d670f28376a151145c71ebb368c61ade370493"
+RELEASE = "v260926083057.0.0"
+COMMIT = "4f968808157d1d5c35c096b683bd332a2ee15d8d"
+SPEC_SHA256 = "5332184da86c52f42c988431c994814d4418c2a6f986b879a62662967e2160b0"
 PATHS = (
     "/me",
     "/projects/{projectId}/journey",
@@ -139,7 +139,7 @@ def verify(repo_root: Path, checkout: Path | None) -> None:
         "aeon_release": RELEASE,
         "aeon_commit": COMMIT,
         "openapi_path": "api/openapi.yaml",
-        "openapi_sha256": SPEC_SHA256,
+        "spec_sha256": SPEC_SHA256,
         "paths": list(PATHS),
         "schemas": list(SCHEMAS),
         "excerpt": {

@@ -141,7 +141,7 @@ pub(crate) fn journey_body() -> Value {
         "revision": 7,
         "stage": "access",
         "stage_source": "journey",
-        "stages": [{"key": "access", "state": "current", "gate_approval_id": null, "handoff_id": HANDOFF_ID}],
+        "stages": [{"key": "access", "state": "current", "gate_approval_id": null, "gate_live": false, "handoff_id": HANDOFF_ID}],
         "next_action": {"key": "approve_permit", "label": "Approve permit", "stage": "access", "available": true},
         "requirements_revision": 2,
         "requirements_digest_sha256": "6".repeat(64),
