@@ -45,6 +45,10 @@ class CalendarMigration(unittest.TestCase):
             anchor=channel['migration']['first_calendar_version']
             wrong=2 if meta['version']==anchor else channel['migration']['first_calendar_release_sequence']
             with self.assertRaises(ValueError): validate_release(tag,{**meta,'release_sequence':wrong})
+            # The migration anchor itself is valid only at the first sequence.
+            anchor_meta={**meta,'version':anchor,'release_sequence':channel['migration']['first_calendar_release_sequence']}
+            self.assertEqual(validate_release(channel['tag_prefix']+anchor,anchor_meta),anchor_meta)
+            with self.assertRaises(ValueError): validate_release(channel['tag_prefix']+anchor,{**anchor_meta,'release_sequence':2})
             later=shifted(anchor,1)
             with self.assertRaises(ValueError): validate_release(channel['tag_prefix']+later,{**meta,'version':later,'release_sequence':1})
             validate_release(channel['tag_prefix']+later,{**meta,'version':later,'release_sequence':2})

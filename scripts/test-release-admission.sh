@@ -169,6 +169,9 @@ JANUS_COSIGN_BIN=true JANUS_GH_BIN=true "${admit}" \
   --image "${image}" --tag "${calendar_tag}" --digest "${digest}" \
   --source-manifest "${work}/calendar-source.json" --source-bundle "${source_bundle}" \
   --scanner-summary "${scanner_summary}" --output "${work}/calendar-admission.json" >/dev/null
-jq -e '.artifact.release.version_scheme == "inspr-calendar-v2" and .artifact.release.release_channel == "stable" and .artifact.release.release_sequence == 1' "${work}/calendar-admission.json" >/dev/null
+calendar_sequence="$(python3 -c 'import json; print(json.load(open("go-envelope/internal/versioninfo/release.json"))["channels"]["stable"]["release_sequence"])')"
+jq -e --arg version "${calendar_tag#rust-engine-v}" --argjson sequence "${calendar_sequence}" \
+  '.artifact.release.version_scheme == "inspr-calendar-v2" and .artifact.release.release_channel == "stable" and .artifact.release.version == $version and .artifact.release.release_sequence == $sequence' \
+  "${work}/calendar-admission.json" >/dev/null
 
 printf 'ok: release admission fixtures passed\n'
