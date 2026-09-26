@@ -919,13 +919,26 @@ func aeonShellState(journey map[string]any, binding flowBinding, now int64) map[
 	if launch, ok := journey["launch_readiness"].(map[string]any); ok {
 		canAdmit, _ = launch["can_admit"].(bool)
 	}
+	// Only recorded journey history is evidence. A derived rail, and the
+	// pre-Plan stages of an imported project, show position, not agreement.
+	imported, _ := journey["imported"].(bool)
+	recorded := func(key string) bool {
+		if stringField(journey, "stage_source") != "journey" {
+			return false
+		}
+		return !imported || (key != "inspire" && key != "shape" && key != "requirements")
+	}
 	activeStage := 0
 	stageEvidence := make([]any, 4)
 	for index, group := range aeonFlowStages {
-		done, skipped := 0, 0
+		done, skipped, unrecorded := 0, 0, 0
 		for _, key := range group {
 			if key == stage {
 				activeStage = index
+			}
+			if !recorded(key) {
+				unrecorded++
+				continue
 			}
 			switch stageState(key) {
 			case "done":
@@ -935,6 +948,8 @@ func aeonShellState(journey map[string]any, binding flowBinding, now int64) map[
 			}
 		}
 		switch {
+		case unrecorded > 0:
+			stageEvidence[index] = "unknown"
 		case skipped == len(group):
 			stageEvidence[index] = "not_in_batch"
 		case done > 0 && done+skipped == len(group):
@@ -971,7 +986,7 @@ func aeonShellState(journey map[string]any, binding flowBinding, now int64) map[
 	evaluatedAt := isoTimestamp(now)
 	freshUntil := isoTimestamp(nextTenMinuteBoundary(now))
 	requirementsStatus := "unknown"
-	if stageState("requirements") == "done" && digestOK {
+	if recorded("requirements") && stageState("requirements") == "done" && requirementsRevision >= 1 && digestOK {
 		requirementsStatus = "pass"
 	}
 	prerequisites := map[string]any{
@@ -1454,7 +1469,9 @@ func mergeShellState(upstream map[string]any, config flowHostConfig, context flo
 		delivery = cloneObject(delivery)
 	}
 	delivery["viewedStage"] = 3
-	if !janusGatePassed(shell, now) {
+	// Aeon evidence is recorded history, independent of the live permit,
+	// which Flow never shows as passed for Aeon.
+	if config.Upstream != flowUpstreamAeon && !janusGatePassed(shell, now) {
 		if evidence, ok := delivery["stageEvidence"].([]any); ok && len(evidence) > 3 {
 			evidence[3] = "unknown"
 			delivery["stageEvidence"] = evidence

@@ -159,7 +159,9 @@ with an Aeon agent key holding `journey.read`, refuses the answer unless its
 binding, refuses an older journey revision, and projects only the supported
 Flow stage fields (the eight Aeon stages fold onto the four Flow stages; the
 Access permit always shows as decided in Aeon, never as a Janus pass, because
-the journey names the approval but not whether it is still live). Browser
+the journey names the approval but not whether it is still live; only
+recorded journey history counts as stage or requirements evidence, never a
+derived rail or the pre-Plan stages of an imported project). Browser
 links go to `/p/{project_key}?view=journey` on the
 Aeon public URL and no other path is allowlisted. Schema v1 stays the classic
 Paimos host unchanged, so rollback is restoring the v1 file.

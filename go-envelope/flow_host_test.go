@@ -988,7 +988,7 @@ func sampleAeonJourney() map[string]any {
 		"tenant_slug":                aeonTenantSlug,
 		"revision":                   4,
 		"stage":                      "deploy",
-		"stage_source":               "aeon",
+		"stage_source":               "journey",
 		"imported":                   false,
 		"current_release_id":         "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
 		"requirements_revision":      7,
@@ -1057,7 +1057,7 @@ func TestAeonShellStateUsesOnlyFlowShellValues(t *testing.T) {
 		}
 		return out
 	}
-	live := aeonShellState(map[string]any{"stage": "live", "stages": allStates("done")}, binding, 1_700_000_000)
+	live := aeonShellState(map[string]any{"stage": "live", "stage_source": "journey", "stages": allStates("done")}, binding, 1_700_000_000)
 	delivery := live["delivery"].(map[string]any)
 	if delivery["status"] != "completed" || delivery["activeStage"] != 3 {
 		t.Fatalf("live delivery=%v", delivery)
@@ -1070,7 +1070,7 @@ func TestAeonShellStateUsesOnlyFlowShellValues(t *testing.T) {
 	blockedStages := allStates("later")
 	blockedStages[5] = map[string]any{"key": "deploy", "state": "blocked"}
 	blockedStages[6] = map[string]any{"key": "access", "state": "skipped"}
-	blocked := aeonShellState(map[string]any{"stage": "deploy", "stages": blockedStages, "next_action": map[string]any{"label": "<script>x</script>"}}, binding, 1_700_000_000)
+	blocked := aeonShellState(map[string]any{"stage": "deploy", "stage_source": "journey", "stages": blockedStages, "next_action": map[string]any{"label": "<script>x</script>"}}, binding, 1_700_000_000)
 	delivery = blocked["delivery"].(map[string]any)
 	if delivery["status"] != "blocked" || delivery["activeStage"] != 2 || delivery["stageEvidence"].([]any)[3] != "not_in_batch" || delivery["batchStatusLabel"] != "Aeon journey" {
 		t.Fatalf("blocked delivery=%v", delivery)
@@ -1081,5 +1081,67 @@ func TestAeonShellStateUsesOnlyFlowShellValues(t *testing.T) {
 		if status := shell["delivery"].(map[string]any)["status"].(string); !allowed[status] {
 			t.Fatalf("stage %q status %q", stage, status)
 		}
+	}
+}
+
+func TestAeonImportedOrDerivedHistoryIsNotEvidence(t *testing.T) {
+	binding := flowBinding{ProjectNodeID: aeonProjectNodeID, ProjectKey: aeonProjectKey, Label: "Janus"}
+	done := func() []any {
+		out := []any{}
+		for _, key := range []string{"inspire", "shape", "requirements", "plan", "build"} {
+			out = append(out, map[string]any{"key": key, "state": "done"})
+		}
+		return append(out, map[string]any{"key": "deploy", "state": "current"}, map[string]any{"key": "access", "state": "skipped"}, map[string]any{"key": "live", "state": "later"})
+	}
+	digest := strings.Repeat("a", 64)
+	for name, journey := range map[string]map[string]any{
+		"derived":  {"stage": "deploy", "stage_source": "derived", "imported": false, "requirements_revision": 3, "requirements_digest_sha256": digest, "stages": done()},
+		"imported": {"stage": "deploy", "stage_source": "journey", "imported": true, "requirements_revision": 3, "requirements_digest_sha256": digest, "stages": done()},
+		"unagreed": {"stage": "deploy", "stage_source": "journey", "imported": false, "requirements_revision": 0, "requirements_digest_sha256": digest, "stages": done()},
+	} {
+		shell := aeonShellState(journey, binding, 1_700_000_000)
+		gate := shell["prerequisites"].(map[string]any)["requirementsBaseline"].(map[string]any)
+		if gate["status"] != "unknown" {
+			t.Fatalf("%s: requirements=%v", name, gate)
+		}
+		evidence := shell["delivery"].(map[string]any)["stageEvidence"].([]any)
+		if name != "unagreed" && evidence[0] != "unknown" {
+			t.Fatalf("%s: define evidence=%v", name, evidence)
+		}
+		if name == "imported" && (evidence[1] != "performed" || evidence[3] != "not_in_batch") {
+			t.Fatalf("imported recorded stages=%v", evidence)
+		}
+	}
+}
+
+func TestAeonAccessEvidenceSurvivesTheMerge(t *testing.T) {
+	journey := sampleAeonJourney()
+	journey["stage"] = "live"
+	stages := journey["stages"].([]any)
+	for index, item := range stages {
+		entry := cloneObject(item.(map[string]any))
+		entry["state"] = "done"
+		stages[index] = entry
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(journey)
+	}))
+	t.Cleanup(server.Close)
+	service := testAeonService(t, server.URL)
+	service.now = func() int64 { return 1_700_000_000 }
+	session := Session{Subject: "operator-a", Roles: []string{RoleViewer}, Expiry: time.Now().UTC().Add(time.Hour)}
+	out := service.shellState(session, aeonProjectNodeID, 1_700_000_000, true)
+	if !out.MountShell {
+		t.Fatalf("unavailable: %s", out.UnavailableReason)
+	}
+	delivery := out.ShellState["delivery"].(map[string]any)
+	evidence := delivery["stageEvidence"].([]any)
+	if delivery["status"] != "completed" || evidence[3] != "performed" {
+		t.Fatalf("final shell delivery=%v", delivery)
+	}
+	gate := out.ShellState["prerequisites"].(map[string]any)["janusGate"].(map[string]any)
+	if gate["status"] != "unknown" {
+		t.Fatalf("gate=%v", gate)
 	}
 }
