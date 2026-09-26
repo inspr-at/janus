@@ -27,19 +27,23 @@ CONTRACT_DIRECTORY = Path("contracts/aeon-stage-handoff-v1")
 EXCERPT = "openapi-excerpt-v1.yaml"
 MANIFEST = "manifest-v1.json"
 RUST_SOURCE = Path("crates/janus-host/src/aeon_stage.rs")
-EXPECTED_MANIFEST_SHA256 = "90089c59cd37e57261e2743b3a291f27067be95c6357894c21f6fe2a337e2764"
-EXPECTED_EXCERPT = (13191, "ad2ff0ba394acda8667f311d03b33ff0c5d682ef9b6b1d6c4c488feb6fd517f8")
+EXPECTED_MANIFEST_SHA256 = "ffd0f0d3c1cf18e51a8d696a8feaa72d87452330fdb143d3dc09e9211ad13a35"
+EXPECTED_EXCERPT = (15122, "0d41ad7d259a509d05696d3f3d48d71996d91e247d82909ea7d7cba3aa2811aa")
 CONTRACT = "inspr.aeon.stage-handoff.v1"
 RELEASE = "v260926071154.0.0"
 COMMIT = "482c563482c014c2097e65f7ef528444e12ec7af"
 SPEC_SHA256 = "4420f2d269af7477bcb41a7fa0d670f28376a151145c71ebb368c61ade370493"
 PATHS = (
+    "/me",
     "/projects/{projectId}/journey",
     "/stage-handoffs/{handoffId}",
     "/stage-handoffs/{handoffId}/evidence",
     "/stage-handoffs/{handoffId}/result",
 )
 SCHEMAS = (
+    "Me",
+    "Principal",
+    "Tenant",
     "Journey",
     "JourneyLaunchReadiness",
     "JourneyStage",

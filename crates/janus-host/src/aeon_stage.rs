@@ -233,6 +233,24 @@ struct RuntimeConfig {
     credential_ready_observed_at: String,
 }
 
+/// The acting principal and tenant of the configured key (`GET /api/me`).
+#[derive(Debug, Deserialize)]
+struct MeResponse {
+    principal: MePrincipal,
+    tenant: MeTenant,
+}
+
+#[derive(Debug, Deserialize)]
+struct MePrincipal {
+    kind: String,
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct MeTenant {
+    slug: String,
+}
+
 /// Only the journey fields Janus binds to; the projection itself is not read.
 #[derive(Debug, Deserialize)]
 struct JourneyIdentity {
@@ -623,7 +641,27 @@ impl Reporter {
     }
 
     fn run(&self) -> AeonResult<()> {
-        let mut journal = match self.load_journal()? {
+        let journal = self.load_journal()?;
+        if let Some(journal) = journal.as_ref() {
+            self.validate_journal(journal)?;
+            if journal.result_receipt.is_some() {
+                return Ok(());
+            }
+        }
+        // After expiry only an exact replay of an already possibly committed
+        // terminal result is reconciled; Aeon returns a stored identical
+        // result before it checks lineage or expiry. No new fact is sent.
+        let result_only = journal
+            .as_ref()
+            .is_some_and(|journal| journal.credential_handoff_receipt.is_some());
+        if !result_only {
+            self.require_unexpired()?;
+        }
+        // Aeon's writes check the live grant, not that the caller is the
+        // routed plugin principal, so Janus proves its own identity first on
+        // every run, including journal recovery.
+        self.verify_principal()?;
+        let mut journal = match journal {
             Some(journal) => journal,
             None => {
                 let seal = self.preflight()?;
@@ -632,11 +670,6 @@ impl Reporter {
                 journal
             }
         };
-        self.validate_journal(&journal)?;
-        if journal.result_receipt.is_some() {
-            return Ok(());
-        }
-        self.require_unexpired()?;
 
         if journal.authorization_receipt.is_none() {
             let receipt = self.send_evidence(&journal.authorization)?;
@@ -653,10 +686,20 @@ impl Reporter {
         self.persist_journal(&journal)
     }
 
+    fn verify_principal(&self) -> AeonResult<()> {
+        let me: MeResponse = self.get("/api/me")?;
+        if me.principal.kind != "agent"
+            || me.principal.name != JANUS_PLUGIN_ID
+            || me.tenant.slug != self.config.project.tenant_slug
+        {
+            return Err(AeonReporterError::new("aeon_reporter_agent_refused"));
+        }
+        Ok(())
+    }
+
     /// Re-read the bound journey and handoff before any report is journaled.
     /// Returns the stored prerequisite seal the terminal result must echo.
     fn preflight(&self) -> AeonResult<String> {
-        self.require_unexpired()?;
         let journey: JourneyIdentity = self.get(&format!(
             "/api/projects/{}/journey",
             self.config.project.project_node_id

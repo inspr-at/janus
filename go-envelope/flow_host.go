@@ -894,43 +894,66 @@ func validateAeonBinding(journey map[string]any, binding flowBinding, tenantSlug
 	return nil
 }
 
+// aeonFlowStages folds Aeon's eight journey stages onto the four stages the
+// bundled flow-shell renders (define, build, deliver, access).
+var aeonFlowStages = [4][]string{
+	{"inspire", "shape", "requirements"},
+	{"plan", "build"},
+	{"deploy"},
+	{"access"},
+}
+
+// aeonShellState projects the Aeon journey onto exactly the fields and
+// values the bundled flow-shell normalizer consumes. Nothing from the journey
+// is passed through as-is; free text is bounded and ids become opaque refs.
 func aeonShellState(journey map[string]any, binding flowBinding, now int64) map[string]any {
 	stage := stringField(journey, "stage")
-	stages := []any{}
-	if raw, ok := journey["stages"].([]any); ok {
-		stages = raw
-	}
+	stages, _ := journey["stages"].([]any)
 	stageState := func(key string) string {
-		for _, item := range stages {
-			entry, ok := item.(map[string]any)
-			if !ok || stringField(entry, "key") != key {
-				continue
-			}
-			if state := stringField(entry, "state"); state != "" {
-				return state
-			}
-			return "later"
+		if state := stageField(stages, key, "state"); state != "" {
+			return state
 		}
 		return "later"
 	}
 	canAdmit := false
 	if launch, ok := journey["launch_readiness"].(map[string]any); ok {
-		if value, ok := launch["can_admit"].(bool); ok {
-			canAdmit = value
+		canAdmit, _ = launch["can_admit"].(bool)
+	}
+	activeStage := 0
+	stageEvidence := make([]any, 4)
+	for index, group := range aeonFlowStages {
+		done, skipped := 0, 0
+		for _, key := range group {
+			if key == stage {
+				activeStage = index
+			}
+			switch stageState(key) {
+			case "done":
+				done++
+			case "skipped":
+				skipped++
+			}
+		}
+		switch {
+		case skipped == len(group):
+			stageEvidence[index] = "not_in_batch"
+		case done > 0 && done+skipped == len(group):
+			stageEvidence[index] = "performed"
+		default:
+			stageEvidence[index] = "unknown"
 		}
 	}
-	status := "pending"
-	switch stage {
-	case "deploy", "access":
-		if canAdmit {
-			status = "authorized"
-		} else {
-			status = "draft"
-		}
-	case "plan", "build":
-		status = "draft"
-	case "live":
-		status = "live"
+	status := "draft"
+	switch {
+	case stage == "live":
+		status = "completed"
+		activeStage = 3
+	case stageState(stage) == "blocked":
+		status = "blocked"
+	case (stage == "deploy" || stage == "access") && canAdmit:
+		status = "authorized"
+	case stage == "build" || stage == "deploy" || stage == "access":
+		status = "in_progress"
 	}
 	var batchRef any
 	if release, ok := canonicalReleaseID(stringField(journey, "current_release_id")); ok {
@@ -947,7 +970,7 @@ func aeonShellState(journey map[string]any, binding flowBinding, now int64) map[
 	}
 	evaluatedAt := isoTimestamp(now)
 	freshUntil := isoTimestamp(nextTenMinuteBoundary(now))
-	requirementsStatus := "pending"
+	requirementsStatus := "unknown"
 	if stageState("requirements") == "done" && digestOK {
 		requirementsStatus = "pass"
 	}
@@ -958,6 +981,16 @@ func aeonShellState(journey map[string]any, binding flowBinding, now int64) map[
 			"evidenceRef": requirementsEvidence,
 			"observedAt":  evaluatedAt,
 			"freshUntil":  freshUntil,
+		},
+		// The journey names the Access gate's approval but not whether that
+		// permit is still live (expiry, revocation). Aeon decides and
+		// enforces it on every Janus write, so Flow never shows it as passed.
+		"janusGate": map[string]any{
+			"status":     "unknown",
+			"gateKind":   "janus_gate",
+			"message":    "Aeon decides the Access permit. Open the project journey in Aeon.",
+			"observedAt": evaluatedAt,
+			"freshUntil": freshUntil,
 		},
 	}
 	deployState := stageState("deploy")
@@ -982,33 +1015,11 @@ func aeonShellState(journey map[string]any, binding flowBinding, now int64) map[
 			}
 		}
 	}
-	janusGate := map[string]any{
-		"status":      "pending",
-		"gateKind":    "janus_gate",
-		"evidenceRef": nil,
-		"observedAt":  evaluatedAt,
-		"freshUntil":  freshUntil,
-	}
-	if prefix, ok := uuidHexPrefix(stageField(stages, "access", "gate_approval_id")); ok {
-		janusGate["status"] = "pass"
-		janusGate["evidenceRef"] = "aeon:gate-" + prefix
-	}
-	prerequisites["janusGate"] = janusGate
-	var stageSource any
-	if value, ok := journey["stage_source"]; ok {
-		stageSource = value
-	}
-	imported := false
-	if value, ok := journey["imported"].(bool); ok {
-		imported = value
-	}
-	var nextAction any
-	if value, ok := journey["next_action"]; ok {
-		nextAction = value
-	}
-	var launchReadiness any
-	if value, ok := journey["launch_readiness"]; ok {
-		launchReadiness = value
+	nextLabel := "Aeon journey"
+	if next, ok := journey["next_action"].(map[string]any); ok {
+		if label := boundedPlainText(stringField(next, "label"), 80); label != "" {
+			nextLabel = "Next in Aeon: " + label
+		}
 	}
 	return map[string]any{
 		"evaluatedAt": evaluatedAt,
@@ -1018,26 +1029,33 @@ func aeonShellState(journey map[string]any, binding flowBinding, now int64) map[
 		},
 		"health": map[string]any{"status": "available", "label": "Aeon journey"},
 		"delivery": map[string]any{
-			"status":         status,
-			"batchRef":       batchRef,
-			"baselineRef":    fmt.Sprintf("requirements:%d", requirementsRevision),
-			"baselineDigest": baselineDigest,
+			"status":           status,
+			"activeStage":      activeStage,
+			"stageEvidence":    stageEvidence,
+			"batchRef":         batchRef,
+			"baselineRef":      fmt.Sprintf("requirements:%d", requirementsRevision),
+			"baselineDigest":   baselineDigest,
+			"batchStatusLabel": nextLabel,
 		},
-		"prerequisites": prerequisites,
-		"progress": map[string]any{
-			"stages":          stages,
-			"nextAction":      nextAction,
-			"launchReadiness": launchReadiness,
-			"revision":        journey["revision"],
-			"stage":           stage,
-			"stageSource":     stageSource,
-			"imported":        imported,
-			"projectNodeId":   binding.ProjectNodeID,
-			"projectKey":      binding.ProjectKey,
-		},
+		"prerequisites":         prerequisites,
 		"executionModes":        []string{"manual"},
 		"selectedExecutionMode": "manual",
 	}
+}
+
+// boundedPlainText keeps short single-line printable text and drops anything
+// else, so upstream labels cannot carry markup or unbounded content.
+func boundedPlainText(value string, max int) string {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > max {
+		return ""
+	}
+	for _, r := range value {
+		if r < 0x20 || r == 0x7f || r == '<' || r == '>' {
+			return ""
+		}
+	}
+	return value
 }
 
 func stageField(stages []any, key, field string) string {
@@ -1713,7 +1731,15 @@ func parseOptionalFlowProject(r *http.Request) (string, error) {
 	if raw == "" {
 		return "", nil
 	}
-	if !canonicalFlowProjectKey(raw) {
+	// Classic selectors keep their original lenient decimal parsing (for
+	// example "017" selects project 17); Aeon selectors are canonical UUIDs.
+	if id, err := strconv.ParseUint(raw, 10, 64); err == nil {
+		if id == 0 {
+			return "", errors.New("invalid project")
+		}
+		return strconv.FormatUint(id, 10), nil
+	}
+	if !canonicalUUID(raw) {
 		return "", errors.New("invalid project")
 	}
 	return raw, nil

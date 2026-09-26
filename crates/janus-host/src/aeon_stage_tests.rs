@@ -44,7 +44,11 @@ pub(crate) struct AeonState {
     pub(crate) journey: Value,
     pub(crate) handoff: Value,
     pub(crate) grant_live: bool,
+    /// Whether the key's principal is the routed plugin principal, which
+    /// Aeon requires for the handoff read (without stage_handoffs.read).
     pub(crate) routed_agent: bool,
+    /// Principal name `GET /api/me` reports for the key.
+    pub(crate) agent_name: &'static str,
     pub(crate) evidence: Vec<Value>,
     pub(crate) result: Option<Value>,
     pub(crate) requests: Vec<Captured>,
@@ -73,6 +77,7 @@ impl FakeAeon {
             handoff: handoff_body(),
             grant_live: true,
             routed_agent: true,
+            agent_name: "janus",
             evidence: Vec::new(),
             result: None,
             requests: Vec::new(),
@@ -276,6 +281,18 @@ fn handle(state: &mut AeonState, request: &Captured) -> (u16, Value) {
     let journey_path = format!("/api/projects/{PROJECT_NODE_ID}/journey");
     let handoff_path = format!("/api/stage-handoffs/{HANDOFF_ID}");
     match (request.method.as_str(), request.path.as_str()) {
+        ("GET", "/api/me") => (
+            200,
+            json!({
+                "dev_mode": false,
+                "principal": {"id": "00000000-0000-4000-8000-0000000000aa",
+                    "tenant_id": "00000000-0000-4000-8000-0000000000bb",
+                    "kind": "agent", "name": state.agent_name, "roles": []},
+                "tenant": {"id": "00000000-0000-4000-8000-0000000000bb",
+                    "slug": "inspr", "name": "INSPR"},
+                "identity": null
+            }),
+        ),
         ("GET", path) if path == journey_path => (200, state.journey.clone()),
         ("GET", path) if path == handoff_path => {
             if !state.routed_agent {
@@ -336,7 +353,7 @@ fn evidence(state: &mut AeonState, request: &Captured) -> (u16, Value) {
     {
         return error(400, "invalid evidence");
     }
-    if !state.routed_agent || !state.grant_live {
+    if !state.grant_live {
         return error(403, "live agent grant required");
     }
     if input["authority_epoch"] != state.handoff["authority_epoch"] {
@@ -385,7 +402,7 @@ fn result(state: &mut AeonState, request: &Captured) -> (u16, Value) {
     ) else {
         return error(400, "invalid request");
     };
-    if !state.routed_agent || !state.grant_live {
+    if !state.grant_live {
         return error(403, "live agent grant required");
     }
     let echo = |input: &Map<String, Value>| {
@@ -593,6 +610,7 @@ fn static_reporter_records_only_two_value_free_facts_then_the_sealed_result() {
     assert_eq!(
         routes,
         vec![
+            ("GET".into(), "/api/me".to_string()),
             (
                 "GET".into(),
                 format!("/api/projects/{PROJECT_NODE_ID}/journey")
@@ -745,6 +763,63 @@ fn wrong_agent_plugin_operation_or_stage_fails_closed() {
 }
 
 #[test]
+fn another_agent_with_a_live_grant_is_refused_before_any_write() {
+    // Aeon's writes accept any agent holding the operation grant; Janus
+    // proves it is the routed `janus` principal on every run.
+    let fixture = new_fixture();
+    let server = FakeAeon::start();
+    server.with(|state| state.agent_name = "pharos");
+    assert_eq!(code(run(&fixture, &server)), "aeon_reporter_agent_refused");
+    assert_eq!(server.requests().len(), 1);
+    assert!(!journal_path(&fixture).exists());
+
+    let fixture = new_fixture();
+    let server = FakeAeon::start();
+    run_until_journaled(&fixture, &server);
+    server.with(|state| {
+        state.agent_name = "pharos";
+        state.requests.clear();
+    });
+    assert_eq!(code(run(&fixture, &server)), "aeon_reporter_agent_refused");
+    assert!(posts(&server.requests()).is_empty());
+}
+
+#[test]
+fn a_lost_terminal_answer_is_reconciled_after_expiry_but_nothing_new_is_sent() {
+    let fixture = new_fixture();
+    let server = FakeAeon::start();
+    server.with(|state| {
+        state.drop_after = Some(format!("/api/stage-handoffs/{HANDOFF_ID}/result"));
+    });
+    assert_eq!(
+        code(run(&fixture, &server)),
+        "aeon_reporter_transport_unavailable"
+    );
+    server.with(|state| assert!(state.result.is_some()));
+    server.take_requests();
+
+    let expired = parse_instant(EXPIRES_AT).expect("expiry").0 + 1;
+    run_static(&fixture, static_config(&fixture, &server.origin), expired)
+        .expect("stored result is reconciled");
+    let writes = posts(&server.take_requests());
+    assert_eq!(writes.len(), 1);
+    assert!(writes[0].path.ends_with("/result"));
+
+    // Only the credential fact was pending: expiry refuses new work.
+    let fixture = new_fixture();
+    let server = FakeAeon::start();
+    run_until_journaled(&fixture, &server);
+    assert_eq!(
+        code(run_static(
+            &fixture,
+            static_config(&fixture, &server.origin),
+            expired
+        )),
+        "aeon_reporter_handoff_expired"
+    );
+}
+
+#[test]
 fn missing_or_expired_permit_fails_closed() {
     let fixture = new_fixture();
     let server = FakeAeon::start();
@@ -850,13 +925,15 @@ fn ambiguous_failures_replay_exact_journaled_bytes_without_a_new_pull() {
         "aeon_reporter_transport_unavailable"
     );
     let second = server.take_requests();
-    assert!(second.iter().all(|request| request.method == "POST"));
+    assert_eq!(second[0].path, "/api/me", "identity is proven on recovery");
+    let second = posts(&second);
+    assert_eq!(second.len(), 3, "no new pull on recovery");
     assert_eq!(second[0].body, first[0].body, "exact first-fact replay");
     assert_ne!(fs::read(journal_path(&fixture)).unwrap(), journal_before);
 
     run_static(&fixture, static_config(&fixture, &server.origin), NOW + 120)
         .expect("exact result replay completes");
-    let third = server.take_requests();
+    let third = posts(&server.take_requests());
     assert_eq!(third.len(), 1);
     assert!(third[0].path.ends_with("/result"));
     server.with(|state| {

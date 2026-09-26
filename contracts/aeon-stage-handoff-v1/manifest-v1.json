@@ -5,12 +5,16 @@
   "openapi_path": "api/openapi.yaml",
   "openapi_sha256": "4420f2d269af7477bcb41a7fa0d670f28376a151145c71ebb368c61ade370493",
   "paths": [
+    "/me",
     "/projects/{projectId}/journey",
     "/stage-handoffs/{handoffId}",
     "/stage-handoffs/{handoffId}/evidence",
     "/stage-handoffs/{handoffId}/result"
   ],
   "schemas": [
+    "Me",
+    "Principal",
+    "Tenant",
     "Journey",
     "JourneyLaunchReadiness",
     "JourneyStage",
@@ -24,7 +28,7 @@
   ],
   "excerpt": {
     "file": "openapi-excerpt-v1.yaml",
-    "bytes": 13191,
-    "sha256": "ad2ff0ba394acda8667f311d03b33ff0c5d682ef9b6b1d6c4c488feb6fd517f8"
+    "bytes": 15122,
+    "sha256": "0d41ad7d259a509d05696d3f3d48d71996d91e247d82909ea7d7cba3aa2811aa"
   }
 }

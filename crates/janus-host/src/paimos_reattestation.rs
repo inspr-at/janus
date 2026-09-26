@@ -200,6 +200,7 @@ impl ReattestationReporter for AeonManagedCompletionBindingV1 {
             SourceReporter::Aeon(source) => {
                 source.handoff_id != self.handoff_id
                     && (source.release_node_id != self.release_node_id
+                        || source.operation != self.operation
                         || source.authority_epoch != self.authority_epoch)
             }
         }
@@ -791,6 +792,7 @@ fn source_completion_matches<R: ReattestationReporter>(
     source_record_raw: &[u8],
 ) -> bool {
     source_digest == binding.source_completion_binding_digest
+        && source_record.binding_digest == source_digest
         && wire_sha256(source_record_raw) == binding.source_completion_record_sha256
         && source_binding.matches_record(source_record)
         && binding.reporter.distinct_from(&source_binding.reporter())
@@ -1615,6 +1617,22 @@ mod tests {
             &source_record,
             &source_record_raw
         ));
+        // A record that names another binding digest (for example an Aeon
+        // completion record beside a classic source binding) is refused.
+        let mut foreign_record = source_record.clone();
+        foreign_record.binding_digest = wire_sha256(b"aeon-binding");
+        foreign_record.seal().expect("seal foreign record");
+        let foreign_raw =
+            crate::paimos::canonical_json_bytes(&foreign_record).expect("foreign record bytes");
+        let mut foreign_pin = binding.clone();
+        foreign_pin.source_completion_record_sha256 = wire_sha256(&foreign_raw);
+        assert!(!source_completion_matches(
+            &foreign_pin,
+            &SourceCompletion::Classic(source_binding.clone()),
+            &source_digest,
+            &foreign_record,
+            &foreign_raw
+        ));
         let mut aliased_handoff = source_binding.clone();
         aliased_handoff.reporter.handoff_id = binding.reporter.handoff_id.clone();
         assert!(!source_completion_matches(
@@ -1883,6 +1901,12 @@ mod tests {
         let mut same_attempt = source;
         same_attempt.authority_epoch = aeon.authority_epoch;
         assert!(!aeon.distinct_from(&SourceReporter::Aeon(&same_attempt)));
+        // Epochs are per (release, stage, operation): a prepare source and an
+        // apply retry may share epoch 1 and are still different attempts.
+        let mut prepare = same_attempt;
+        prepare.operation = "prepare".to_string();
+        assert_eq!(aeon.operation, "apply");
+        assert!(aeon.distinct_from(&SourceReporter::Aeon(&prepare)));
     }
 
     #[test]

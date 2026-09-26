@@ -744,32 +744,30 @@ func TestAeonJourneyFetchAndProjection(t *testing.T) {
 		t.Fatalf("body=%s", out.Body.String())
 	}
 	wire := out.Body.String()
-	for _, forbidden := range []string{"leaked@example.test", "secret-token", "should-not-leak", "raw_marker", "current_release_id", "requirements_digest_sha256", "tenant_slug"} {
+	for _, forbidden := range []string{"leaked@example.test", "secret-token", "should-not-leak", "raw_marker", "current_release_id", "requirements_digest_sha256", "tenant_slug", "nested-diagnostic-marker", "nested-next-marker", "nested-stage-marker", "cccccccc-dddd", "approve_deploy", "progress"} {
 		if strings.Contains(wire, forbidden) {
 			t.Fatalf("raw journey field %s leaked: %s", forbidden, wire)
 		}
 	}
 	for key := range payload.ShellState {
 		switch key {
-		case "evaluatedAt", "header", "health", "delivery", "prerequisites", "progress", "executionModes", "selectedExecutionMode", "selectedAction", "identityContext":
+		case "evaluatedAt", "header", "health", "delivery", "prerequisites", "executionModes", "selectedExecutionMode", "selectedAction", "identityContext":
 		default:
 			t.Fatalf("unexpected shell field %s", key)
-		}
-	}
-	progress, _ := payload.ShellState["progress"].(map[string]any)
-	if progress["projectNodeId"] != aeonProjectNodeID || progress["projectKey"] != aeonProjectKey || progress["stage"] != "deploy" {
-		t.Fatalf("progress=%v", progress)
-	}
-	for key := range progress {
-		switch key {
-		case "stages", "nextAction", "launchReadiness", "revision", "stage", "stageSource", "imported", "projectNodeId", "projectKey":
-		default:
-			t.Fatalf("unexpected progress field %s", key)
 		}
 	}
 	delivery, _ := payload.ShellState["delivery"].(map[string]any)
 	if delivery["status"] != "authorized" || delivery["batchRef"] != "release:aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee" || delivery["baselineRef"] != "requirements:7" {
 		t.Fatalf("delivery=%v", delivery)
+	}
+	// The bundled flow-shell consumes activeStage and stageEvidence; the
+	// eight Aeon stages fold onto its four.
+	if delivery["activeStage"] != float64(2) || delivery["batchStatusLabel"] != "Next in Aeon: Approve deploy" {
+		t.Fatalf("delivery=%v", delivery)
+	}
+	evidence, _ := delivery["stageEvidence"].([]any)
+	if len(evidence) != 4 || evidence[0] != "performed" || evidence[1] != "performed" || evidence[2] != "unknown" {
+		t.Fatalf("stageEvidence=%v", evidence)
 	}
 	prereq, _ := payload.ShellState["prerequisites"].(map[string]any)
 	pharos, _ := prereq["pharosTarget"].(map[string]any)
@@ -777,7 +775,8 @@ func TestAeonJourneyFetchAndProjection(t *testing.T) {
 		t.Fatalf("pharos=%v", pharos)
 	}
 	gate, _ := prereq["janusGate"].(map[string]any)
-	if gate["status"] != "pass" || gate["evidenceRef"] != "aeon:gate-ccccccccdddd4eee" {
+	// A journey approval id is history, not a live permit: never a pass.
+	if gate["status"] != "unknown" || gate["evidenceRef"] != nil {
 		t.Fatalf("gate=%v", gate)
 	}
 	if payload.ShellState["selectedAction"] != "janus_prepare" {
@@ -934,7 +933,15 @@ func TestFlowProjectSelectorAcceptsUUIDAndRejectsGarbage(t *testing.T) {
 	if err != nil || got != "" {
 		t.Fatalf("absent=%q %v", got, err)
 	}
-	for _, raw := range []string{"0", "017", "17abc", "71D807C5-6EE1-4A18-8742-54ED5B74690D", "not-a-uuid", "71d807c56ee14a18874254ed5b74690d"} {
+	// Classic keeps its original lenient decimal selector (JANUS-458).
+	lenient := httptest.NewRequest(http.MethodGet, "/?flow_project=017", nil)
+	if got, err := parseOptionalFlowProject(lenient); err != nil || got != "17" {
+		t.Fatalf("classic lenient=%q %v", got, err)
+	}
+	if _, ok := safeReturnQuery("flow_project=017"); ok {
+		t.Fatal("public path accepted non-canonical 017")
+	}
+	for _, raw := range []string{"0", "17abc", "71D807C5-6EE1-4A18-8742-54ED5B74690D", "not-a-uuid", "71d807c56ee14a18874254ed5b74690d"} {
 		bad := httptest.NewRequest(http.MethodGet, "/?flow_project="+url.QueryEscape(raw), nil)
 		if _, err := parseOptionalFlowProject(bad); err == nil {
 			t.Fatalf("accepted %q", raw)
@@ -986,12 +993,17 @@ func sampleAeonJourney() map[string]any {
 		"current_release_id":         "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
 		"requirements_revision":      7,
 		"requirements_digest_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-		"launch_readiness":           map[string]any{"can_admit": true, "email": "leaked@example.test"},
-		"next_action":                map[string]any{"stage": "deploy", "token": "secret-token"},
+		"launch_readiness":           map[string]any{"can_admit": true, "reason": "", "email": "leaked@example.test", "diagnostic": "nested-diagnostic-marker"},
+		"next_action":                map[string]any{"key": "approve_deploy", "label": "Approve deploy", "stage": "deploy", "available": true, "token": "secret-token", "raw_marker": "nested-next-marker"},
 		"stages": []any{
+			map[string]any{"key": "inspire", "state": "done"},
+			map[string]any{"key": "shape", "state": "done"},
 			map[string]any{"key": "requirements", "state": "done"},
+			map[string]any{"key": "plan", "state": "done"},
+			map[string]any{"key": "build", "state": "done"},
 			map[string]any{"key": "deploy", "state": "current", "handoff_id": "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff"},
-			map[string]any{"key": "access", "state": "later", "gate_approval_id": "cccccccc-dddd-4eee-8fff-000000000000", "token": "secret-token"},
+			map[string]any{"key": "access", "state": "later", "gate_approval_id": "cccccccc-dddd-4eee-8fff-000000000000", "token": "secret-token", "stage_marker": "nested-stage-marker"},
+			map[string]any{"key": "live", "state": "later"},
 		},
 	}
 }
@@ -1033,5 +1045,41 @@ func TestCheckFlowShellVendorScript(t *testing.T) {
 	}
 	if !strings.Contains(string(out), "flow-shell vendor manifest verified") {
 		t.Fatalf("output=%s", out)
+	}
+}
+
+func TestAeonShellStateUsesOnlyFlowShellValues(t *testing.T) {
+	binding := flowBinding{ProjectNodeID: aeonProjectNodeID, ProjectKey: aeonProjectKey, Label: "Janus"}
+	allStates := func(state string) []any {
+		out := []any{}
+		for _, key := range []string{"inspire", "shape", "requirements", "plan", "build", "deploy", "access", "live"} {
+			out = append(out, map[string]any{"key": key, "state": state})
+		}
+		return out
+	}
+	live := aeonShellState(map[string]any{"stage": "live", "stages": allStates("done")}, binding, 1_700_000_000)
+	delivery := live["delivery"].(map[string]any)
+	if delivery["status"] != "completed" || delivery["activeStage"] != 3 {
+		t.Fatalf("live delivery=%v", delivery)
+	}
+	for _, evidence := range delivery["stageEvidence"].([]any) {
+		if evidence != "performed" {
+			t.Fatalf("live evidence=%v", delivery["stageEvidence"])
+		}
+	}
+	blockedStages := allStates("later")
+	blockedStages[5] = map[string]any{"key": "deploy", "state": "blocked"}
+	blockedStages[6] = map[string]any{"key": "access", "state": "skipped"}
+	blocked := aeonShellState(map[string]any{"stage": "deploy", "stages": blockedStages, "next_action": map[string]any{"label": "<script>x</script>"}}, binding, 1_700_000_000)
+	delivery = blocked["delivery"].(map[string]any)
+	if delivery["status"] != "blocked" || delivery["activeStage"] != 2 || delivery["stageEvidence"].([]any)[3] != "not_in_batch" || delivery["batchStatusLabel"] != "Aeon journey" {
+		t.Fatalf("blocked delivery=%v", delivery)
+	}
+	allowed := map[string]bool{"draft": true, "authorized": true, "in_progress": true, "blocked": true, "completed": true}
+	for _, stage := range []string{"inspire", "shape", "requirements", "plan", "build", "deploy", "access", "live", ""} {
+		shell := aeonShellState(map[string]any{"stage": stage}, binding, 1_700_000_000)
+		if status := shell["delivery"].(map[string]any)["status"].(string); !allowed[status] {
+			t.Fatalf("stage %q status %q", stage, status)
+		}
 	}
 }

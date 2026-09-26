@@ -157,7 +157,10 @@ browser `aeon_public_url`, `api_key_file`, `tenant_slug`, and bindings of
 with an Aeon agent key holding `journey.read`, refuses the answer unless its
 `project_node_id`, `project_key`, `node_key` and `tenant_slug` all equal the
 binding, refuses an older journey revision, and projects only the supported
-Flow stage fields. Browser links go to `/p/{project_key}?view=journey` on the
+Flow stage fields (the eight Aeon stages fold onto the four Flow stages; the
+Access permit always shows as decided in Aeon, never as a Janus pass, because
+the journey names the approval but not whether it is still live). Browser
+links go to `/p/{project_key}?view=journey` on the
 Aeon public URL and no other path is allowlisted. Schema v1 stays the classic
 Paimos host unchanged, so rollback is restoring the v1 file.
 
@@ -691,7 +694,10 @@ active Aeon agent principal named `janus`, with exactly the scopes
 `0600`) and root-owned. Aeon additionally requires a live
 `agent_permission_grants` row for the operation on the release.
 
-A run re-reads the journey (exact project, key, node key and tenant; the
+Every run first proves through `GET /api/me` that the key acts as the agent
+principal `janus` in the configured tenant, because Aeon's evidence and
+result writes check the live grant but not the routed principal name. A run
+then re-reads the journey (exact project, key, node key and tenant; the
 handoff's release must be current) and the handoff (Access stage, routed to
 plugin `janus`, the configured operation, lineage digests, epoch, expiry, the
 exact evidence ceiling, still `requested` or `active` with no result), then
@@ -703,7 +709,9 @@ principal, grant, path, secret, URL, digest or free text; the result carries
 only the Aeon-issued seal it must echo. The journal is `aeon-<handoff_id>.json` in
 the journal directory, so no classic journal is ever read, replayed or
 rewritten. A lost response replays the identical bytes, which Aeon treats as
-an exact replay. Wrong project or tenant, stale release or epoch, wrong plugin
+an exact replay. After the handoff expires, only a journaled terminal result
+whose answer was lost is replayed (Aeon returns the stored result); no new
+fact is sent. Wrong agent, wrong project or tenant, stale release or epoch, wrong plugin
 or operation, a closed or expired handoff, a missing or revoked grant, a
 divergent replay, a changed seal, or another terminal result all fail closed
 with value-free `aeon_reporter_*` reason codes.
