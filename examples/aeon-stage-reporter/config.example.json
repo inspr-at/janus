@@ -1,0 +1,26 @@
+{
+  "schema": "inspr.janus.aeon-stage-reporter-config.v1",
+  "schema_version": 1,
+  "aeon_origin": "https://aeon.example",
+  "api_key_file": "/example/inert/aeon-janus-reporter.key",
+  "journal_directory": "/example/inert/aeon-stage-journal",
+  "project": {
+    "project_node_id": "00000000-0000-4000-8000-000000000001",
+    "project_key": "EXAMPLE",
+    "node_key": "PRJ-1",
+    "tenant_slug": "example"
+  },
+  "handoff": {
+    "handoff_id": "00000000-0000-4000-8000-000000000002",
+    "release_node_id": "00000000-0000-4000-8000-000000000003",
+    "operation": "apply",
+    "authority_epoch": 1,
+    "plan_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+    "predecessor_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+    "context_digest": "3333333333333333333333333333333333333333333333333333333333333333",
+    "expires_at": "2026-09-27T12:00:00Z"
+  },
+  "evidence": {
+    "credential_ready_observed_at": "2026-09-27T11:55:00Z"
+  }
+}

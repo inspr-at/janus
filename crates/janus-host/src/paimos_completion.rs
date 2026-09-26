@@ -15,10 +15,14 @@ use janus_core::MaterialTimestamp;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::aeon_stage::AeonManagedCompletionBindingV1;
 use crate::paimos::PaimosManagedCompletionBindingV1;
 
 pub const CAPABILITY_SCHEMA: &str = "inspr.janus.managed-completion-capability.v1";
 pub const BINDING_SCHEMA: &str = "inspr.janus.managed-completion-paimos-binding.v2";
+/// JANUS-480: the same transaction association bound to one Aeon Access
+/// handoff instead of a classic Paimos external-stage handoff.
+pub const AEON_BINDING_SCHEMA: &str = "inspr.janus.managed-completion-aeon-binding.v1";
 pub const RECORD_SCHEMA: &str = "inspr.janus.managed-completion-record.v2";
 
 const SYSTEM_BINDING_PATH: &str =
@@ -135,6 +139,106 @@ pub struct ManagedCompletionBindingV2 {
     pub reporter: PaimosManagedCompletionBindingV1,
 }
 
+/// Root-owned association between one transaction and one existing Aeon
+/// Access handoff. The record carries this binding's digest exactly as for the
+/// classic binding; only the privileged consumer reads which one it is.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ManagedCompletionAeonBindingV1 {
+    pub schema: String,
+    pub schema_version: u8,
+    pub operation_ref: String,
+    pub operation_kind: String,
+    pub source: String,
+    pub host_ref: String,
+    pub service_ref: String,
+    pub slot_ref: String,
+    pub declaration_fingerprint: String,
+    pub secret_ref: String,
+    pub scope_ref: String,
+    pub generation: u64,
+    pub revocation_epoch: u64,
+    pub plan_fingerprint: String,
+    pub target_fingerprint: String,
+    pub producer_key_id: String,
+    pub reporter: AeonManagedCompletionBindingV1,
+}
+
+/// The transaction tuple both binding schemas share with the record.
+struct TransactionFields<'a> {
+    operation_ref: &'a str,
+    operation_kind: &'a str,
+    source: &'a str,
+    host_ref: &'a str,
+    service_ref: &'a str,
+    slot_ref: &'a str,
+    declaration_fingerprint: &'a str,
+    secret_ref: &'a str,
+    scope_ref: &'a str,
+    generation: u64,
+    revocation_epoch: u64,
+    plan_fingerprint: &'a str,
+    target_fingerprint: &'a str,
+    producer_key_id: &'a str,
+}
+
+macro_rules! transaction_fields {
+    ($binding:expr) => {
+        TransactionFields {
+            operation_ref: &$binding.operation_ref,
+            operation_kind: &$binding.operation_kind,
+            source: &$binding.source,
+            host_ref: &$binding.host_ref,
+            service_ref: &$binding.service_ref,
+            slot_ref: &$binding.slot_ref,
+            declaration_fingerprint: &$binding.declaration_fingerprint,
+            secret_ref: &$binding.secret_ref,
+            scope_ref: &$binding.scope_ref,
+            generation: $binding.generation,
+            revocation_epoch: $binding.revocation_epoch,
+            plan_fingerprint: &$binding.plan_fingerprint,
+            target_fingerprint: &$binding.target_fingerprint,
+            producer_key_id: &$binding.producer_key_id,
+        }
+    };
+}
+
+impl TransactionFields<'_> {
+    fn valid(&self) -> bool {
+        valid_ref("op_", self.operation_ref)
+            && self.operation_kind == "create"
+            && self.source == "generated"
+            && valid_ref("host_", self.host_ref)
+            && valid_ref("svc_", self.service_ref)
+            && valid_ref("slot_", self.slot_ref)
+            && valid_ref("decl_", self.declaration_fingerprint)
+            && valid_ref("sec_", self.secret_ref)
+            && valid_ref("scp_", self.scope_ref)
+            && self.generation != 0
+            && self.revocation_epoch != 0
+            && valid_hex_digest(self.plan_fingerprint)
+            && valid_hex_digest(self.target_fingerprint)
+            && valid_ref("key_", self.producer_key_id)
+    }
+
+    fn matches_record(&self, record: &ManagedCompletionRecordV2) -> bool {
+        self.operation_ref == record.operation_ref
+            && self.operation_kind == record.operation_kind
+            && self.source == record.source
+            && self.host_ref == record.host_ref
+            && self.service_ref == record.service_ref
+            && self.slot_ref == record.slot_ref
+            && self.declaration_fingerprint == record.declaration_fingerprint
+            && self.secret_ref == record.secret_ref
+            && self.scope_ref == record.scope_ref
+            && self.generation == record.generation
+            && self.revocation_epoch == record.revocation_epoch
+            && self.plan_fingerprint == record.plan_fingerprint
+            && self.target_fingerprint == record.target_fingerprint
+            && self.producer_key_id == record.producer_key_id
+    }
+}
+
 impl ManagedCompletionCapabilityV1 {
     pub fn validate(&self) -> CompletionResult<()> {
         if self.schema != CAPABILITY_SCHEMA
@@ -197,20 +301,20 @@ impl ManagedCompletionBindingV2 {
     }
 
     pub(crate) fn matches_record(&self, record: &ManagedCompletionRecordV2) -> bool {
-        self.operation_ref == record.operation_ref
-            && self.operation_kind == record.operation_kind
-            && self.source == record.source
-            && self.host_ref == record.host_ref
-            && self.service_ref == record.service_ref
-            && self.slot_ref == record.slot_ref
-            && self.declaration_fingerprint == record.declaration_fingerprint
-            && self.secret_ref == record.secret_ref
-            && self.scope_ref == record.scope_ref
-            && self.generation == record.generation
-            && self.revocation_epoch == record.revocation_epoch
-            && self.plan_fingerprint == record.plan_fingerprint
-            && self.target_fingerprint == record.target_fingerprint
-            && self.producer_key_id == record.producer_key_id
+        transaction_fields!(self).matches_record(record)
+    }
+}
+
+impl ManagedCompletionAeonBindingV1 {
+    pub fn digest(&self) -> CompletionResult<String> {
+        validate_aeon_binding_shape(self)?;
+        let canonical = crate::paimos::canonical_json_bytes(self)
+            .map_err(|_| ManagedCompletionError::new("managed_completion_binding_invalid"))?;
+        Ok(format!("sha256:{:x}", Sha256::digest(canonical)))
+    }
+
+    pub(crate) fn matches_record(&self, record: &ManagedCompletionRecordV2) -> bool {
+        transaction_fields!(self).matches_record(record)
     }
 }
 
@@ -284,6 +388,17 @@ fn run_from_paths(
         binding_gid,
         "managed_completion_binding_unavailable",
     )?;
+    if crate::aeon_stage::selects_aeon(&binding_raw, AEON_BINDING_SCHEMA) {
+        return run_aeon_binding(
+            &binding_raw,
+            ready_path,
+            reporter_config_path,
+            binding_uid,
+            producer_uid,
+            producer_gid,
+            allow_loopback_http,
+        );
+    }
     let binding: ManagedCompletionBindingV2 =
         crate::paimos::decode_strict(&binding_raw, "managed_completion_binding_invalid")
             .map_err(|_| ManagedCompletionError::new("managed_completion_binding_invalid"))?;
@@ -317,25 +432,70 @@ fn run_from_paths(
     .map_err(|_| ManagedCompletionError::new("managed_completion_report_pending"))
 }
 
+/// Consume the ready record for an Aeon binding. The record, directory and
+/// custody checks are the classic ones; only the reporter differs.
+#[allow(clippy::too_many_arguments)]
+fn run_aeon_binding(
+    binding_raw: &[u8],
+    ready_path: &Path,
+    reporter_config_path: &Path,
+    binding_uid: u32,
+    producer_uid: u32,
+    producer_gid: u32,
+    allow_loopback_http: bool,
+) -> CompletionResult<()> {
+    let binding: ManagedCompletionAeonBindingV1 =
+        crate::paimos::decode_strict(binding_raw, "managed_completion_binding_invalid")
+            .map_err(|_| ManagedCompletionError::new("managed_completion_binding_invalid"))?;
+    let binding_digest = binding.digest()?;
+    let directory = ready_path
+        .parent()
+        .ok_or_else(|| ManagedCompletionError::new("managed_completion_record_unavailable"))?;
+    validate_record_directory(directory, producer_uid, producer_gid)?;
+    let record_raw = read_exact_private(
+        ready_path,
+        MAX_RECORD_BYTES,
+        producer_uid,
+        producer_gid,
+        "managed_completion_record_unavailable",
+    )?;
+    let record = decode_record(&record_raw)?;
+    if record.binding_digest != binding_digest || !binding.matches_record(&record) {
+        return Err(ManagedCompletionError::new(
+            "managed_completion_binding_refused",
+        ));
+    }
+    let observed_at = record.observed_at()?;
+    crate::aeon_stage::run_managed_completion_from_path(
+        reporter_config_path,
+        &binding.reporter,
+        observed_at,
+        binding_uid,
+        allow_loopback_http,
+    )
+    .map_err(|_| ManagedCompletionError::new("managed_completion_report_pending"))
+}
+
+fn validate_aeon_binding_shape(binding: &ManagedCompletionAeonBindingV1) -> CompletionResult<()> {
+    if crate::aeon_stage::validate_managed_reporter_binding_shape(&binding.reporter).is_err()
+        || binding.reporter.evidence_source != "managed_completion_record"
+        || binding.schema != AEON_BINDING_SCHEMA
+        || binding.schema_version != 1
+        || !transaction_fields!(binding).valid()
+    {
+        return Err(ManagedCompletionError::new(
+            "managed_completion_binding_invalid",
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_binding_shape(binding: &ManagedCompletionBindingV2) -> CompletionResult<()> {
     if crate::paimos::validate_managed_reporter_binding_shape(&binding.reporter).is_err()
         || binding.reporter.evidence_source != "managed_completion_record"
         || binding.schema != BINDING_SCHEMA
         || binding.schema_version != 1
-        || !valid_ref("op_", &binding.operation_ref)
-        || binding.operation_kind != "create"
-        || binding.source != "generated"
-        || !valid_ref("host_", &binding.host_ref)
-        || !valid_ref("svc_", &binding.service_ref)
-        || !valid_ref("slot_", &binding.slot_ref)
-        || !valid_ref("decl_", &binding.declaration_fingerprint)
-        || !valid_ref("sec_", &binding.secret_ref)
-        || !valid_ref("scp_", &binding.scope_ref)
-        || binding.generation == 0
-        || binding.revocation_epoch == 0
-        || !valid_hex_digest(&binding.plan_fingerprint)
-        || !valid_hex_digest(&binding.target_fingerprint)
-        || !valid_ref("key_", &binding.producer_key_id)
+        || !transaction_fields!(binding).valid()
     {
         return Err(ManagedCompletionError::new(
             "managed_completion_binding_invalid",
@@ -570,6 +730,213 @@ mod tests {
             binding.digest().expect("digest binding"),
             GOLDEN_BINDING_DIGEST
         );
+    }
+
+    const AEON_GOLDEN_BINDING: &[u8] = include_bytes!(
+        "../../../examples/aeon-stage-reporter/managed-completion-binding.golden.json"
+    );
+    const AEON_GOLDEN_BINDING_DIGEST: &str =
+        "sha256:6e159146a3bbbb8ab03916d8de191cc61a85845c00712b4e0f024f5a206ff1da";
+
+    #[test]
+    fn aeon_binding_digest_matches_cross_language_golden_and_selects_aeon() {
+        let binding: ManagedCompletionAeonBindingV1 =
+            crate::paimos::decode_strict(AEON_GOLDEN_BINDING, "managed_completion_binding_invalid")
+                .expect("decode Aeon golden binding");
+        assert_eq!(
+            binding.digest().expect("digest Aeon binding"),
+            AEON_GOLDEN_BINDING_DIGEST
+        );
+        let mut relabelled = binding.clone();
+        relabelled.reporter.evidence_source = "managed_credential_reattestation_record".to_string();
+        assert!(relabelled.digest().is_err());
+        assert!(crate::aeon_stage::selects_aeon(
+            AEON_GOLDEN_BINDING,
+            AEON_BINDING_SCHEMA
+        ));
+        assert!(!crate::aeon_stage::selects_aeon(
+            GOLDEN_BINDING,
+            AEON_BINDING_SCHEMA
+        ));
+        // A classic decoder never accepts the Aeon binding, nor the reverse.
+        assert!(crate::paimos::decode_strict::<ManagedCompletionBindingV2>(
+            AEON_GOLDEN_BINDING,
+            "managed_completion_binding_invalid"
+        )
+        .is_err());
+        assert!(
+            crate::paimos::decode_strict::<ManagedCompletionAeonBindingV1>(
+                GOLDEN_BINDING,
+                "managed_completion_binding_invalid"
+            )
+            .is_err()
+        );
+    }
+
+    fn aeon_record(binding_digest: String) -> ManagedCompletionRecordV2 {
+        let mut record = ManagedCompletionRecordV2 {
+            schema: RECORD_SCHEMA.to_string(),
+            schema_version: 1,
+            binding_digest,
+            operation_ref: "op_0123456789abcdef".to_string(),
+            operation_id: "webtx_0123456789abcdef".to_string(),
+            operation_kind: "create".to_string(),
+            source: "generated".to_string(),
+            host_ref: "host_0123456789abcdef".to_string(),
+            service_ref: "svc_0123456789abcdef".to_string(),
+            slot_ref: "slot_0123456789abcdef".to_string(),
+            declaration_fingerprint: "decl_0123456789abcdef".to_string(),
+            secret_ref: "sec_fixturefixture".to_string(),
+            scope_ref: "scp_0123456789abcdef".to_string(),
+            generation: 1,
+            revocation_epoch: 1,
+            plan_fingerprint: "a".repeat(64),
+            target_fingerprint: "b".repeat(64),
+            producer_key_id: "key_0123456789abcdef".to_string(),
+            prepared_at_unix_secs: 1_790_409_400,
+            preflighted_at_unix_secs: 1_790_409_390,
+            evidence_accepted_at_unix_secs: 1_790_409_500,
+            activation_evidence: AcceptedActivationEvidenceV1 {
+                generation: 1,
+                materialized: true,
+                process_state: "running".to_string(),
+                probe_state: "healthy".to_string(),
+                heartbeat_observed_at_unix_secs: 1_790_409_470,
+                process_observed_at_unix_secs: 1_790_409_480,
+                probe_observed_at_unix_secs: 1_790_409_490,
+            },
+            integrity_hash: String::new(),
+        };
+        record.seal().expect("seal record");
+        record
+    }
+
+    fn write_private(path: &Path, bytes: &[u8]) {
+        fs::write(path, bytes).expect("write private fixture");
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).expect("protect fixture");
+    }
+
+    #[test]
+    fn aeon_managed_completion_reports_record_time_only_after_live_checks() {
+        use crate::aeon_stage::tests as aeon;
+
+        let fixture = aeon::new_fixture();
+        let server = aeon::FakeAeon::start();
+        let root = fixture.temporary.path();
+        let metadata = fs::metadata(root).expect("fixture metadata");
+        let (uid, gid) = (metadata.uid(), metadata.gid());
+
+        let config = aeon::managed_config(&fixture, &server.origin);
+        let reporter =
+            crate::aeon_stage::managed_reporter_binding(&config, true).expect("reporter binding");
+        let binding: ManagedCompletionAeonBindingV1 = {
+            let mut value: serde_json::Value =
+                serde_json::from_slice(AEON_GOLDEN_BINDING).expect("golden JSON");
+            value["reporter"] = serde_json::to_value(&reporter).expect("reporter JSON");
+            serde_json::from_value(value).expect("Aeon binding")
+        };
+        let config_path = root.join("reporter-config.json");
+        let binding_path = root.join("binding.json");
+        let records = root.join("records");
+        fs::create_dir(&records).expect("record directory");
+        fs::set_permissions(&records, fs::Permissions::from_mode(0o700)).expect("protect records");
+        let ready_path = records.join("ready.json");
+        write_private(
+            &config_path,
+            &serde_json::to_vec(&config).expect("config JSON"),
+        );
+        write_private(
+            &binding_path,
+            &serde_json::to_vec(&binding).expect("binding JSON"),
+        );
+
+        // A record bound to another binding digest is refused before any I/O.
+        let foreign = aeon_record(format!("sha256:{}", "f".repeat(64)));
+        write_private(
+            &ready_path,
+            &serde_json::to_vec(&foreign).expect("record JSON"),
+        );
+        assert_eq!(
+            run_from_paths(
+                &binding_path,
+                &ready_path,
+                &config_path,
+                uid,
+                gid,
+                uid,
+                gid,
+                true
+            )
+            .expect_err("foreign record")
+            .reason_code(),
+            "managed_completion_binding_refused"
+        );
+        assert!(server.requests().is_empty());
+
+        // Aeon refusing the live grant leaves the report pending: a local
+        // completion alone never becomes Access success.
+        let record = aeon_record(binding.digest().expect("binding digest"));
+        write_private(
+            &ready_path,
+            &serde_json::to_vec(&record).expect("record JSON"),
+        );
+        server.with(|state| state.grant_live = false);
+        assert_eq!(
+            run_from_paths(
+                &binding_path,
+                &ready_path,
+                &config_path,
+                uid,
+                gid,
+                uid,
+                gid,
+                true
+            )
+            .expect_err("no live grant")
+            .reason_code(),
+            "managed_completion_report_pending"
+        );
+        server.with(|state| {
+            assert!(state.evidence.is_empty() && state.result.is_none());
+            state.grant_live = true;
+            state.requests.clear();
+        });
+
+        run_from_paths(
+            &binding_path,
+            &ready_path,
+            &config_path,
+            uid,
+            gid,
+            uid,
+            gid,
+            true,
+        )
+        .expect("managed completion reported");
+        let requests = server.requests();
+        // The journal replays the first run's authorization observation.
+        let authorization: serde_json::Value = serde_json::from_slice(
+            &requests
+                .iter()
+                .find(|request| request.method == "POST")
+                .expect("first write")
+                .body,
+        )
+        .expect("authorization JSON");
+        assert!(authorization["observed_at"].as_str().is_some());
+        let credential = requests
+            .iter()
+            .filter(|request| request.method == "POST")
+            .nth(1)
+            .expect("credential write");
+        let credential: serde_json::Value =
+            serde_json::from_slice(&credential.body).expect("credential JSON");
+        assert_eq!(
+            credential["observed_at"],
+            record.observed_at().expect("record time")
+        );
+        assert_eq!(credential["credential_ready"], true);
+        server.with(|state| assert_eq!(state.result.as_ref().unwrap()["outcome"], "succeeded"));
     }
 
     #[test]

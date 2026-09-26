@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -433,16 +434,16 @@ func TestMultipleBindingsRequireProjectScope(t *testing.T) {
 			PaimosOrigin: mustURL(t, "https://paimos.example"),
 			APIKeyFile:   "/tmp/janus-flow-test.key",
 			Bindings: []flowBinding{
-				{ProjectID: 17, ExpectedProjectRef: paimosProjectRef17, Label: "A", PrincipalRefs: map[string]struct{}{"operator-a": {}}},
-				{ProjectID: 18, ExpectedProjectRef: paimosProjectRef99, Label: "B", PrincipalRefs: map[string]struct{}{"operator-a": {}}},
+				{Key: "17", ProjectID: 17, ExpectedProjectRef: paimosProjectRef17, Label: "A", PrincipalRefs: map[string]struct{}{"operator-a": {}}},
+				{Key: "18", ProjectID: 18, ExpectedProjectRef: paimosProjectRef99, Label: "B", PrincipalRefs: map[string]struct{}{"operator-a": {}}},
 			},
 			ConfigDigest: "sha256:test",
 		},
 	}
-	if _, err := service.selectBinding("operator-a", 0); err == nil {
+	if _, err := service.selectBinding("operator-a", ""); err == nil {
 		t.Fatal("ambiguous binding")
 	}
-	binding, err := service.selectBinding("operator-a", 17)
+	binding, err := service.selectBinding("operator-a", "17")
 	if err != nil || binding.ProjectID != 17 {
 		t.Fatalf("project 17: %v %#v", err, binding)
 	}
@@ -554,6 +555,7 @@ func testFlowService(t *testing.T, origin string) *flowHostService {
 			APIKeyFile:    key,
 			InstanceLabel: "Janus test",
 			Bindings: []flowBinding{{
+				Key:                "17",
 				ProjectID:          17,
 				ExpectedProjectRef: paimosProjectRef17,
 				Label:              "Test project",
@@ -564,7 +566,7 @@ func testFlowService(t *testing.T, origin string) *flowHostService {
 		client: &http.Client{Timeout: flowRequestTimeout, CheckRedirect: func(*http.Request, []*http.Request) error {
 			return errRedirect
 		}},
-		cache: &flowProjectionCache{entries: map[flowCacheKey]flowCachedProjection{}},
+		cache: &flowProjectionCache{entries: map[flowCacheKey]flowCachedProjection{}, revisions: map[string]uint64{}},
 		now:   func() int64 { return 1_700_000_000 },
 	}
 }
@@ -638,6 +640,402 @@ func mustURL(t *testing.T, value string) *url.URL {
 	return parsed
 }
 
+const (
+	aeonProjectNodeID = "71d807c5-6ee1-4a18-8742-54ed5b74690d"
+	aeonProjectKey    = "JANUS"
+	aeonNodeKey       = "PRJ-12"
+	aeonTenantSlug    = "inspr"
+)
+
+func TestFlowHostConfigV2(t *testing.T) {
+	parent, key := privateFlowDir(t, "aeon")
+	cfgPath := filepath.Join(parent, "flow.json")
+	writePrivateFile(t, cfgPath, []byte(aeonConfigJSON(key, "")))
+	cfg, err := loadFlowHostConfig(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Upstream != flowUpstreamAeon || cfg.TenantSlug != aeonTenantSlug || !cfg.Enabled || len(cfg.Bindings) != 1 {
+		t.Fatalf("%#v", cfg)
+	}
+	binding := cfg.Bindings[0]
+	if binding.Key != aeonProjectNodeID || binding.ProjectID != 0 || binding.ProjectNodeID != aeonProjectNodeID || binding.ProjectKey != aeonProjectKey || binding.NodeKey != aeonNodeKey {
+		t.Fatalf("%#v", binding)
+	}
+	if cfg.PaimosOrigin == nil || cfg.PaimosOrigin.Host != "aeon.example" || cfg.PaimosBrowserURL != nil {
+		t.Fatalf("origin=%v browser=%v", cfg.PaimosOrigin, cfg.PaimosBrowserURL)
+	}
+
+	for _, raw := range []string{
+		strings.Replace(aeonConfigJSON(key, ""), `"tenant_slug":"inspr"`, `"tenant_slug":"inspr","unexpected":true`, 1),
+		strings.Replace(aeonConfigJSON(key, ""), aeonProjectNodeID, "71D807C5-6EE1-4A18-8742-54ED5B74690D", 1),
+		strings.Replace(aeonConfigJSON(key, ""), `"project_key":"JANUS"`, `"project_key":"janus"`, 1),
+		strings.Replace(aeonConfigJSON(key, ""), `"node_key":"PRJ-12"`, `"node_key":"PRJ-01"`, 1),
+		strings.Replace(aeonConfigJSON(key, ""), `"tenant_slug":"inspr",`, "", 1),
+		aeonConfigJSON(key, `{"project_node_id":"`+aeonProjectNodeID+`","project_key":"OTHER","node_key":"PRJ-13","label":"Other","principal_refs":["operator-a"]}`),
+		aeonConfigJSON(key, `{"project_node_id":"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee","project_key":"JANUS","node_key":"PRJ-13","label":"Other","principal_refs":["operator-a"]}`),
+		strings.Replace(aeonConfigJSON(key, ""), `"upstream":"aeon"`, `"upstream":"paimos"`, 1),
+	} {
+		writePrivateFile(t, cfgPath, []byte(raw))
+		if _, err := loadFlowHostConfig(cfgPath); err == nil {
+			t.Fatalf("accepted invalid config: %s", raw)
+		}
+	}
+}
+
+func TestClassicFlowConfigV1StillLoads(t *testing.T) {
+	parent, key := privateFlowDir(t, "classic")
+	cfgPath := filepath.Join(parent, "flow.json")
+	writePrivateFile(t, cfgPath, []byte(`{
+		"schema":"inspr.janus.flow-host-config.v1",
+		"schema_version":1,
+		"enabled":true,
+		"host_id":"janus-test",
+		"paimos_origin":"https://paimos.example",
+		"api_key_file":"`+key+`",
+		"bindings":[{"project_id":17,"label":"Test","principal_refs":["operator-a"]}]
+	}`))
+	cfg, err := loadFlowHostConfig(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Upstream != flowUpstreamClassic || len(cfg.Bindings) != 1 || cfg.Bindings[0].Key != "17" || cfg.Bindings[0].ProjectID != 17 || cfg.Bindings[0].ProjectNodeID != "" {
+		t.Fatalf("%#v", cfg)
+	}
+}
+
+func TestAeonJourneyFetchAndProjection(t *testing.T) {
+	var method, path, auth, accept, userAgent string
+	var body []byte
+	journey := sampleAeonJourney()
+	journey["project_node_id"] = strings.ToUpper(aeonProjectNodeID)
+	journey["email"] = "leaked@example.test"
+	journey["catalog"] = map[string]any{"secret": "no"}
+	journey["raw_marker"] = "should-not-leak"
+	journey["token"] = "secret-token"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		method = r.Method
+		path = r.URL.RequestURI()
+		auth = r.Header.Get("Authorization")
+		accept = r.Header.Get("Accept")
+		userAgent = r.Header.Get("User-Agent")
+		body, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(journey)
+	}))
+	t.Cleanup(server.Close)
+	app := newTestApp(t)
+	app.flow = testAeonService(t, server.URL)
+	app.flow.now = func() int64 { return 1_700_000_000 }
+	session := Session{Subject: "operator-a", Roles: []string{RoleViewer}, Expiry: time.Now().UTC().Add(time.Hour)}
+	cookie := flowCookie(t, app, session)
+	req := httptest.NewRequest(http.MethodGet, "/flow/shell-state.json?flow_project="+aeonProjectNodeID, nil)
+	req.AddCookie(cookie)
+	out := httptest.NewRecorder()
+	app.routes().ServeHTTP(out, req)
+	if method != http.MethodGet || path != "/api/projects/"+aeonProjectNodeID+"/journey" || auth != "Bearer 01234567890123456789012345678901" || len(body) != 0 {
+		t.Fatalf("method=%s path=%s auth=%s body=%q accept=%s ua=%s", method, path, auth, body, accept, userAgent)
+	}
+	if accept != "application/json" || userAgent != flowUserAgent {
+		t.Fatalf("accept=%s ua=%s", accept, userAgent)
+	}
+	var payload flowShellResponse
+	if json.Unmarshal(out.Body.Bytes(), &payload) != nil || !payload.MountShell {
+		t.Fatalf("body=%s", out.Body.String())
+	}
+	wire := out.Body.String()
+	for _, forbidden := range []string{"leaked@example.test", "secret-token", "should-not-leak", "raw_marker", "current_release_id", "requirements_digest_sha256", "tenant_slug", "nested-diagnostic-marker", "nested-next-marker", "nested-stage-marker", "cccccccc-dddd", "approve_deploy", "progress"} {
+		if strings.Contains(wire, forbidden) {
+			t.Fatalf("raw journey field %s leaked: %s", forbidden, wire)
+		}
+	}
+	for key := range payload.ShellState {
+		switch key {
+		case "evaluatedAt", "header", "health", "delivery", "prerequisites", "executionModes", "selectedExecutionMode", "selectedAction", "identityContext":
+		default:
+			t.Fatalf("unexpected shell field %s", key)
+		}
+	}
+	delivery, _ := payload.ShellState["delivery"].(map[string]any)
+	if delivery["status"] != "authorized" || delivery["batchRef"] != "release:aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee" || delivery["baselineRef"] != "requirements:7" {
+		t.Fatalf("delivery=%v", delivery)
+	}
+	// The bundled flow-shell consumes activeStage and stageEvidence; the
+	// eight Aeon stages fold onto its four.
+	if delivery["activeStage"] != float64(2) || delivery["batchStatusLabel"] != "Next in Aeon: Approve deploy" {
+		t.Fatalf("delivery=%v", delivery)
+	}
+	evidence, _ := delivery["stageEvidence"].([]any)
+	if len(evidence) != 4 || evidence[0] != "performed" || evidence[1] != "performed" || evidence[2] != "unknown" {
+		t.Fatalf("stageEvidence=%v", evidence)
+	}
+	prereq, _ := payload.ShellState["prerequisites"].(map[string]any)
+	pharos, _ := prereq["pharosTarget"].(map[string]any)
+	if pharos["readiness"] != "preliminary" || pharos["evidenceRef"] != "aeon:deploy-bbbbbbbbcccc4ddd" {
+		t.Fatalf("pharos=%v", pharos)
+	}
+	gate, _ := prereq["janusGate"].(map[string]any)
+	// A journey approval id is history, not a live permit: never a pass.
+	if gate["status"] != "unknown" || gate["evidenceRef"] != nil {
+		t.Fatalf("gate=%v", gate)
+	}
+	if payload.ShellState["selectedAction"] != "janus_prepare" {
+		t.Fatalf("selectedAction=%v", payload.ShellState["selectedAction"])
+	}
+	if payload.ProjectionMeta == nil || payload.ProjectionMeta.ProjectID != 0 || payload.ProjectionMeta.ProjectNodeID != aeonProjectNodeID || strings.Contains(wire, `"projectId"`) {
+		t.Fatalf("meta=%#v", payload.ProjectionMeta)
+	}
+
+	page := httptest.NewRequest(http.MethodGet, "/?flow_project="+aeonProjectNodeID, nil)
+	page.AddCookie(cookie)
+	pageOut := httptest.NewRecorder()
+	app.routes().ServeHTTP(pageOut, page)
+	html := pageOut.Body.String()
+	if !strings.Contains(html, `data-flow-upstream="aeon"`) || !strings.Contains(html, `data-flow-project-key="JANUS"`) || !strings.Contains(html, `data-flow-project="`+aeonProjectNodeID+`"`) {
+		t.Fatalf("shell attrs missing: %s", html)
+	}
+
+	reviewer := Session{Subject: "operator-a", Roles: []string{RoleFlowViewer}, Expiry: time.Now().UTC().Add(time.Hour)}
+	reviewPage := httptest.NewRequest(http.MethodGet, "/?flow_project="+aeonProjectNodeID, nil)
+	reviewPage.AddCookie(flowCookie(t, app, reviewer))
+	reviewOut := httptest.NewRecorder()
+	app.routes().ServeHTTP(reviewOut, reviewPage)
+	if !strings.Contains(reviewOut.Body.String(), "Open project in Aeon") || !strings.Contains(reviewOut.Body.String(), "/p/JANUS?view=journey") {
+		t.Fatalf("viewer=%s", reviewOut.Body.String())
+	}
+
+	intent := flowIntentOn(t, app, session, cookie, "/flow/intents?flow_project="+aeonProjectNodeID, `{"type":"flow:review-batch","identity":null,"detail":{}}`)
+	var result flowIntentResponse
+	if json.Unmarshal(intent.Body.Bytes(), &result) != nil || result.Routed != "aeon-project-journey" || !strings.Contains(result.Location, "/p/JANUS?view=journey") || strings.Contains(result.Location, "#") {
+		t.Fatalf("review=%#v", result)
+	}
+	if !strings.Contains(result.Notice, "Aeon") || strings.Contains(result.Notice, "Paimos") {
+		t.Fatalf("notice=%q", result.Notice)
+	}
+	headerIntent := flowIntentOn(t, app, session, cookie, "/flow/intents?flow_project="+aeonProjectNodeID, `{"type":"flow:header-project"}`)
+	var headerResult flowIntentResponse
+	if json.Unmarshal(headerIntent.Body.Bytes(), &headerResult) != nil || headerResult.Routed != "aeon-project-journey" || headerResult.Location != result.Location || headerResult.Notice != "Project navigation stays in configured Aeon." {
+		t.Fatalf("header=%#v", headerResult)
+	}
+
+	origin := app.flow.paimosBrowserString()
+	if got := app.flow.validNavigationLocation(origin + "/p/JANUS?view=journey"); got == "" {
+		t.Fatal("configured journey rejected")
+	}
+	withUser := *app.flow.paimosBrowser()
+	withUser.User = url.UserPassword("user", "pass")
+	withUser.Path = "/p/JANUS"
+	withUser.RawQuery = "view=journey"
+	for _, blocked := range []string{
+		origin + "/projects/17?tab=overview#baseline-batch",
+		origin + "/p/OTHER?view=journey",
+		origin + "/p/JANUS?view=other",
+		origin + "/p/JANUS?view=journey&stage=deploy",
+		origin + "/p/JANUS?view=journey#live",
+		"https://evil.example/p/JANUS?view=journey",
+		withUser.String(),
+	} {
+		if app.flow.validNavigationLocation(blocked) != "" {
+			t.Fatalf("accepted %s", blocked)
+		}
+	}
+}
+
+func TestAeonBindingMismatchesAndStatuses(t *testing.T) {
+	cases := []struct {
+		name    string
+		status  int
+		mutate  func(map[string]any)
+		message string
+	}{
+		{"project node", http.StatusOK, func(j map[string]any) { j["project_node_id"] = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee" }, "configured project binding mismatch"},
+		{"project key", http.StatusOK, func(j map[string]any) { j["project_key"] = "OTHER" }, "configured project binding mismatch"},
+		{"node key", http.StatusOK, func(j map[string]any) { j["node_key"] = "PRJ-99" }, "configured project binding mismatch"},
+		{"tenant", http.StatusOK, func(j map[string]any) { j["tenant_slug"] = "other" }, "configured tenant binding mismatch"},
+		{"forbidden", http.StatusForbidden, nil, "Configured Aeon key cannot read this project journey."},
+		{"missing", http.StatusNotFound, nil, "Configured Aeon project journey is unavailable for this binding."},
+		{"refused", http.StatusBadGateway, nil, "Configured Aeon journey refused the upstream request."},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			journey := sampleAeonJourney()
+			if tc.mutate != nil {
+				tc.mutate(journey)
+			}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.status)
+				if tc.status == http.StatusOK {
+					_ = json.NewEncoder(w).Encode(journey)
+				}
+			}))
+			t.Cleanup(server.Close)
+			app := newTestApp(t)
+			app.flow = testAeonService(t, server.URL)
+			session := Session{Subject: "operator-a", Roles: []string{RoleViewer}, Expiry: time.Now().UTC().Add(time.Hour)}
+			req := httptest.NewRequest(http.MethodGet, "/flow/shell-state.json", nil)
+			req.AddCookie(flowCookie(t, app, session))
+			out := httptest.NewRecorder()
+			app.routes().ServeHTTP(out, req)
+			if strings.Contains(out.Body.String(), `"mountShell":true`) || !strings.Contains(out.Body.String(), tc.message) {
+				t.Fatalf("body=%s", out.Body.String())
+			}
+		})
+	}
+}
+
+func TestAeonRevisionRegressionIsRefused(t *testing.T) {
+	revision := 5
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		journey := sampleAeonJourney()
+		journey["revision"] = revision
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(journey)
+	}))
+	t.Cleanup(server.Close)
+	app := newTestApp(t)
+	app.flow = testAeonService(t, server.URL)
+	now := int64(1_700_000_000)
+	app.flow.now = func() int64 { return now }
+	session := Session{Subject: "operator-a", Roles: []string{RoleViewer}, Expiry: time.Now().UTC().Add(time.Hour)}
+	cookie := flowCookie(t, app, session)
+	first := httptest.NewRequest(http.MethodGet, "/flow/shell-state.json", nil)
+	first.AddCookie(cookie)
+	firstOut := httptest.NewRecorder()
+	app.routes().ServeHTTP(firstOut, first)
+	if !strings.Contains(firstOut.Body.String(), `"mountShell":true`) {
+		t.Fatalf("first=%s", firstOut.Body.String())
+	}
+	revision = 4
+	now = 1_700_000_400
+	second := httptest.NewRequest(http.MethodGet, "/flow/shell-state.json", nil)
+	second.AddCookie(cookie)
+	secondOut := httptest.NewRecorder()
+	app.routes().ServeHTTP(secondOut, second)
+	if strings.Contains(secondOut.Body.String(), `"mountShell":true`) || !strings.Contains(secondOut.Body.String(), "older revision") {
+		t.Fatalf("regression=%s", secondOut.Body.String())
+	}
+}
+
+func TestFlowProjectSelectorAcceptsUUIDAndRejectsGarbage(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/?flow_project="+aeonProjectNodeID, nil)
+	got, err := parseOptionalFlowProject(req)
+	if err != nil || got != aeonProjectNodeID {
+		t.Fatalf("uuid=%q %v", got, err)
+	}
+	classic := httptest.NewRequest(http.MethodGet, "/?flow_project=17", nil)
+	got, err = parseOptionalFlowProject(classic)
+	if err != nil || got != "17" {
+		t.Fatalf("classic=%q %v", got, err)
+	}
+	absent := httptest.NewRequest(http.MethodGet, "/", nil)
+	got, err = parseOptionalFlowProject(absent)
+	if err != nil || got != "" {
+		t.Fatalf("absent=%q %v", got, err)
+	}
+	// Classic keeps its original lenient decimal selector (JANUS-458).
+	lenient := httptest.NewRequest(http.MethodGet, "/?flow_project=017", nil)
+	if got, err := parseOptionalFlowProject(lenient); err != nil || got != "17" {
+		t.Fatalf("classic lenient=%q %v", got, err)
+	}
+	if _, ok := safeReturnQuery("flow_project=017"); ok {
+		t.Fatal("public path accepted non-canonical 017")
+	}
+	for _, raw := range []string{"0", "17abc", "71D807C5-6EE1-4A18-8742-54ED5B74690D", "not-a-uuid", "71d807c56ee14a18874254ed5b74690d"} {
+		bad := httptest.NewRequest(http.MethodGet, "/?flow_project="+url.QueryEscape(raw), nil)
+		if _, err := parseOptionalFlowProject(bad); err == nil {
+			t.Fatalf("accepted %q", raw)
+		}
+		if _, ok := safeReturnQuery("flow_project=" + raw); ok {
+			t.Fatalf("public path accepted %q", raw)
+		}
+	}
+	query, ok := safeReturnQuery("flow_project=" + aeonProjectNodeID)
+	if !ok || query != "flow_project="+aeonProjectNodeID {
+		t.Fatalf("query=%q ok=%v", query, ok)
+	}
+	query, ok = safeReturnQuery("flow_project=17")
+	if !ok || query != "flow_project=17" {
+		t.Fatalf("classic query=%q ok=%v", query, ok)
+	}
+}
+
+func aeonConfigJSON(key, extraBinding string) string {
+	bindings := `{"project_node_id":"` + aeonProjectNodeID + `","project_key":"` + aeonProjectKey + `","node_key":"` + aeonNodeKey + `","label":"Janus","principal_refs":["operator-a"]}`
+	if extraBinding != "" {
+		bindings += "," + extraBinding
+	}
+	return `{
+		"schema":"inspr.janus.flow-host-config.v2",
+		"schema_version":2,
+		"enabled":true,
+		"host_id":"janus-test",
+		"upstream":"aeon",
+		"aeon_origin":"https://aeon.example",
+		"aeon_public_url":null,
+		"api_key_file":"` + key + `",
+		"instance_label":null,
+		"tenant_slug":"inspr",
+		"bindings":[` + bindings + `]
+	}`
+}
+
+func sampleAeonJourney() map[string]any {
+	return map[string]any{
+		"project_node_id":            aeonProjectNodeID,
+		"project_key":                aeonProjectKey,
+		"node_key":                   aeonNodeKey,
+		"tenant_slug":                aeonTenantSlug,
+		"revision":                   4,
+		"stage":                      "deploy",
+		"stage_source":               "journey",
+		"imported":                   false,
+		"current_release_id":         "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+		"requirements_revision":      7,
+		"requirements_digest_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		"launch_readiness":           map[string]any{"can_admit": true, "reason": "", "email": "leaked@example.test", "diagnostic": "nested-diagnostic-marker"},
+		"next_action":                map[string]any{"key": "approve_deploy", "label": "Approve deploy", "stage": "deploy", "available": true, "token": "secret-token", "raw_marker": "nested-next-marker"},
+		"stages": []any{
+			map[string]any{"key": "inspire", "state": "done"},
+			map[string]any{"key": "shape", "state": "done"},
+			map[string]any{"key": "requirements", "state": "done"},
+			map[string]any{"key": "plan", "state": "done"},
+			map[string]any{"key": "build", "state": "done"},
+			map[string]any{"key": "deploy", "state": "current", "handoff_id": "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff"},
+			map[string]any{"key": "access", "state": "later", "gate_approval_id": "cccccccc-dddd-4eee-8fff-000000000000", "token": "secret-token", "stage_marker": "nested-stage-marker"},
+			map[string]any{"key": "live", "state": "later"},
+		},
+	}
+}
+
+func testAeonService(t *testing.T, origin string) *flowHostService {
+	t.Helper()
+	service := testFlowService(t, origin)
+	service.config.Upstream = flowUpstreamAeon
+	service.config.TenantSlug = aeonTenantSlug
+	service.config.Bindings = []flowBinding{{
+		Key:           aeonProjectNodeID,
+		ProjectNodeID: aeonProjectNodeID,
+		ProjectKey:    aeonProjectKey,
+		NodeKey:       aeonNodeKey,
+		Label:         "Janus",
+		PrincipalRefs: map[string]struct{}{"operator-a": {}},
+	}}
+	return service
+}
+
+func flowIntentOn(t *testing.T, app *App, session Session, cookie *http.Cookie, path, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", app.cfg.PublicURL)
+	req.Header.Set("X-CSRF-Token", app.csrfToken(session))
+	req.AddCookie(cookie)
+	out := httptest.NewRecorder()
+	app.routes().ServeHTTP(out, req)
+	return out
+}
+
 func TestCheckFlowShellVendorScript(t *testing.T) {
 	cmd := exec.Command("bash", "../scripts/check-flow-shell-vendor.sh")
 	cmd.Dir = "."
@@ -647,5 +1045,111 @@ func TestCheckFlowShellVendorScript(t *testing.T) {
 	}
 	if !strings.Contains(string(out), "flow-shell vendor manifest verified") {
 		t.Fatalf("output=%s", out)
+	}
+}
+
+func TestAeonShellStateUsesOnlyFlowShellValues(t *testing.T) {
+	binding := flowBinding{ProjectNodeID: aeonProjectNodeID, ProjectKey: aeonProjectKey, Label: "Janus"}
+	allStates := func(state string) []any {
+		out := []any{}
+		for _, key := range []string{"inspire", "shape", "requirements", "plan", "build", "deploy", "access", "live"} {
+			out = append(out, map[string]any{"key": key, "state": state})
+		}
+		return out
+	}
+	live := aeonShellState(map[string]any{"stage": "live", "stage_source": "journey", "stages": allStates("done")}, binding, 1_700_000_000)
+	delivery := live["delivery"].(map[string]any)
+	if delivery["status"] != "completed" || delivery["activeStage"] != 3 {
+		t.Fatalf("live delivery=%v", delivery)
+	}
+	for _, evidence := range delivery["stageEvidence"].([]any) {
+		if evidence != "performed" {
+			t.Fatalf("live evidence=%v", delivery["stageEvidence"])
+		}
+	}
+	blockedStages := allStates("later")
+	blockedStages[5] = map[string]any{"key": "deploy", "state": "blocked"}
+	blockedStages[6] = map[string]any{"key": "access", "state": "skipped"}
+	blocked := aeonShellState(map[string]any{"stage": "deploy", "stage_source": "journey", "stages": blockedStages, "next_action": map[string]any{"label": "<script>x</script>"}}, binding, 1_700_000_000)
+	delivery = blocked["delivery"].(map[string]any)
+	if delivery["status"] != "blocked" || delivery["activeStage"] != 2 || delivery["stageEvidence"].([]any)[3] != "not_in_batch" || delivery["batchStatusLabel"] != "Aeon journey" {
+		t.Fatalf("blocked delivery=%v", delivery)
+	}
+	allowed := map[string]bool{"draft": true, "authorized": true, "in_progress": true, "blocked": true, "completed": true}
+	for _, stage := range []string{"inspire", "shape", "requirements", "plan", "build", "deploy", "access", "live", ""} {
+		shell := aeonShellState(map[string]any{"stage": stage}, binding, 1_700_000_000)
+		if status := shell["delivery"].(map[string]any)["status"].(string); !allowed[status] {
+			t.Fatalf("stage %q status %q", stage, status)
+		}
+	}
+}
+
+func TestAeonImportedOrDerivedHistoryIsNotEvidence(t *testing.T) {
+	binding := flowBinding{ProjectNodeID: aeonProjectNodeID, ProjectKey: aeonProjectKey, Label: "Janus"}
+	done := func() []any {
+		out := []any{}
+		for _, key := range []string{"inspire", "shape", "requirements", "plan", "build"} {
+			out = append(out, map[string]any{"key": key, "state": "done"})
+		}
+		return append(out, map[string]any{"key": "deploy", "state": "current"}, map[string]any{"key": "access", "state": "skipped"}, map[string]any{"key": "live", "state": "later"})
+	}
+	digest := strings.Repeat("a", 64)
+	for name, journey := range map[string]map[string]any{
+		"derived":  {"stage": "deploy", "stage_source": "derived", "imported": false, "requirements_revision": float64(3), "requirements_digest_sha256": digest, "stages": done()},
+		"imported": {"stage": "deploy", "stage_source": "journey", "imported": true, "requirements_revision": float64(3), "requirements_digest_sha256": digest, "stages": done()},
+		"unagreed": {"stage": "deploy", "stage_source": "journey", "imported": false, "requirements_revision": float64(0), "requirements_digest_sha256": digest, "stages": done()},
+	} {
+		shell := aeonShellState(journey, binding, 1_700_000_000)
+		gate := shell["prerequisites"].(map[string]any)["requirementsBaseline"].(map[string]any)
+		if gate["status"] != "unknown" {
+			t.Fatalf("%s: requirements=%v", name, gate)
+		}
+		evidence := shell["delivery"].(map[string]any)["stageEvidence"].([]any)
+		if name != "unagreed" && evidence[0] != "unknown" {
+			t.Fatalf("%s: define evidence=%v", name, evidence)
+		}
+		if name == "imported" && (evidence[1] != "performed" || evidence[3] != "not_in_batch") {
+			t.Fatalf("imported recorded stages=%v", evidence)
+		}
+	}
+	// The positive case: recorded, agreed requirements are a pass.
+	agreed := aeonShellState(map[string]any{"stage": "deploy", "stage_source": "journey", "imported": false, "requirements_revision": float64(3), "requirements_digest_sha256": digest, "stages": done()}, binding, 1_700_000_000)
+	if gate := agreed["prerequisites"].(map[string]any)["requirementsBaseline"].(map[string]any); gate["status"] != "pass" {
+		t.Fatalf("agreed requirements=%v", gate)
+	}
+	if evidence := agreed["delivery"].(map[string]any)["stageEvidence"].([]any); evidence[0] != "performed" {
+		t.Fatalf("agreed define evidence=%v", evidence)
+	}
+}
+
+func TestAeonAccessEvidenceSurvivesTheMerge(t *testing.T) {
+	journey := sampleAeonJourney()
+	journey["stage"] = "live"
+	stages := journey["stages"].([]any)
+	for index, item := range stages {
+		entry := cloneObject(item.(map[string]any))
+		entry["state"] = "done"
+		stages[index] = entry
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(journey)
+	}))
+	t.Cleanup(server.Close)
+	service := testAeonService(t, server.URL)
+	service.now = func() int64 { return 1_700_000_000 }
+	session := Session{Subject: "operator-a", Roles: []string{RoleViewer}, Expiry: time.Now().UTC().Add(time.Hour)}
+	out := service.shellState(session, aeonProjectNodeID, 1_700_000_000, true)
+	if !out.MountShell {
+		t.Fatalf("unavailable: %s", out.UnavailableReason)
+	}
+	delivery := out.ShellState["delivery"].(map[string]any)
+	evidence := delivery["stageEvidence"].([]any)
+	if delivery["status"] != "completed" || evidence[3] != "performed" {
+		t.Fatalf("final shell delivery=%v", delivery)
+	}
+	gate := out.ShellState["prerequisites"].(map[string]any)["janusGate"].(map[string]any)
+	if gate["status"] != "unknown" {
+		t.Fatalf("gate=%v", gate)
 	}
 }

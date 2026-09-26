@@ -106,6 +106,8 @@ python3 scripts/check-release-docs.py
 run_external_stage_pins() {
 python3 scripts/check-paimos-external-stage-pins.py --self-test
 python3 scripts/check-paimos-external-stage-pins.py
+python3 scripts/check-aeon-stage-handoff-pins.py --self-test
+python3 scripts/check-aeon-stage-handoff-pins.py
 }
 
 run_release_admission() {

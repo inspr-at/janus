@@ -149,6 +149,23 @@ with the API key. Optional `paimos_browser_url` is the browser navigation
 address and may include a native Paimos prefix independent of that
 upstream.
 
+Flow config schema `inspr.janus.flow-host-config.v2` (JANUS-480) selects the
+Aeon upstream instead: `upstream: "aeon"`, server-only `aeon_origin`, optional
+browser `aeon_public_url`, `api_key_file`, `tenant_slug`, and bindings of
+`project_node_id` (lowercase UUID), `project_key`, `node_key`, `label` and
+`principal_refs`. Janus reads `GET /api/projects/{project_node_id}/journey`
+with an Aeon agent key holding `journey.read`, refuses the answer unless its
+`project_node_id`, `project_key`, `node_key` and `tenant_slug` all equal the
+binding, refuses an older journey revision, and projects only the supported
+Flow stage fields (the eight Aeon stages fold onto the four Flow stages; the
+Access permit always shows as decided in Aeon, never as a Janus pass, because
+the journey names the approval but not whether it is still live; only
+recorded journey history counts as stage or requirements evidence, never a
+derived rail or the pre-Plan stages of an imported project). Browser
+links go to `/p/{project_key}?view=journey` on the
+Aeon public URL and no other path is allowlisted. Schema v1 stays the classic
+Paimos host unchanged, so rollback is restoring the v1 file.
+
 For a sandbox-only browser reviewer, map an exact immutable subject with
 `JANUS_FLOW_VIEWER_SUBJECTS`, or a dedicated OIDC project role claim with
 `JANUS_FLOW_VIEWER_GROUPS` (for example `janus:flow_viewer`). The browser-only
@@ -645,6 +662,68 @@ deployment, or verification success; target readiness; delivery-stream
 prerequisite satisfaction; or that any downstream apply is safe. Pin major v1
 remains appropriate for this Janus dependency adapter even when a Pharos owner
 uses v2 elsewhere.
+
+#### Aeon stage-handoff adapter (JANUS-480)
+
+The same `janus-paimos-dependency-reporter` and
+`janus-paimos-managed-completion-reporter` binaries switch to Aeon when the
+fixed root-owned config carries schema
+`inspr.janus.aeon-stage-reporter-config.v1` (static) or the managed binding
+carries `inspr.janus.managed-completion-aeon-binding.v1` with a reporter config
+of schema `inspr.janus.aeon-managed-completion-reporter-config.v1`. Any other
+schema takes the classic path above, byte for byte; rollback is restoring the
+classic config and binding. `janus-paimos-managed-credential-reattestation-reporter`
+selects Aeon the same way when its binding carries
+`inspr.janus.managed-credential-reattestation-aeon-binding.v1`: the retry is
+a new Aeon Access handoff (different handoff and attempt epoch), the local
+record uses `inspr.janus.managed-credential-reattestation-aeon-record.v1`
+without classic execution or credential epochs, and the original completion
+may be classic or Aeon.
+
+The Aeon config names an HTTPS `aeon_origin`, optional `aeon_ca_file` (same
+rules as `paimos_ca_file`), `api_key_file`, a private `journal_directory`, the
+reviewed `project` (`project_node_id`, `project_key`, `node_key`,
+`tenant_slug`), and the reviewed `handoff` tuple copied from
+`GET /api/stage-handoffs/{id}` (`handoff_id`, `release_node_id`, `operation`
+`prepare` or `apply`, `authority_epoch`, `plan_digest`, `predecessor_digest`,
+`context_digest`, `expires_at`). The static config adds
+`evidence.credential_ready_observed_at`; the managed config instead takes that
+time from the durable completion record. See
+[`examples/aeon-stage-reporter/`](examples/aeon-stage-reporter/). The API-key
+file holds one whitespace-free `aeon_<prefix>_<secret>` agent key for the
+active Aeon agent principal named `janus`, with exactly the scopes
+`journey.read`, `stage.prepare` and `stage.apply`, owner-only (`0400` or
+`0600`) and root-owned. Aeon additionally requires a live
+`agent_permission_grants` row for the operation on the release.
+
+Every run first proves through `GET /api/me` that the key acts as the agent
+principal `janus` in the configured tenant, because Aeon's evidence and
+result writes check the live grant but not the routed principal name. A run
+then re-reads the journey (exact project, key, node key and tenant; the
+handoff's release must be current) and the handoff (Access stage, routed to
+plugin `janus`, the configured operation, lineage digests, epoch, expiry, the
+exact evidence ceiling, still `requested` or `active` with no result), then
+journals three exact request bodies before any write: `authorization`
+(`authorized: true`, observed at that live check), `credential_handoff`
+(`credential_ready: true`) and a `succeeded` result echoing the stored
+`prerequisite_seal_sha256`. The evidence rows carry nothing else: no
+principal, grant, path, secret, URL, digest or free text; the result carries
+only the Aeon-issued seal it must echo. The journal is `aeon-<handoff_id>.json` in
+the journal directory, so no classic journal is ever read, replayed or
+rewritten. A lost response replays the identical bytes, which Aeon treats as
+an exact replay. After the handoff expires, only a journaled terminal result
+whose answer was lost is replayed (Aeon returns the stored result); no new
+fact is sent. Wrong agent, wrong project or tenant, stale release or epoch, wrong plugin
+or operation, a closed or expired handoff, a missing or revoked grant, a
+divergent replay, a changed seal, or another terminal result all fail closed
+with value-free `aeon_reporter_*` reason codes.
+
+The pinned contract is Aeon `v260926071154.0.0`, commit
+`482c563482c014c2097e65f7ef528444e12ec7af`, whose `api/openapi.yaml` has
+SHA-256 `4420f2d269af7477bcb41a7fa0d670f28376a151145c71ebb368c61ade370493`.
+The relevant excerpt lives under `contracts/aeon-stage-handoff-v1/` and is
+checked by `scripts/check-aeon-stage-handoff-pins.py` (add
+`--aeon-checkout <path>` to re-derive it from the Aeon repository).
 
 ### Service env file
 

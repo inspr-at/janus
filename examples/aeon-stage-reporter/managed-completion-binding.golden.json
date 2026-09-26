@@ -1,0 +1,33 @@
+{
+  "schema": "inspr.janus.managed-completion-aeon-binding.v1",
+  "schema_version": 1,
+  "operation_ref": "op_0123456789abcdef",
+  "operation_kind": "create",
+  "source": "generated",
+  "host_ref": "host_0123456789abcdef",
+  "service_ref": "svc_0123456789abcdef",
+  "slot_ref": "slot_0123456789abcdef",
+  "declaration_fingerprint": "decl_0123456789abcdef",
+  "secret_ref": "sec_fixturefixture",
+  "scope_ref": "scp_0123456789abcdef",
+  "generation": 1,
+  "revocation_epoch": 1,
+  "plan_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "target_fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "producer_key_id": "key_0123456789abcdef",
+  "reporter": {
+    "schema": "inspr.janus.aeon-managed-completion-reporter-binding.v1",
+    "schema_version": 1,
+    "config_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "project_node_id": "00000000-0000-4000-8000-000000000001",
+    "handoff_id": "00000000-0000-4000-8000-000000000002",
+    "release_node_id": "00000000-0000-4000-8000-000000000003",
+    "operation": "apply",
+    "authority_epoch": 1,
+    "plan_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+    "predecessor_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+    "context_digest": "3333333333333333333333333333333333333333333333333333333333333333",
+    "expires_at": "2026-09-27T12:00:00Z",
+    "evidence_source": "managed_completion_record"
+  }
+}

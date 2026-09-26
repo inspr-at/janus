@@ -19,10 +19,12 @@ use janus_core::MaterialTimestamp;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::aeon_stage::AeonManagedCompletionBindingV1;
 use crate::paimos::PaimosManagedCompletionBindingV1;
 use crate::paimos_completion::{
     decode_record, validate_binding_shape as validate_completion_binding,
-    ManagedCompletionBindingV2,
+    ManagedCompletionAeonBindingV1, ManagedCompletionBindingV2,
+    AEON_BINDING_SCHEMA as AEON_COMPLETION_BINDING_SCHEMA,
 };
 use crate::{HostCredentialAttestationStatusV1, HostExecutor};
 
@@ -30,6 +32,11 @@ pub const CAPABILITY_SCHEMA: &str = "inspr.janus.managed-credential-reattestatio
 pub const BINDING_SCHEMA: &str = "inspr.janus.managed-credential-reattestation-binding.v1";
 pub const OBSERVATION_SCHEMA: &str = "inspr.janus.managed-credential-current-observation.v1";
 pub const EVIDENCE_SCHEMA: &str = "inspr.janus.managed-credential-reattestation-record.v1";
+/// JANUS-480: the same re-attestation reported to one Aeon Access handoff.
+pub const AEON_BINDING_SCHEMA: &str =
+    "inspr.janus.managed-credential-reattestation-aeon-binding.v1";
+pub const AEON_EVIDENCE_SCHEMA: &str =
+    "inspr.janus.managed-credential-reattestation-aeon-record.v1";
 
 const SYSTEM_CAPABILITY_PATH: &str = "/run/janus-managed-credential-reattestation/capability.json";
 const SYSTEM_BINDING_PATH: &str = "/run/janus-managed-credential-reattestation/binding.json";
@@ -80,9 +87,151 @@ pub struct ManagedCredentialReattestationCapabilityV1 {
     pub binding_digest: String,
 }
 
+/// The reporter a re-attestation binding names: classic Paimos or Aeon.
+pub trait ReattestationReporter:
+    Clone + fmt::Debug + PartialEq + Serialize + for<'de> Deserialize<'de>
+{
+    /// Binding schema that carries this reporter.
+    const BINDING_SCHEMA: &'static str;
+    /// Local evidence-record schema written for this reporter.
+    const RECORD_SCHEMA: &'static str;
+    /// Reporter shape, including the re-attestation evidence source.
+    fn reattestation_shape_valid(&self) -> bool;
+    /// The handoff tuple the local record binds.
+    fn record_tuple(&self) -> RecordTuple;
+    /// True when this reporter names a different attempt than the source.
+    fn distinct_from(&self, source: &SourceReporter<'_>) -> bool;
+    /// Report the record's observation through the reporter's adapter.
+    fn report(
+        &self,
+        config_path: &Path,
+        observed_at: String,
+        owner_uid: u32,
+        allow_loopback_http: bool,
+    ) -> bool;
+}
+
+/// Handoff tuple copied into the local record. The classic-only fields are
+/// absent for Aeon, which has no execution number or credential epoch.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecordTuple {
+    handoff_id: String,
+    execution_number: Option<i64>,
+    authority_epoch: i64,
+    credential_epoch: Option<i64>,
+}
+
+/// The reporter of the original managed completion being re-attested.
+pub enum SourceReporter<'a> {
+    Classic(&'a PaimosManagedCompletionBindingV1),
+    Aeon(&'a AeonManagedCompletionBindingV1),
+}
+
+impl ReattestationReporter for PaimosManagedCompletionBindingV1 {
+    const BINDING_SCHEMA: &'static str = BINDING_SCHEMA;
+    const RECORD_SCHEMA: &'static str = EVIDENCE_SCHEMA;
+
+    fn reattestation_shape_valid(&self) -> bool {
+        crate::paimos::validate_managed_reporter_binding_shape(self).is_ok()
+            && self.evidence_source == "managed_credential_reattestation_record"
+    }
+
+    fn record_tuple(&self) -> RecordTuple {
+        RecordTuple {
+            handoff_id: self.handoff_id.clone(),
+            execution_number: Some(self.execution_number),
+            authority_epoch: self.authority_epoch,
+            credential_epoch: Some(self.credential_epoch),
+        }
+    }
+
+    fn distinct_from(&self, source: &SourceReporter<'_>) -> bool {
+        // A classic retry of an Aeon completion is never a supported shape.
+        match source {
+            SourceReporter::Classic(source) => {
+                source.handoff_id != self.handoff_id
+                    && source.execution_number != self.execution_number
+            }
+            SourceReporter::Aeon(_) => false,
+        }
+    }
+
+    fn report(
+        &self,
+        config_path: &Path,
+        observed_at: String,
+        owner_uid: u32,
+        allow_loopback_http: bool,
+    ) -> bool {
+        crate::paimos::run_managed_completion_from_path(
+            config_path,
+            self,
+            observed_at,
+            owner_uid,
+            allow_loopback_http,
+        )
+        .is_ok()
+    }
+}
+
+impl ReattestationReporter for AeonManagedCompletionBindingV1 {
+    const BINDING_SCHEMA: &'static str = AEON_BINDING_SCHEMA;
+    const RECORD_SCHEMA: &'static str = AEON_EVIDENCE_SCHEMA;
+
+    fn reattestation_shape_valid(&self) -> bool {
+        crate::aeon_stage::validate_managed_reporter_binding_shape(self).is_ok()
+            && self.evidence_source == "managed_credential_reattestation_record"
+    }
+
+    fn record_tuple(&self) -> RecordTuple {
+        RecordTuple {
+            handoff_id: self.handoff_id.clone(),
+            execution_number: None,
+            authority_epoch: self.authority_epoch,
+            credential_epoch: None,
+        }
+    }
+
+    fn distinct_from(&self, source: &SourceReporter<'_>) -> bool {
+        // An Aeon retry is a new handoff with its own attempt and epoch; a
+        // classic source handoff can never share its UUID.
+        match source {
+            SourceReporter::Classic(_) => true,
+            SourceReporter::Aeon(source) => {
+                source.handoff_id != self.handoff_id
+                    && (source.release_node_id != self.release_node_id
+                        || source.operation != self.operation
+                        || source.authority_epoch != self.authority_epoch)
+            }
+        }
+    }
+
+    fn report(
+        &self,
+        config_path: &Path,
+        observed_at: String,
+        owner_uid: u32,
+        allow_loopback_http: bool,
+    ) -> bool {
+        crate::aeon_stage::run_managed_completion_from_path(
+            config_path,
+            self,
+            observed_at,
+            owner_uid,
+            allow_loopback_http,
+        )
+        .is_ok()
+    }
+}
+
+pub type ManagedCredentialReattestationBindingV1 =
+    ManagedCredentialReattestationBinding<PaimosManagedCompletionBindingV1>;
+pub type ManagedCredentialReattestationAeonBindingV1 =
+    ManagedCredentialReattestationBinding<AeonManagedCompletionBindingV1>;
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct ManagedCredentialReattestationBindingV1 {
+pub struct ManagedCredentialReattestationBinding<R> {
     pub schema: String,
     pub schema_version: u8,
     pub attestation_ref: String,
@@ -110,7 +259,7 @@ pub struct ManagedCredentialReattestationBindingV1 {
     pub expected_artifact_digest: String,
     pub expected_release_ref: String,
     pub freshness_seconds: u64,
-    pub reporter: PaimosManagedCompletionBindingV1,
+    pub reporter: R,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -164,9 +313,11 @@ pub struct ManagedCredentialReattestationRecordV1 {
     pub binding_digest: String,
     pub source_completion_record_sha256: String,
     pub handoff_id: String,
-    pub execution_number: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_number: Option<i64>,
     pub authority_epoch: i64,
-    pub credential_epoch: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_epoch: Option<i64>,
     pub host_status: HostCredentialAttestationStatusV1,
     pub observation: ManagedCredentialCurrentObservationV1,
     pub evidence_accepted_at_unix_secs: u64,
@@ -187,7 +338,7 @@ impl ManagedCredentialReattestationCapabilityV1 {
     }
 }
 
-impl ManagedCredentialReattestationBindingV1 {
+impl<R: ReattestationReporter> ManagedCredentialReattestationBinding<R> {
     pub fn digest(&self) -> Result<String> {
         self.validate()?;
         let canonical = crate::paimos::canonical_json_bytes(self)
@@ -196,7 +347,7 @@ impl ManagedCredentialReattestationBindingV1 {
     }
 
     fn validate(&self) -> Result<()> {
-        if self.schema != BINDING_SCHEMA
+        if self.schema != R::BINDING_SCHEMA
             || self.schema_version != 1
             || !valid_ref("reattest_", &self.attestation_ref)
             || !valid_ref("op_", &self.reattestation_operation_ref)
@@ -226,8 +377,7 @@ impl ManagedCredentialReattestationBindingV1 {
             || !valid_wire_digest(&self.expected_artifact_digest)
             || !valid_ref("release_", &self.expected_release_ref)
             || !(1..=120).contains(&self.freshness_seconds)
-            || crate::paimos::validate_managed_reporter_binding_shape(&self.reporter).is_err()
-            || self.reporter.evidence_source != "managed_credential_reattestation_record"
+            || !self.reporter.reattestation_shape_valid()
         {
             return Err(error("managed_credential_reattestation_binding_invalid"));
         }
@@ -252,15 +402,25 @@ impl ManagedCredentialReattestationRecordV1 {
     }
 
     fn validate_shape(&self) -> Result<()> {
-        if self.schema != EVIDENCE_SCHEMA
+        let handoff_shape = match self.schema.as_str() {
+            EVIDENCE_SCHEMA => {
+                valid_handoff_id(&self.handoff_id)
+                    && self.execution_number.is_some_and(|value| value > 0)
+                    && self.credential_epoch.is_some_and(|value| value > 0)
+            }
+            AEON_EVIDENCE_SCHEMA => {
+                crate::aeon_stage::valid_uuid(&self.handoff_id)
+                    && self.execution_number.is_none()
+                    && self.credential_epoch.is_none()
+            }
+            _ => false,
+        };
+        if !handoff_shape
             || self.schema_version != 1
             || !valid_ref("reattest_", &self.attestation_ref)
             || !valid_wire_digest(&self.binding_digest)
             || !valid_wire_digest(&self.source_completion_record_sha256)
-            || !valid_handoff_id(&self.handoff_id)
-            || self.execution_number <= 0
             || self.authority_epoch <= 0
-            || self.credential_epoch <= 0
             || self.evidence_accepted_at_unix_secs == 0
             || self.observation.value_returned
             || self.host_status.value_returned
@@ -322,12 +482,66 @@ where
         "managed_credential_reattestation_capability_unavailable",
     )?;
     capability.validate()?;
-    let binding: ManagedCredentialReattestationBindingV1 = decode_private(
+    let binding_raw = read_private(
         binding_path,
         owner_uid,
         owner_gid,
         "managed_credential_reattestation_binding_unavailable",
     )?;
+    if crate::aeon_stage::selects_aeon(&binding_raw, AEON_BINDING_SCHEMA) {
+        let binding: ManagedCredentialReattestationAeonBindingV1 = decode_binding(&binding_raw)?;
+        return run_bound(
+            capability,
+            binding,
+            source_binding_path,
+            source_record_path,
+            reporter_config_path,
+            evidence_directory,
+            owner_uid,
+            owner_gid,
+            allow_loopback_http,
+            host_executor,
+        );
+    }
+    let binding: ManagedCredentialReattestationBindingV1 = decode_binding(&binding_raw)?;
+    run_bound(
+        capability,
+        binding,
+        source_binding_path,
+        source_record_path,
+        reporter_config_path,
+        evidence_directory,
+        owner_uid,
+        owner_gid,
+        allow_loopback_http,
+        host_executor,
+    )
+}
+
+fn decode_binding<R: ReattestationReporter>(
+    raw: &[u8],
+) -> Result<ManagedCredentialReattestationBinding<R>> {
+    crate::paimos::decode_strict(raw, "managed_credential_reattestation_binding_unavailable")
+        .map_err(|_| error("managed_credential_reattestation_binding_unavailable"))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_bound<R, F>(
+    capability: ManagedCredentialReattestationCapabilityV1,
+    binding: ManagedCredentialReattestationBinding<R>,
+    source_binding_path: &Path,
+    source_record_path: &Path,
+    reporter_config_path: &Path,
+    evidence_directory: &Path,
+    owner_uid: u32,
+    owner_gid: u32,
+    allow_loopback_http: bool,
+    host_executor: F,
+) -> Result<()>
+where
+    R: ReattestationReporter,
+    F: Fn() -> std::result::Result<HostExecutor, crate::HostEnvelopeError>,
+{
     let binding_digest = binding.digest()?;
     if capability.attestation_ref != binding.attestation_ref
         || capability.operation_ref != binding.reattestation_operation_ref
@@ -380,14 +594,15 @@ where
         record
     };
     let observed_at = record.observed_at()?;
-    crate::paimos::run_managed_completion_from_path(
+    if !binding.reporter.report(
         reporter_config_path,
-        &binding.reporter,
         observed_at,
         owner_uid,
         allow_loopback_http,
-    )
-    .map_err(|_| error("managed_credential_reattestation_report_pending"))
+    ) {
+        return Err(error("managed_credential_reattestation_report_pending"));
+    }
+    Ok(())
 }
 
 fn configuration_is_enabled(capability_present: bool, binding_present: bool) -> Result<bool> {
@@ -400,9 +615,9 @@ fn configuration_is_enabled(capability_present: bool, binding_present: bool) -> 
     }
 }
 
-fn load_existing_record_for_retry<F>(
+fn load_existing_record_for_retry<R: ReattestationReporter, F>(
     evidence_path: &Path,
-    binding: &ManagedCredentialReattestationBindingV1,
+    binding: &ManagedCredentialReattestationBinding<R>,
     binding_digest: &str,
     owner_uid: u32,
     owner_gid: u32,
@@ -425,8 +640,8 @@ where
     Ok(Some(record))
 }
 
-fn validate_current_state(
-    binding: &ManagedCredentialReattestationBindingV1,
+fn validate_current_state<R: ReattestationReporter>(
+    binding: &ManagedCredentialReattestationBinding<R>,
     executor: &HostExecutor,
     owner_uid: u32,
 ) -> Result<()> {
@@ -447,8 +662,8 @@ fn validate_current_state(
     Ok(())
 }
 
-fn build_record(
-    binding: &ManagedCredentialReattestationBindingV1,
+fn build_record<R: ReattestationReporter>(
+    binding: &ManagedCredentialReattestationBinding<R>,
     binding_digest: &str,
     before: HostCredentialAttestationStatusV1,
     after: HostCredentialAttestationStatusV1,
@@ -461,16 +676,17 @@ fn build_record(
     if before != after {
         return Err(error("managed_credential_reattestation_host_state_changed"));
     }
+    let tuple = binding.reporter.record_tuple();
     let mut record = ManagedCredentialReattestationRecordV1 {
-        schema: EVIDENCE_SCHEMA.to_string(),
+        schema: R::RECORD_SCHEMA.to_string(),
         schema_version: 1,
         attestation_ref: binding.attestation_ref.clone(),
         binding_digest: binding_digest.to_string(),
         source_completion_record_sha256: binding.source_completion_record_sha256.clone(),
-        handoff_id: binding.reporter.handoff_id.clone(),
-        execution_number: binding.reporter.execution_number,
-        authority_epoch: binding.reporter.authority_epoch,
-        credential_epoch: binding.reporter.credential_epoch,
+        handoff_id: tuple.handoff_id,
+        execution_number: tuple.execution_number,
+        authority_epoch: tuple.authority_epoch,
+        credential_epoch: tuple.credential_epoch,
         host_status: before,
         observation,
         evidence_accepted_at_unix_secs: accepted_at,
@@ -480,8 +696,8 @@ fn build_record(
     Ok(record)
 }
 
-fn validate_source_completion(
-    binding: &ManagedCredentialReattestationBindingV1,
+fn validate_source_completion<R: ReattestationReporter>(
+    binding: &ManagedCredentialReattestationBinding<R>,
     source_binding_path: &Path,
     source_record_path: &Path,
     owner_uid: u32,
@@ -498,16 +714,8 @@ fn validate_source_completion(
         owner_gid,
         "managed_credential_reattestation_source_unavailable",
     )?;
-    let source_binding: ManagedCompletionBindingV2 = crate::paimos::decode_strict(
-        &source_binding_raw,
-        "managed_credential_reattestation_source_invalid",
-    )
-    .map_err(|_| error("managed_credential_reattestation_source_invalid"))?;
-    validate_completion_binding(&source_binding)
-        .map_err(|_| error("managed_credential_reattestation_source_invalid"))?;
-    let source_digest = source_binding
-        .digest()
-        .map_err(|_| error("managed_credential_reattestation_source_invalid"))?;
+    let source_binding = SourceCompletion::decode(&source_binding_raw)?;
+    let source_digest = source_binding.digest()?;
     let source_record_raw = read_private(
         source_record_path,
         100,
@@ -528,17 +736,66 @@ fn validate_source_completion(
     Ok(())
 }
 
-fn source_completion_matches(
-    binding: &ManagedCredentialReattestationBindingV1,
-    source_binding: &ManagedCompletionBindingV2,
+/// The original completion binding, classic or Aeon, whose record proves the
+/// retained credential was materialized under a reviewed operation.
+enum SourceCompletion {
+    Classic(ManagedCompletionBindingV2),
+    Aeon(ManagedCompletionAeonBindingV1),
+}
+
+impl SourceCompletion {
+    fn decode(raw: &[u8]) -> Result<Self> {
+        let invalid = || error("managed_credential_reattestation_source_invalid");
+        if crate::aeon_stage::selects_aeon(raw, AEON_COMPLETION_BINDING_SCHEMA) {
+            return crate::paimos::decode_strict(
+                raw,
+                "managed_credential_reattestation_source_invalid",
+            )
+            .map(Self::Aeon)
+            .map_err(|_| invalid());
+        }
+        let binding: ManagedCompletionBindingV2 =
+            crate::paimos::decode_strict(raw, "managed_credential_reattestation_source_invalid")
+                .map_err(|_| invalid())?;
+        validate_completion_binding(&binding).map_err(|_| invalid())?;
+        Ok(Self::Classic(binding))
+    }
+
+    fn digest(&self) -> Result<String> {
+        match self {
+            Self::Classic(binding) => binding.digest(),
+            Self::Aeon(binding) => binding.digest(),
+        }
+        .map_err(|_| error("managed_credential_reattestation_source_invalid"))
+    }
+
+    fn matches_record(&self, record: &crate::paimos_completion::ManagedCompletionRecordV2) -> bool {
+        match self {
+            Self::Classic(binding) => binding.matches_record(record),
+            Self::Aeon(binding) => binding.matches_record(record),
+        }
+    }
+
+    fn reporter(&self) -> SourceReporter<'_> {
+        match self {
+            Self::Classic(binding) => SourceReporter::Classic(&binding.reporter),
+            Self::Aeon(binding) => SourceReporter::Aeon(&binding.reporter),
+        }
+    }
+}
+
+fn source_completion_matches<R: ReattestationReporter>(
+    binding: &ManagedCredentialReattestationBinding<R>,
+    source_binding: &SourceCompletion,
     source_digest: &str,
     source_record: &crate::paimos_completion::ManagedCompletionRecordV2,
     source_record_raw: &[u8],
 ) -> bool {
     source_digest == binding.source_completion_binding_digest
+        && source_record.binding_digest == source_digest
         && wire_sha256(source_record_raw) == binding.source_completion_record_sha256
         && source_binding.matches_record(source_record)
-        && reporter_identity_is_distinct(&source_binding.reporter, &binding.reporter)
+        && binding.reporter.distinct_from(&source_binding.reporter())
         && source_record.host_ref == binding.host_ref
         && source_record.service_ref == binding.service_ref
         && source_record.slot_ref == binding.slot_ref
@@ -548,14 +805,6 @@ fn source_completion_matches(
         && source_record.generation == binding.generation
         && source_record.revocation_epoch == binding.revocation_epoch
         && source_record.producer_key_id == binding.producer_key_id
-}
-
-fn reporter_identity_is_distinct(
-    source: &PaimosManagedCompletionBindingV1,
-    reattestation: &PaimosManagedCompletionBindingV1,
-) -> bool {
-    source.handoff_id != reattestation.handoff_id
-        && source.execution_number != reattestation.execution_number
 }
 
 fn validate_source_record_directory(path: &Path) -> Result<()> {
@@ -596,9 +845,9 @@ fn validate_source_record_directory_for_owner(
     Ok(())
 }
 
-fn validate_host_status(
+fn validate_host_status<R: ReattestationReporter>(
     status: &HostCredentialAttestationStatusV1,
-    binding: &ManagedCredentialReattestationBindingV1,
+    binding: &ManagedCredentialReattestationBinding<R>,
 ) -> Result<()> {
     if status.host_ref != binding.host_ref
         || status.service_ref != binding.service_ref
@@ -621,9 +870,9 @@ fn validate_host_status(
     Ok(())
 }
 
-fn validate_observation(
+fn validate_observation<R: ReattestationReporter>(
     observation: &ManagedCredentialCurrentObservationV1,
-    binding: &ManagedCredentialReattestationBindingV1,
+    binding: &ManagedCredentialReattestationBinding<R>,
     accepted_at: u64,
 ) -> Result<()> {
     let oldest = oldest_observation(observation);
@@ -662,8 +911,8 @@ fn validate_observation(
     Ok(())
 }
 
-fn run_observer(
-    binding: &ManagedCredentialReattestationBindingV1,
+fn run_observer<R: ReattestationReporter>(
+    binding: &ManagedCredentialReattestationBinding<R>,
     owner_uid: u32,
 ) -> Result<ManagedCredentialCurrentObservationV1> {
     let path = Path::new(&binding.observer_path);
@@ -728,19 +977,21 @@ fn run_observer(
         .map_err(|_| error("managed_credential_reattestation_observation_refused"))
 }
 
-fn validate_existing_record(
+fn validate_existing_record<R: ReattestationReporter>(
     record: &ManagedCredentialReattestationRecordV1,
-    binding: &ManagedCredentialReattestationBindingV1,
+    binding: &ManagedCredentialReattestationBinding<R>,
     binding_digest: &str,
 ) -> Result<()> {
     record.validate()?;
-    if record.attestation_ref != binding.attestation_ref
+    let tuple = binding.reporter.record_tuple();
+    if record.schema != R::RECORD_SCHEMA
+        || record.attestation_ref != binding.attestation_ref
         || record.binding_digest != binding_digest
         || record.source_completion_record_sha256 != binding.source_completion_record_sha256
-        || record.handoff_id != binding.reporter.handoff_id
-        || record.execution_number != binding.reporter.execution_number
-        || record.authority_epoch != binding.reporter.authority_epoch
-        || record.credential_epoch != binding.reporter.credential_epoch
+        || record.handoff_id != tuple.handoff_id
+        || record.execution_number != tuple.execution_number
+        || record.authority_epoch != tuple.authority_epoch
+        || record.credential_epoch != tuple.credential_epoch
     {
         return Err(error("managed_credential_reattestation_record_refused"));
     }
@@ -1197,9 +1448,9 @@ mod tests {
             binding_digest,
             source_completion_record_sha256: binding.source_completion_record_sha256.clone(),
             handoff_id: binding.reporter.handoff_id.clone(),
-            execution_number: binding.reporter.execution_number,
+            execution_number: Some(binding.reporter.execution_number),
             authority_epoch: binding.reporter.authority_epoch,
-            credential_epoch: binding.reporter.credential_epoch,
+            credential_epoch: Some(binding.reporter.credential_epoch),
             host_status: HostCredentialAttestationStatusV1 {
                 host_ref: binding.host_ref.clone(),
                 service_ref: binding.service_ref.clone(),
@@ -1273,13 +1524,13 @@ mod tests {
         source.handoff_id = "01ARZ3NDEKTSV4RRFFQ69G5FAW".to_string();
         source.execution_number = 1;
         source.evidence_source = "managed_completion_record".to_string();
-        assert!(reporter_identity_is_distinct(&source, &reattestation));
+        assert!(reattestation.distinct_from(&SourceReporter::Classic(&source)));
 
         source.handoff_id = reattestation.handoff_id.clone();
-        assert!(!reporter_identity_is_distinct(&source, &reattestation));
+        assert!(!reattestation.distinct_from(&SourceReporter::Classic(&source)));
         source.handoff_id = "01ARZ3NDEKTSV4RRFFQ69G5FAW".to_string();
         source.execution_number = reattestation.execution_number;
-        assert!(!reporter_identity_is_distinct(&source, &reattestation));
+        assert!(!reattestation.distinct_from(&SourceReporter::Classic(&source)));
     }
 
     #[test]
@@ -1351,7 +1602,7 @@ mod tests {
         binding.source_completion_record_sha256 = wire_sha256(&source_record_raw);
         assert!(source_completion_matches(
             &binding,
-            &source_binding,
+            &SourceCompletion::Classic(source_binding.clone()),
             &source_digest,
             &source_record,
             &source_record_raw
@@ -1361,16 +1612,32 @@ mod tests {
         wrong_digest.source_completion_record_sha256 = wire_sha256(b"other");
         assert!(!source_completion_matches(
             &wrong_digest,
-            &source_binding,
+            &SourceCompletion::Classic(source_binding.clone()),
             &source_digest,
             &source_record,
             &source_record_raw
+        ));
+        // A record that names another binding digest (for example an Aeon
+        // completion record beside a classic source binding) is refused.
+        let mut foreign_record = source_record.clone();
+        foreign_record.binding_digest = wire_sha256(b"aeon-binding");
+        foreign_record.seal().expect("seal foreign record");
+        let foreign_raw =
+            crate::paimos::canonical_json_bytes(&foreign_record).expect("foreign record bytes");
+        let mut foreign_pin = binding.clone();
+        foreign_pin.source_completion_record_sha256 = wire_sha256(&foreign_raw);
+        assert!(!source_completion_matches(
+            &foreign_pin,
+            &SourceCompletion::Classic(source_binding.clone()),
+            &source_digest,
+            &foreign_record,
+            &foreign_raw
         ));
         let mut aliased_handoff = source_binding.clone();
         aliased_handoff.reporter.handoff_id = binding.reporter.handoff_id.clone();
         assert!(!source_completion_matches(
             &binding,
-            &aliased_handoff,
+            &SourceCompletion::Classic(aliased_handoff),
             &source_digest,
             &source_record,
             &source_record_raw
@@ -1507,6 +1774,151 @@ mod tests {
         }
     }
 
+    const AEON_COMPLETION_GOLDEN: &[u8] = include_bytes!(
+        "../../../examples/aeon-stage-reporter/managed-completion-binding.golden.json"
+    );
+
+    fn aeon_completion() -> ManagedCompletionAeonBindingV1 {
+        crate::paimos::decode_strict(AEON_COMPLETION_GOLDEN, "fixture").expect("Aeon completion")
+    }
+
+    fn aeon_binding() -> ManagedCredentialReattestationAeonBindingV1 {
+        let classic = binding();
+        let mut reporter = aeon_completion().reporter;
+        reporter.handoff_id = "00000000-0000-4000-8000-00000000000a".to_string();
+        reporter.authority_epoch = 2;
+        reporter.evidence_source = "managed_credential_reattestation_record".to_string();
+        ManagedCredentialReattestationBinding {
+            schema: AEON_BINDING_SCHEMA.to_string(),
+            schema_version: classic.schema_version,
+            attestation_ref: classic.attestation_ref,
+            reattestation_operation_ref: classic.reattestation_operation_ref,
+            reattestation_declaration_fingerprint: classic.reattestation_declaration_fingerprint,
+            source_completion_binding_digest: classic.source_completion_binding_digest,
+            source_completion_record_sha256: classic.source_completion_record_sha256,
+            host_ref: classic.host_ref,
+            service_ref: classic.service_ref,
+            slot_ref: classic.slot_ref,
+            source_operation_ref: classic.source_operation_ref,
+            envelope_ref: classic.envelope_ref,
+            secret_ref: classic.secret_ref,
+            declaration_fingerprint: classic.declaration_fingerprint,
+            generation: classic.generation,
+            revocation_epoch: classic.revocation_epoch,
+            producer_key_id: classic.producer_key_id,
+            expected_packet_sha256: classic.expected_packet_sha256,
+            expected_material_owner_uid: classic.expected_material_owner_uid,
+            expected_material_size: classic.expected_material_size,
+            observer_path: classic.observer_path,
+            observer_sha256: classic.observer_sha256,
+            observer_config_digest: classic.observer_config_digest,
+            expected_process_executable_sha256: classic.expected_process_executable_sha256,
+            expected_artifact_digest: classic.expected_artifact_digest,
+            expected_release_ref: classic.expected_release_ref,
+            freshness_seconds: classic.freshness_seconds,
+            reporter,
+        }
+    }
+
+    #[test]
+    fn aeon_binding_is_schema_selected_and_needs_the_reattestation_source() {
+        let binding = aeon_binding();
+        let digest = binding.digest().expect("Aeon binding digest");
+        let raw = serde_json::to_vec(&binding).expect("Aeon binding JSON");
+        assert!(crate::aeon_stage::selects_aeon(&raw, AEON_BINDING_SCHEMA));
+        assert_eq!(
+            decode_binding::<AeonManagedCompletionBindingV1>(&raw)
+                .expect("Aeon decode")
+                .digest()
+                .expect("digest"),
+            digest
+        );
+        // Neither schema decodes as the other kind.
+        assert!(decode_binding::<PaimosManagedCompletionBindingV1>(&raw).is_err());
+        let classic_raw = serde_json::to_vec(&self::binding()).expect("classic JSON");
+        assert!(!crate::aeon_stage::selects_aeon(
+            &classic_raw,
+            AEON_BINDING_SCHEMA
+        ));
+        assert!(decode_binding::<AeonManagedCompletionBindingV1>(&classic_raw).is_err());
+
+        let mut wrong_schema = binding.clone();
+        wrong_schema.schema = BINDING_SCHEMA.to_string();
+        assert!(wrong_schema.digest().is_err());
+        let mut completion_source = binding.clone();
+        completion_source.reporter.evidence_source = "managed_completion_record".to_string();
+        assert!(completion_source.digest().is_err());
+    }
+
+    #[test]
+    fn aeon_record_carries_no_classic_fields_and_binds_its_handoff() {
+        let binding = aeon_binding();
+        let digest = binding.digest().expect("Aeon binding digest");
+        let classic = sealed_record(&self::binding(), digest.clone(), 100, 1_800_000_000);
+        let record = build_record(
+            &binding,
+            &digest,
+            classic.host_status.clone(),
+            classic.host_status.clone(),
+            classic.observation.clone(),
+            classic.evidence_accepted_at_unix_secs,
+        )
+        .expect("Aeon record");
+        assert_eq!(record.schema, AEON_EVIDENCE_SCHEMA);
+        assert_eq!(record.handoff_id, binding.reporter.handoff_id);
+        assert_eq!(record.execution_number, None);
+        assert_eq!(record.credential_epoch, None);
+        let rendered = serde_json::to_string(&record).expect("record JSON");
+        assert!(!rendered.contains("execution_number") && !rendered.contains("credential_epoch"));
+        validate_existing_record(&record, &binding, &digest).expect("Aeon record validates");
+
+        // A classic record is never accepted for an Aeon binding, and the
+        // Aeon record shape refuses classic fields.
+        assert!(validate_existing_record(&classic, &binding, &digest).is_err());
+        let mut mixed = record.clone();
+        mixed.execution_number = Some(1);
+        assert!(mixed.seal().is_err());
+        let mut classic_handoff = record;
+        classic_handoff.handoff_id = "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_string();
+        assert!(classic_handoff.seal().is_err());
+    }
+
+    #[test]
+    fn aeon_reattestation_must_name_a_new_attempt() {
+        let aeon = aeon_binding().reporter;
+        let classic = reporter();
+        let mut source = aeon_completion().reporter;
+        // Classic source to Aeon retry is a new handoff by construction.
+        assert!(aeon.distinct_from(&SourceReporter::Classic(&classic)));
+        // A classic retry of an Aeon completion is refused.
+        assert!(!classic.distinct_from(&SourceReporter::Aeon(&source)));
+
+        source.authority_epoch = 1;
+        assert!(aeon.distinct_from(&SourceReporter::Aeon(&source)));
+        let mut same_handoff = source.clone();
+        same_handoff.handoff_id = aeon.handoff_id.clone();
+        assert!(!aeon.distinct_from(&SourceReporter::Aeon(&same_handoff)));
+        let mut same_attempt = source;
+        same_attempt.authority_epoch = aeon.authority_epoch;
+        assert!(!aeon.distinct_from(&SourceReporter::Aeon(&same_attempt)));
+        // Epochs are per (release, stage, operation): a prepare source and an
+        // apply retry may share epoch 1 and are still different attempts.
+        let mut prepare = same_attempt;
+        prepare.operation = "prepare".to_string();
+        assert_eq!(aeon.operation, "apply");
+        assert!(aeon.distinct_from(&SourceReporter::Aeon(&prepare)));
+    }
+
+    #[test]
+    fn source_completion_accepts_an_aeon_original() {
+        let source = SourceCompletion::decode(AEON_COMPLETION_GOLDEN).expect("Aeon source");
+        assert!(matches!(source, SourceCompletion::Aeon(_)));
+        assert_eq!(
+            source.digest().expect("source digest"),
+            aeon_completion().digest().expect("completion digest")
+        );
+    }
+
     #[test]
     fn record_is_append_only_bound_to_new_handoff_and_rejects_mutation() {
         let binding = binding();
@@ -1518,9 +1930,9 @@ mod tests {
             binding_digest: digest.clone(),
             source_completion_record_sha256: binding.source_completion_record_sha256.clone(),
             handoff_id: binding.reporter.handoff_id.clone(),
-            execution_number: binding.reporter.execution_number,
+            execution_number: Some(binding.reporter.execution_number),
             authority_epoch: binding.reporter.authority_epoch,
-            credential_epoch: binding.reporter.credential_epoch,
+            credential_epoch: Some(binding.reporter.credential_epoch),
             host_status: HostCredentialAttestationStatusV1 {
                 host_ref: binding.host_ref.clone(),
                 service_ref: binding.service_ref.clone(),
@@ -1586,9 +1998,9 @@ mod tests {
             binding_digest: digest,
             source_completion_record_sha256: binding.source_completion_record_sha256.clone(),
             handoff_id: binding.reporter.handoff_id.clone(),
-            execution_number: binding.reporter.execution_number,
+            execution_number: Some(binding.reporter.execution_number),
             authority_epoch: binding.reporter.authority_epoch,
-            credential_epoch: binding.reporter.credential_epoch,
+            credential_epoch: Some(binding.reporter.credential_epoch),
             host_status: HostCredentialAttestationStatusV1 {
                 host_ref: binding.host_ref.clone(),
                 service_ref: binding.service_ref.clone(),

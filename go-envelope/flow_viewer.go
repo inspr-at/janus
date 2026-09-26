@@ -32,12 +32,12 @@ func (app *App) flowViewerBoundary(next http.Handler) http.Handler {
 			denyFlowViewer(w, r)
 			return
 		}
-		projectID, err := parseOptionalFlowProject(r)
+		projectKey, err := parseOptionalFlowProject(r)
 		if err != nil {
 			denyFlowViewer(w, r)
 			return
 		}
-		bound, reason := app.flow.resolveContext(session, projectID)
+		bound, reason := app.flow.resolveContext(session, projectKey)
 		if reason != "" {
 			denyFlowViewer(w, r)
 			return
@@ -70,5 +70,9 @@ func (app *App) renderFlowViewer(w http.ResponseWriter, r *http.Request, bound f
 	// the origin so ordinary sign-out passes the unchanged same-origin CSRF gate.
 	w.Header().Set("Referrer-Policy", "origin")
 	// No dashboardData, catalog, readiness or general posture is evaluated here.
-	_, _ = fmt.Fprintf(w, `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Flow review · Janus</title><style nonce="%s">body{margin:0;background:#f7f7f5;color:#20252a;font:16px/1.6 system-ui,sans-serif}main{box-sizing:border-box;max-width:880px;margin:48px auto;padding:32px;background:white;border-radius:12px}h1{font-size:14px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:#626b73}h2{font-size:32px;line-height:1.2;margin:12px 0 24px}p{max-width:60ch}a{color:#245c70;text-underline-offset:3px}button{font:inherit;padding:6px 14px;background:white;border:1px solid #bcc6c9;border-radius:6px;cursor:pointer}@media(max-width:600px){main{margin:16px auto;padding:24px}h2{font-size:26px}}</style></head><body><main data-inspr-flow-reviewer><h1>Flow review</h1><h2>%s</h2><p>Read-only project context. This account has no access to secrets or operational actions.</p><p><a href="%s">Open project in Paimos</a></p><form method="post" action="%s"><input type="hidden" name="csrf_token" value="%s"><button type="submit">Sign out</button></form><p>%s</p></main></body></html>`, htmlEscapeAttr(cspNonceFromContext(r.Context())), htmlEscapeAttr(bound.binding.Label), htmlEscapeAttr(app.flow.projectOverviewURL(bound.binding.ProjectID)), htmlEscapeAttr(app.cfg.PublicPath("/logout")), htmlEscapeAttr(app.csrfToken(currentSession(r.Context()))), calendarControl())
+	linkLabel := "Open project in Paimos"
+	if app.flow.config.Upstream == flowUpstreamAeon {
+		linkLabel = "Open project in Aeon"
+	}
+	_, _ = fmt.Fprintf(w, `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Flow review · Janus</title><style nonce="%s">body{margin:0;background:#f7f7f5;color:#20252a;font:16px/1.6 system-ui,sans-serif}main{box-sizing:border-box;max-width:880px;margin:48px auto;padding:32px;background:white;border-radius:12px}h1{font-size:14px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:#626b73}h2{font-size:32px;line-height:1.2;margin:12px 0 24px}p{max-width:60ch}a{color:#245c70;text-underline-offset:3px}button{font:inherit;padding:6px 14px;background:white;border:1px solid #bcc6c9;border-radius:6px;cursor:pointer}@media(max-width:600px){main{margin:16px auto;padding:24px}h2{font-size:26px}}</style></head><body><main data-inspr-flow-reviewer><h1>Flow review</h1><h2>%s</h2><p>Read-only project context. This account has no access to secrets or operational actions.</p><p><a href="%s">%s</a></p><form method="post" action="%s"><input type="hidden" name="csrf_token" value="%s"><button type="submit">Sign out</button></form><p>%s</p></main></body></html>`, htmlEscapeAttr(cspNonceFromContext(r.Context())), htmlEscapeAttr(bound.binding.Label), htmlEscapeAttr(app.flow.projectOverviewURL(bound.binding)), htmlEscapeAttr(linkLabel), htmlEscapeAttr(app.cfg.PublicPath("/logout")), htmlEscapeAttr(app.csrfToken(currentSession(r.Context()))), calendarControl())
 }

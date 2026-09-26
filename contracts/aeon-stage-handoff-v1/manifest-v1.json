@@ -1,0 +1,34 @@
+{
+  "contract": "inspr.aeon.stage-handoff.v1",
+  "aeon_release": "v260926071154.0.0",
+  "aeon_commit": "482c563482c014c2097e65f7ef528444e12ec7af",
+  "openapi_path": "api/openapi.yaml",
+  "openapi_sha256": "4420f2d269af7477bcb41a7fa0d670f28376a151145c71ebb368c61ade370493",
+  "paths": [
+    "/me",
+    "/projects/{projectId}/journey",
+    "/stage-handoffs/{handoffId}",
+    "/stage-handoffs/{handoffId}/evidence",
+    "/stage-handoffs/{handoffId}/result"
+  ],
+  "schemas": [
+    "Me",
+    "Principal",
+    "Tenant",
+    "Journey",
+    "JourneyLaunchReadiness",
+    "JourneyStage",
+    "JourneyNextAction",
+    "StageHandoff",
+    "StageEvidenceWrite",
+    "StageEvidence",
+    "StageArtifact",
+    "StageResultWrite",
+    "StageResult"
+  ],
+  "excerpt": {
+    "file": "openapi-excerpt-v1.yaml",
+    "bytes": 15122,
+    "sha256": "0d41ad7d259a509d05696d3f3d48d71996d91e247d82909ea7d7cba3aa2811aa"
+  }
+}
