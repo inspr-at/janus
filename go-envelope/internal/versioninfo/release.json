@@ -1,13 +1,13 @@
 {
   "schema": "inspr.janus.release.v1",
   "version_scheme": "inspr-calendar-v2",
-  "version": "260922094507.0.0",
-  "reserved_at": "2026-09-22T09:45:07Z",
+  "version": "260926095720.0.0",
+  "reserved_at": "2026-09-26T09:57:20Z",
   "owner": "JANUS-471",
   "channels": {
     "stable": {
       "tag_prefix": "rust-engine-v",
-      "release_sequence": 1,
+      "release_sequence": 2,
       "migration": {
         "legacy_scheme": "legacy",
         "last_legacy_version": "0.1.44",
@@ -18,7 +18,7 @@
     },
     "envelope-stable": {
       "tag_prefix": "go-envelope-v",
-      "release_sequence": 1,
+      "release_sequence": 2,
       "migration": {
         "legacy_scheme": "legacy",
         "last_legacy_version": "1.185",
