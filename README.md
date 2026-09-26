@@ -726,8 +726,8 @@ The relevant excerpt lives under `contracts/aeon-stage-handoff-v1/` and is
 checked by `scripts/check-aeon-stage-handoff-pins.py`. Journals written under
 an earlier pin stay replayable only when that pin is listed in the reviewed
 `AEON_COMPATIBLE_JOURNAL_PINS` (currently `v260926071154.0.0`, whose wire
-contract is identical); any other pin fails closed. The check script (add
-`--aeon-checkout <path>` to re-derive it from the Aeon repository).
+contract is identical); any other pin fails closed. Run the check script with
+`--aeon-checkout <path>` to re-derive the excerpt from the Aeon repository.
 
 ### Service env file
 
