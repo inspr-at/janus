@@ -141,7 +141,7 @@ pub(crate) fn journey_body() -> Value {
         "revision": 7,
         "stage": "access",
         "stage_source": "journey",
-        "stages": [{"key": "access", "state": "current", "gate_approval_id": null, "handoff_id": HANDOFF_ID}],
+        "stages": [{"key": "access", "state": "current", "gate_approval_id": null, "gate_live": false, "handoff_id": HANDOFF_ID}],
         "next_action": {"key": "approve_permit", "label": "Approve permit", "stage": "access", "available": true},
         "requirements_revision": 2,
         "requirements_digest_sha256": "6".repeat(64),
@@ -1142,5 +1142,52 @@ fn instants_parse_go_time_forms() {
         "2026-02-30T08:00:00Z",
     ] {
         assert_eq!(parse_instant(bad), None, "{bad}");
+    }
+}
+
+/// Rewrite a journal as if an earlier Janus build had written it.
+fn repin_journal(fixture: &Fixture, release: &str, commit: &str, sha: &str) {
+    let mut journal: Value =
+        serde_json::from_slice(&fs::read(journal_path(fixture)).unwrap()).unwrap();
+    journal["aeon_release"] = json!(release);
+    journal["aeon_commit"] = json!(commit);
+    journal["openapi_sha256"] = json!(sha);
+    let mut raw = serde_json::to_vec(&journal).unwrap();
+    raw.push(b'\n');
+    fs::write(journal_path(fixture), raw).unwrap();
+}
+
+#[test]
+fn journals_from_a_reviewed_earlier_pin_recover_and_unknown_pins_do_not() {
+    let (release, commit, sha) = AEON_COMPATIBLE_JOURNAL_PINS[0];
+
+    // Accepted evidence under the earlier pin, then an upgrade: recovery
+    // replays the exact journaled bytes and completes.
+    let fixture = new_fixture();
+    let server = FakeAeon::start();
+    run_until_journaled(&fixture, &server);
+    let first = posts(&server.take_requests());
+    repin_journal(&fixture, release, commit, sha);
+    run(&fixture, &server).expect("upgrade recovery completes");
+    let replay = posts(&server.take_requests());
+    assert_eq!(replay[0].body, first[0].body, "exact bytes after upgrade");
+    server.with(|state| assert!(state.result.is_some()));
+
+    // A journal completed under the earlier pin still reports success.
+    repin_journal(&fixture, release, commit, sha);
+    run(&fixture, &server).expect("completed earlier-pin journal is inert");
+    assert!(server.requests().is_empty());
+
+    // Any other tuple, including a mixed one, is refused.
+    for (release, commit, sha) in [
+        ("v000000000000.0.0", commit, sha),
+        (release, AEON_STAGE_COMMIT, sha),
+        (AEON_STAGE_RELEASE, AEON_STAGE_COMMIT, sha),
+    ] {
+        repin_journal(&fixture, release, commit, sha);
+        assert_eq!(
+            code(run(&fixture, &server)),
+            "aeon_reporter_journal_invalid"
+        );
     }
 }

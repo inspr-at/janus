@@ -1153,3 +1153,28 @@ func TestAeonAccessEvidenceSurvivesTheMerge(t *testing.T) {
 		t.Fatalf("gate=%v", gate)
 	}
 }
+
+func TestAeonJanusGatePassesOnlyOnLiveGate(t *testing.T) {
+	binding := flowBinding{ProjectNodeID: aeonProjectNodeID, ProjectKey: aeonProjectKey, Label: "Janus"}
+	approval := "cccccccc-dddd-4eee-8fff-000000000000"
+	for name, entry := range map[string]map[string]any{
+		"live":       {"key": "access", "state": "current", "gate_approval_id": approval, "gate_live": true},
+		"expired":    {"key": "access", "state": "current", "gate_approval_id": approval, "gate_live": false},
+		"unreported": {"key": "access", "state": "current", "gate_approval_id": approval},
+		"no-id":      {"key": "access", "state": "current", "gate_live": true},
+		"as-string":  {"key": "access", "state": "current", "gate_approval_id": approval, "gate_live": "true"},
+	} {
+		shell := aeonShellState(map[string]any{"stage": "access", "stage_source": "journey", "stages": []any{entry}}, binding, 1_700_000_000)
+		gate := shell["prerequisites"].(map[string]any)["janusGate"].(map[string]any)
+		want := "unknown"
+		if name == "live" {
+			want = "pass"
+		}
+		if gate["status"] != want {
+			t.Fatalf("%s: gate=%v", name, gate)
+		}
+		if want == "pass" && gate["evidenceRef"] != "aeon:gate-ccccccccdddd4eee" {
+			t.Fatalf("%s: evidence=%v", name, gate)
+		}
+	}
+}
