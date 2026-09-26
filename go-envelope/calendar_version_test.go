@@ -47,7 +47,7 @@ func TestCalendarAdapterIsActiveAndBoundToRelease(t *testing.T) {
 		t.Fatal("path traversal")
 	}
 	receipt := BuildProvenanceFor()
-	if receipt.Version != versioninfo.Current.Version || receipt.VersionScheme != versioninfo.Scheme || receipt.ReleaseSequence != 1 || receipt.ReleaseChannel != "envelope-stable" {
+	if receipt.Version != versioninfo.Current.Version || receipt.VersionScheme != versioninfo.Scheme || receipt.ReleaseSequence != versioninfo.Current.Channels["envelope-stable"].ReleaseSequence || receipt.ReleaseChannel != "envelope-stable" {
 		t.Fatal("release provenance incomplete")
 	}
 }

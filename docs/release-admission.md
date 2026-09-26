@@ -17,7 +17,7 @@ repository changes and increment `policy_version` when their meaning changes.
 Admission runs outside the image being admitted:
 
 ```bash
-JANUS_ENGINE_RELEASE_TAG="rust-engine-v260922094507.0.0" # replace with the reviewed release
+JANUS_ENGINE_RELEASE_TAG="rust-engine-v260926095720.0.0" # replace with the reviewed release
 scripts/admit-engine-release.sh \
   --policy config/release-channels/v1.json \
   --channel stable \

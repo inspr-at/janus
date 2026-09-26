@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Executable migration, signed release and rollback contract fixtures."""
 import copy
+import datetime
 import importlib.util
 import json
 import pathlib
@@ -15,6 +16,10 @@ def module(file):
     value=importlib.util.module_from_spec(spec); spec.loader.exec_module(value); return value
 
 
+def shifted(value, seconds):
+    return (calendar(value)+datetime.timedelta(seconds=seconds)).strftime('%y%m%d%H%M%S')+'.0.0'
+
+
 class CalendarMigration(unittest.TestCase):
     def test_strict_dates_and_grammar(self):
         for value in ['260922094507.0.0','280229235959.0.0','991231235959.0.0']: calendar(value)
@@ -23,10 +28,11 @@ class CalendarMigration(unittest.TestCase):
 
     def test_reservation_collision(self):
         value=source()['version']; meta=metadata_for_tag('go-envelope-v'+value)
+        before=shifted(value,-1); after=shifted(value,1)
         with self.assertRaises(ValueError): reserve(value,[meta])
-        with self.assertRaises(ValueError): reserve('260922094506.0.0',[meta])
-        self.assertEqual(reserve('260922094508.0.0',[meta]),'260922094508.0.0')
-        with self.assertRaises(ValueError): reserve('260922094508.0.0',[{**meta,'version_scheme':'unknown'}])
+        with self.assertRaises(ValueError): reserve(before,[meta])
+        self.assertEqual(reserve(after,[meta]),after)
+        with self.assertRaises(ValueError): reserve(after,[{**meta,'version_scheme':'unknown'}])
 
     def test_declared_scheme_anchor_and_mixed_era_ordering(self):
         for name, channel in source()['channels'].items():
@@ -36,9 +42,12 @@ class CalendarMigration(unittest.TestCase):
                 bad={**meta,'version_scheme':scheme}
                 with self.assertRaises(ValueError): validate_release(tag,bad)
             with self.assertRaises(ValueError): validate_release(tag,None)
-            with self.assertRaises(ValueError): validate_release(tag,{**meta,'release_sequence':2})
-            with self.assertRaises(ValueError): validate_release(channel['tag_prefix']+'260922094508.0.0',{**meta,'version':'260922094508.0.0'})
-            validate_release(channel['tag_prefix']+'260922094508.0.0',{**meta,'version':'260922094508.0.0','release_sequence':2})
+            anchor=channel['migration']['first_calendar_version']
+            wrong=2 if meta['version']==anchor else channel['migration']['first_calendar_release_sequence']
+            with self.assertRaises(ValueError): validate_release(tag,{**meta,'release_sequence':wrong})
+            later=shifted(anchor,1)
+            with self.assertRaises(ValueError): validate_release(channel['tag_prefix']+later,{**meta,'version':later,'release_sequence':1})
+            validate_release(channel['tag_prefix']+later,{**meta,'version':later,'release_sequence':2})
             legacy=validate_release(channel['tag_prefix']+channel['migration']['last_legacy_version'],None)
             self.assertGreater(compare(meta,legacy),0)
             self.assertLess(compare(legacy,meta),0)
