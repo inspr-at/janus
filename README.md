@@ -719,14 +719,20 @@ or operation, a closed or expired handoff, a missing or revoked grant, a
 divergent replay, a changed seal, or another terminal result all fail closed
 with value-free `aeon_reporter_*` reason codes.
 
-The pinned contract is Aeon `v260926083057.0.0`, commit
-`4f968808157d1d5c35c096b683bd332a2ee15d8d`, whose `api/openapi.yaml` has
-SHA-256 `5332184da86c52f42c988431c994814d4418c2a6f986b879a62662967e2160b0`.
+The pinned contract is Aeon `v260927071728.0.0`, commit
+`10fe8501a633b8b3ac3ddb3b4010014906b4b3bb`, whose `api/openapi.yaml` has
+SHA-256 `2cc98c2368c95861801e6b42ffdc158341ca72454efb823bffda5fc74660c299`.
 The relevant excerpt lives under `contracts/aeon-stage-handoff-v1/` and is
 checked by `scripts/check-aeon-stage-handoff-pins.py`. Journals written under
 an earlier pin stay replayable only when that pin is listed in the reviewed
-`AEON_COMPATIBLE_JOURNAL_PINS` (currently `v260926071154.0.0`, whose wire
-contract is identical); any other pin fails closed. Run the check script with
+`AEON_COMPATIBLE_JOURNAL_PINS` (currently `v260926071154.0.0` and
+`v260926083057.0.0`, whose request wire contract is identical); any other pin
+fails closed. Every response Janus reads must declare the pinned
+`Aeon-Contract` major (`me/1`, `journey/1`, `stage-handoffs/1`,
+`stage-evidence/1`, `stage-result/1`, AEON-197); a minor bump may add optional
+response fields, which Janus ignores while still validating every field it binds
+to. A handoff that is superseded, no longer `authority_open`, or carries a
+launch admission fails closed. Run the check script with
 `--aeon-checkout <path>` to re-derive the excerpt from the Aeon repository.
 
 ### Service env file
