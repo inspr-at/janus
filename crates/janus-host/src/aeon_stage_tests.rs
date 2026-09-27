@@ -58,6 +58,8 @@ pub(crate) struct AeonState {
     pub(crate) content_type: &'static str,
     /// Override the Aeon-Contract header for responses to one path.
     pub(crate) contract_override: Option<(String, Option<&'static str>)>,
+    /// Extra raw header lines for responses to one path.
+    pub(crate) extra_headers: Option<(String, Vec<u8>)>,
 }
 
 pub(crate) struct FakeAeon {
@@ -86,6 +88,7 @@ impl FakeAeon {
             drop_after: None,
             content_type: "application/json; charset=utf-8",
             contract_override: None,
+            extra_headers: None,
         }));
         let stop = Arc::new(AtomicBool::new(false));
         let thread_state = Arc::clone(&state);
@@ -219,6 +222,10 @@ fn serve(stream: TcpStream, state: &Arc<Mutex<AeonState>>) {
         guard.drop_after = None;
     }
     let content_type = guard.content_type;
+    let extra = match &guard.extra_headers {
+        Some((path, raw)) if *path == captured.path => raw.clone(),
+        _ => Vec::new(),
+    };
     let contract = match &guard.contract_override {
         Some((path, value)) if *path == captured.path => *value,
         _ => route_contract(&captured.path),
@@ -228,13 +235,21 @@ fn serve(stream: TcpStream, state: &Arc<Mutex<AeonState>>) {
         return;
     }
     let body = response.to_string();
-    let mut stream = stream;
-    let _ = write!(
-        stream,
-        "HTTP/1.1 {status} X\r\nContent-Type: {content_type}\r\n{}Cache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        contract.map_or(String::new(), |value| format!("Aeon-Contract: {value}\r\n")),
-        body.len()
+    let mut raw = format!(
+        "HTTP/1.1 {status} X\r\nContent-Type: {content_type}\r\n{}",
+        contract.map_or(String::new(), |value| format!("Aeon-Contract: {value}\r\n"))
+    )
+    .into_bytes();
+    raw.extend_from_slice(&extra);
+    raw.extend_from_slice(
+        format!(
+            "Cache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .as_bytes(),
     );
+    let mut stream = stream;
+    let _ = stream.write_all(&raw);
     let _ = stream.flush();
 }
 
@@ -1070,6 +1085,61 @@ fn responses_follow_the_pinned_contract_major_and_accept_minor_additions() {
     let server = FakeAeon::start();
     server.with(|state| state.content_type = "text/html");
     assert_eq!(code(run(&fixture, &server)), "aeon_reporter_media_refused");
+}
+
+#[test]
+fn malformed_duplicates_error_contracts_and_absent_nullable_fields_fail_closed() {
+    let handoff_path = format!("/api/stage-handoffs/{HANDOFF_ID}");
+    // A second contract (or content type) line with an invalid value is still
+    // a duplicate even though ureq drops its value from `all()`.
+    for extra in [
+        &b"Aeon-Contract: stage-handoffs/1.0\x7f\r\n"[..],
+        &b"Content-Type: application/json\x7f\r\n"[..],
+        &b"Content-Encoding: gzip\r\n"[..],
+    ] {
+        let fixture = new_fixture();
+        let server = FakeAeon::start();
+        server.with(|state| state.extra_headers = Some((handoff_path.clone(), extra.to_vec())));
+        let reason = code(run(&fixture, &server));
+        assert!(
+            reason == "aeon_reporter_contract_refused" || reason == "aeon_reporter_media_refused",
+            "{reason}"
+        );
+        assert!(posts(&server.requests()).is_empty());
+    }
+
+    // A required nullable field that is absent is refused; explicit null passes.
+    let fixture = new_fixture();
+    let server = FakeAeon::start();
+    server.with(|state| {
+        state
+            .handoff
+            .as_object_mut()
+            .unwrap()
+            .remove("superseded_by");
+    });
+    assert_eq!(
+        code(run(&fixture, &server)),
+        "aeon_reporter_response_invalid"
+    );
+
+    // An error response that declares a foreign or newer contract is refused as
+    // a contract failure; an error without a declaration (outer auth or CDN
+    // layer) keeps its status meaning.
+    let fixture = new_fixture();
+    let server = FakeAeon::start();
+    run_until_journaled(&fixture, &server);
+    let evidence_path = format!("/api/stage-handoffs/{HANDOFF_ID}/evidence");
+    server.with(|state| {
+        state.grant_live = false;
+        state.contract_override = Some((evidence_path.clone(), Some("stage-evidence/2.0")));
+    });
+    assert_eq!(
+        code(run(&fixture, &server)),
+        "aeon_reporter_contract_refused"
+    );
+    server.with(|state| state.contract_override = Some((evidence_path.clone(), None)));
+    assert_eq!(code(run(&fixture, &server)), "aeon_reporter_forbidden");
 }
 
 #[test]

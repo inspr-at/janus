@@ -272,6 +272,13 @@ struct RuntimeConfig {
     credential_ready_observed_at: String,
 }
 
+fn present_nullable<'de, D>(deserializer: D) -> Result<Option<Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer).map(Some)
+}
+
 /// The acting principal and tenant of the configured key (`GET /api/me`).
 #[derive(Debug, Deserialize)]
 struct MeResponse {
@@ -313,7 +320,10 @@ struct HandoffResponse {
     plugin_id: String,
     attempt: i64,
     authority_epoch: i64,
-    superseded_by: Option<String>,
+    /// Required but nullable: absent (outer `None`) is refused, `null` is
+    /// `Some(None)`, a newer attempt is `Some(Some(id))`.
+    #[serde(default, deserialize_with = "present_nullable")]
+    superseded_by: Option<Option<String>>,
     authority_open: bool,
     journey_revision: i64,
     state: String,
@@ -784,7 +794,10 @@ impl Reporter {
         {
             return Err(AeonReporterError::new("aeon_reporter_binding_refused"));
         }
-        if pulled.authority_epoch != handoff.authority_epoch || pulled.superseded_by.is_some() {
+        let Some(superseded_by) = pulled.superseded_by else {
+            return Err(AeonReporterError::new("aeon_reporter_response_invalid"));
+        };
+        if pulled.authority_epoch != handoff.authority_epoch || superseded_by.is_some() {
             return Err(AeonReporterError::new("aeon_reporter_authority_stale"));
         }
         // Janus Access handoffs never carry a Pharos launch admission.
@@ -819,10 +832,16 @@ impl Reporter {
             .set("Accept-Encoding", "identity")
             .set("Authorization", self.authorization.as_str())
             .call();
-        decode_response(accept_status(response, 200)?, contract)
+        decode_response(accept_status(response, 200, contract)?, contract)
     }
 
-    fn post(&self, path: &str, body: &str, status: u16) -> AeonResult<ureq::Response> {
+    fn post(
+        &self,
+        path: &str,
+        body: &str,
+        status: u16,
+        contract: (&str, u32),
+    ) -> AeonResult<ureq::Response> {
         let response = self
             .http
             .post(&format!("{}{path}", self.origin))
@@ -831,7 +850,7 @@ impl Reporter {
             .set("Content-Type", "application/json")
             .set("Authorization", self.authorization.as_str())
             .send_bytes(body.as_bytes());
-        accept_status(response, status)
+        accept_status(response, status, contract)
     }
 
     fn send_evidence(&self, request: &RequestJournalV1) -> AeonResult<ReceiptV1> {
@@ -843,6 +862,7 @@ impl Reporter {
             ),
             &request.body,
             201,
+            CONTRACT_EVIDENCE,
         )?;
         let echo: EvidenceEcho = decode_response(response, CONTRACT_EVIDENCE)?;
         if echo.handoff_id != self.config.handoff.handoff_id
@@ -876,6 +896,7 @@ impl Reporter {
             ),
             &request.body,
             200,
+            CONTRACT_RESULT,
         )?;
         let echo: ResultEcho = decode_response(response, CONTRACT_RESULT)?;
         if echo.handoff_id != self.config.handoff.handoff_id
@@ -1091,7 +1112,16 @@ fn valid_aeon_api_key(key: &str) -> bool {
 fn accept_status(
     response: Result<ureq::Response, ureq::Error>,
     expected: u16,
+    contract: (&str, u32),
 ) -> AeonResult<ureq::Response> {
+    // Aeon's route handlers declare the contract on errors too; outer layers
+    // (authentication, the CDN) answer before any route and do not. A declared
+    // contract on an error must still be the pinned major.
+    if let Err(ureq::Error::Status(_, error)) = &response {
+        if header_count(error, CONTRACT_HEADER) != 0 && !declares_contract(error, contract) {
+            return Err(AeonReporterError::new("aeon_reporter_contract_refused"));
+        }
+    }
     match response {
         Ok(response) if response.status() == expected => Ok(response),
         Ok(_) => Err(AeonReporterError::new("aeon_reporter_remote_refused")),
@@ -1107,6 +1137,25 @@ fn accept_status(
             "aeon_reporter_transport_unavailable",
         )),
     }
+}
+
+/// Occurrences of a header name, counting lines whose value ureq discards as
+/// invalid (`Response::all` filters those out).
+fn header_count(response: &ureq::Response, name: &str) -> usize {
+    let name = name.to_ascii_lowercase();
+    response
+        .headers_names()
+        .iter()
+        .filter(|header| **header == name)
+        .count()
+}
+
+/// Exactly one well-formed contract header naming the pinned surface/major.
+fn declares_contract(response: &ureq::Response, contract: (&str, u32)) -> bool {
+    let values = response.all(CONTRACT_HEADER);
+    header_count(response, CONTRACT_HEADER) == 1
+        && values.len() == 1
+        && contract_accepted(values[0], contract)
 }
 
 /// True when `value` is exactly `<surface>/<major>.<minor>` for the pinned
@@ -1134,17 +1183,17 @@ fn decode_response<T: for<'de> Deserialize<'de>>(
     response: ureq::Response,
     contract: (&str, u32),
 ) -> AeonResult<T> {
-    let declared = response.all(CONTRACT_HEADER);
-    if declared.len() != 1 || !contract_accepted(declared[0], contract) {
+    if !declares_contract(&response, contract) {
         return Err(AeonReporterError::new("aeon_reporter_contract_refused"));
     }
     let content_type = response.all("Content-Type");
     let json = content_type.len() == 1
+        && header_count(&response, "Content-Type") == 1
         && matches!(
             content_type[0].to_ascii_lowercase().as_str(),
             "application/json" | "application/json; charset=utf-8"
         );
-    if !json || !response.all("Content-Encoding").is_empty() {
+    if !json || header_count(&response, "Content-Encoding") != 0 {
         return Err(AeonReporterError::new("aeon_reporter_media_refused"));
     }
     let mut raw = Vec::new();
