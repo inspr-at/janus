@@ -56,6 +56,8 @@ pub(crate) struct AeonState {
     /// before answering: an ambiguous transport failure.
     pub(crate) drop_after: Option<String>,
     pub(crate) content_type: &'static str,
+    /// Override the Aeon-Contract header for responses to one path.
+    pub(crate) contract_override: Option<(String, Option<&'static str>)>,
 }
 
 pub(crate) struct FakeAeon {
@@ -83,6 +85,7 @@ impl FakeAeon {
             requests: Vec::new(),
             drop_after: None,
             content_type: "application/json; charset=utf-8",
+            contract_override: None,
         }));
         let stop = Arc::new(AtomicBool::new(false));
         let thread_state = Arc::clone(&state);
@@ -161,6 +164,8 @@ pub(crate) fn handoff_body() -> Value {
         "plugin_id": "janus",
         "attempt": 1,
         "authority_epoch": 3,
+        "superseded_by": null,
+        "authority_open": true,
         "journey_revision": 7,
         "state": "requested",
         "expires_at": EXPIRES_AT,
@@ -214,6 +219,10 @@ fn serve(stream: TcpStream, state: &Arc<Mutex<AeonState>>) {
         guard.drop_after = None;
     }
     let content_type = guard.content_type;
+    let contract = match &guard.contract_override {
+        Some((path, value)) if *path == captured.path => *value,
+        _ => route_contract(&captured.path),
+    };
     drop(guard);
     if drop_connection {
         return;
@@ -222,10 +231,28 @@ fn serve(stream: TcpStream, state: &Arc<Mutex<AeonState>>) {
     let mut stream = stream;
     let _ = write!(
         stream,
-        "HTTP/1.1 {status} X\r\nContent-Type: {content_type}\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        "HTTP/1.1 {status} X\r\nContent-Type: {content_type}\r\n{}Cache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        contract.map_or(String::new(), |value| format!("Aeon-Contract: {value}\r\n")),
         body.len()
     );
     let _ = stream.flush();
+}
+
+/// The contract Aeon declares per surface at the pinned release (AEON-197).
+fn route_contract(path: &str) -> Option<&'static str> {
+    if path == "/api/me" {
+        Some("me/1.0")
+    } else if path.ends_with("/journey") {
+        Some("journey/1.1")
+    } else if path.ends_with("/evidence") {
+        Some("stage-evidence/1.0")
+    } else if path.ends_with("/result") {
+        Some("stage-result/1.0")
+    } else if path.starts_with("/api/stage-handoffs/") {
+        Some("stage-handoffs/1.0")
+    } else {
+        None
+    }
 }
 
 fn one<'a>(request: &'a Captured, name: &str) -> Option<&'a str> {
@@ -994,18 +1021,82 @@ fn journal_is_bound_to_config_contract_and_namespace() {
 }
 
 #[test]
-fn responses_are_strict_json_of_the_pinned_contract() {
+fn responses_follow_the_pinned_contract_major_and_accept_minor_additions() {
+    // A minor contract bump may add optional fields: accepted.
     let fixture = new_fixture();
     let server = FakeAeon::start();
-    server.with(|state| state.handoff["new_field"] = json!(true));
+    let handoff_path = format!("/api/stage-handoffs/{HANDOFF_ID}");
+    server.with(|state| {
+        state.handoff["new_optional_field"] = json!({"nested": true});
+        state.contract_override = Some((handoff_path.clone(), Some("stage-handoffs/1.7")));
+    });
+    run(&fixture, &server).expect("minor addition accepted");
+
+    // A missing or foreign header, or another major, fails closed.
+    for header in [
+        None,
+        Some("stage-handoffs/2.0"),
+        Some("stage-handoffs/1"),
+        Some("stage-launch/1.0"),
+        Some("stage-handoffs/01.0"),
+    ] {
+        let fixture = new_fixture();
+        let server = FakeAeon::start();
+        server.with(|state| state.contract_override = Some((handoff_path.clone(), header)));
+        assert_eq!(
+            code(run(&fixture, &server)),
+            "aeon_reporter_contract_refused",
+            "{header:?}"
+        );
+        assert!(posts(&server.requests()).is_empty());
+    }
+
+    // A field the contract requires is still required.
+    let fixture = new_fixture();
+    let server = FakeAeon::start();
+    server.with(|state| {
+        state
+            .handoff
+            .as_object_mut()
+            .unwrap()
+            .remove("authority_open");
+    });
     assert_eq!(
         code(run(&fixture, &server)),
         "aeon_reporter_response_invalid"
     );
 
+    let fixture = new_fixture();
     let server = FakeAeon::start();
     server.with(|state| state.content_type = "text/html");
     assert_eq!(code(run(&fixture, &server)), "aeon_reporter_media_refused");
+}
+
+#[test]
+fn superseded_closed_or_admitted_handoffs_fail_closed() {
+    for (field, value, reason) in [
+        (
+            "superseded_by",
+            json!("00000000-0000-4000-8000-0000000000cc"),
+            "aeon_reporter_authority_stale",
+        ),
+        (
+            "authority_open",
+            json!(false),
+            "aeon_reporter_handoff_closed",
+        ),
+        (
+            "admission",
+            json!({"admission_id": "00000000-0000-4000-8000-0000000000dd", "epoch": 3, "expires_at": "2099-01-01T00:00:00Z"}),
+            "aeon_reporter_binding_refused",
+        ),
+    ] {
+        let fixture = new_fixture();
+        let server = FakeAeon::start();
+        server.with(|state| state.handoff[field] = value.clone());
+        assert_eq!(code(run(&fixture, &server)), reason, "{field}");
+        assert!(posts(&server.requests()).is_empty());
+    }
 }
 
 #[test]
@@ -1159,8 +1250,12 @@ fn repin_journal(fixture: &Fixture, release: &str, commit: &str, sha: &str) {
 
 #[test]
 fn journals_from_a_reviewed_earlier_pin_recover_and_unknown_pins_do_not() {
-    let (release, commit, sha) = AEON_COMPATIBLE_JOURNAL_PINS[0];
+    for (release, commit, sha) in AEON_COMPATIBLE_JOURNAL_PINS {
+        earlier_pin_recovers(release, commit, sha);
+    }
+}
 
+fn earlier_pin_recovers(release: &str, commit: &str, sha: &str) {
     // Accepted evidence under the earlier pin, then an upgrade: recovery
     // replays the exact journaled bytes and completes.
     let fixture = new_fixture();

@@ -42,19 +42,27 @@ use crate::paimos::{
 /// Aeon stage-handoff wire contract Janus is pinned to.
 pub const AEON_STAGE_CONTRACT: &str = "inspr.aeon.stage-handoff.v1";
 /// Aeon release carrying the pinned stage-handoff and journey contract.
-pub const AEON_STAGE_RELEASE: &str = "v260926083057.0.0";
+pub const AEON_STAGE_RELEASE: &str = "v260927071728.0.0";
 /// Aeon commit of [`AEON_STAGE_RELEASE`].
-pub const AEON_STAGE_COMMIT: &str = "4f968808157d1d5c35c096b683bd332a2ee15d8d";
+pub const AEON_STAGE_COMMIT: &str = "10fe8501a633b8b3ac3ddb3b4010014906b4b3bb";
 /// SHA-256 of `api/openapi.yaml` at [`AEON_STAGE_COMMIT`].
 pub const AEON_OPENAPI_SHA256: &str =
-    "5332184da86c52f42c988431c994814d4418c2a6f986b879a62662967e2160b0";
+    "2cc98c2368c95861801e6b42ffdc158341ca72454efb823bffda5fc74660c299";
 
 /// Earlier pins whose journals stay replayable: (release, commit, OpenAPI
 /// SHA-256). Add an entry only after reviewing that the stage-handoff, `/me`
 /// and journey wire contract Janus journals against is unchanged, so the
 /// exact journaled request bytes remain valid. New journals always carry the
 /// current pin.
-const AEON_COMPATIBLE_JOURNAL_PINS: [(&str, &str, &str); 1] = [
+const AEON_COMPATIBLE_JOURNAL_PINS: [(&str, &str, &str); 2] = [
+    // JANUS-482: v260927071728 adds optional handoff response fields and the
+    // Aeon-Contract header; evidence, result and /me request shapes are
+    // unchanged, so journaled request bytes stay valid.
+    (
+        "v260926083057.0.0",
+        "4f968808157d1d5c35c096b683bd332a2ee15d8d",
+        "5332184da86c52f42c988431c994814d4418c2a6f986b879a62662967e2160b0",
+    ),
     // JANUS-481: v260926083057 (AEON-169) only adds the server-side routed
     // principal check and journey gate_live; handoff, evidence, result and
     // /me shapes are identical.
@@ -82,6 +90,15 @@ const MAX_API_KEY_BYTES: usize = 512;
 const MAX_RESPONSE_BYTES: usize = 256 * 1024;
 const MAX_JOURNAL_BYTES: usize = 64 * 1024;
 const JANUS_PLUGIN_ID: &str = "janus";
+/// Response header carrying `<surface>/<major>.<minor>` (AEON-197).
+const CONTRACT_HEADER: &str = "Aeon-Contract";
+/// Surface and the one major version each is pinned to. Minor bumps add
+/// optional response fields only and are accepted.
+const CONTRACT_ME: (&str, u32) = ("me", 1);
+const CONTRACT_JOURNEY: (&str, u32) = ("journey", 1);
+const CONTRACT_HANDOFFS: (&str, u32) = ("stage-handoffs", 1);
+const CONTRACT_EVIDENCE: (&str, u32) = ("stage-evidence", 1);
+const CONTRACT_RESULT: (&str, u32) = ("stage-result", 1);
 const ACCESS_STAGE: &str = "access";
 const MANAGED_EVIDENCE_SOURCE: &str = "managed_completion_record";
 const REATTESTATION_EVIDENCE_SOURCE: &str = "managed_credential_reattestation_record";
@@ -283,10 +300,10 @@ struct JourneyIdentity {
     current_release_id: Option<String>,
 }
 
-/// Safe handoff projection at [`AEON_STAGE_COMMIT`]. Unknown fields fail
-/// closed: a drifted contract needs a reviewed pin update.
+/// Safe handoff projection, contract `stage-handoffs/1.x` (AEON-197). Every
+/// field Janus binds to is required and checked; a minor contract bump may add
+/// optional fields, which are ignored. A new major fails closed at the header.
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct HandoffResponse {
     id: String,
     project_node_id: String,
@@ -296,6 +313,8 @@ struct HandoffResponse {
     plugin_id: String,
     attempt: i64,
     authority_epoch: i64,
+    superseded_by: Option<String>,
+    authority_open: bool,
     journey_revision: i64,
     state: String,
     expires_at: String,
@@ -306,6 +325,8 @@ struct HandoffResponse {
     prerequisite_seal_sha256: String,
     #[serde(default)]
     result: Option<serde_json::Value>,
+    #[serde(default)]
+    admission: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -322,8 +343,8 @@ struct EvidenceWrite {
     credential_ready: Option<bool>,
 }
 
+/// Evidence echo, contract `stage-evidence/1.x`.
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct EvidenceEcho {
     sequence: i64,
     kind: String,
@@ -349,8 +370,8 @@ struct ResultWrite {
     prerequisite_seal_sha256: String,
 }
 
+/// Result echo, contract `stage-result/1.x`.
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct ResultEcho {
     outcome: String,
     terminal_sequence: i64,
@@ -709,7 +730,7 @@ impl Reporter {
     }
 
     fn verify_principal(&self) -> AeonResult<()> {
-        let me: MeResponse = self.get("/api/me")?;
+        let me: MeResponse = self.get("/api/me", CONTRACT_ME)?;
         if me.principal.kind != "agent"
             || me.principal.name != JANUS_PLUGIN_ID
             || me.tenant.slug != self.config.project.tenant_slug
@@ -722,10 +743,13 @@ impl Reporter {
     /// Re-read the bound journey and handoff before any report is journaled.
     /// Returns the stored prerequisite seal the terminal result must echo.
     fn preflight(&self) -> AeonResult<String> {
-        let journey: JourneyIdentity = self.get(&format!(
-            "/api/projects/{}/journey",
-            self.config.project.project_node_id
-        ))?;
+        let journey: JourneyIdentity = self.get(
+            &format!(
+                "/api/projects/{}/journey",
+                self.config.project.project_node_id
+            ),
+            CONTRACT_JOURNEY,
+        )?;
         let project = &self.config.project;
         let handoff = &self.config.handoff;
         if journey.project_node_id != project.project_node_id
@@ -739,8 +763,10 @@ impl Reporter {
             return Err(AeonReporterError::new("aeon_reporter_release_stale"));
         }
 
-        let pulled: HandoffResponse =
-            self.get(&format!("/api/stage-handoffs/{}", handoff.handoff_id))?;
+        let pulled: HandoffResponse = self.get(
+            &format!("/api/stage-handoffs/{}", handoff.handoff_id),
+            CONTRACT_HANDOFFS,
+        )?;
         if pulled.id != handoff.handoff_id
             || pulled.project_node_id != project.project_node_id
             || pulled.release_node_id != handoff.release_node_id
@@ -758,10 +784,17 @@ impl Reporter {
         {
             return Err(AeonReporterError::new("aeon_reporter_binding_refused"));
         }
-        if pulled.authority_epoch != handoff.authority_epoch {
+        if pulled.authority_epoch != handoff.authority_epoch || pulled.superseded_by.is_some() {
             return Err(AeonReporterError::new("aeon_reporter_authority_stale"));
         }
-        if pulled.result.is_some() || !matches!(pulled.state.as_str(), "requested" | "active") {
+        // Janus Access handoffs never carry a Pharos launch admission.
+        if pulled.admission.is_some() {
+            return Err(AeonReporterError::new("aeon_reporter_binding_refused"));
+        }
+        if pulled.result.is_some()
+            || !pulled.authority_open
+            || !matches!(pulled.state.as_str(), "requested" | "active")
+        {
             return Err(AeonReporterError::new("aeon_reporter_handoff_closed"));
         }
         Ok(pulled.prerequisite_seal_sha256)
@@ -774,7 +807,11 @@ impl Reporter {
         }
     }
 
-    fn get<T: for<'de> Deserialize<'de>>(&self, path: &str) -> AeonResult<T> {
+    fn get<T: for<'de> Deserialize<'de>>(
+        &self,
+        path: &str,
+        contract: (&str, u32),
+    ) -> AeonResult<T> {
         let response = self
             .http
             .get(&format!("{}{path}", self.origin))
@@ -782,7 +819,7 @@ impl Reporter {
             .set("Accept-Encoding", "identity")
             .set("Authorization", self.authorization.as_str())
             .call();
-        decode_response(accept_status(response, 200)?)
+        decode_response(accept_status(response, 200)?, contract)
     }
 
     fn post(&self, path: &str, body: &str, status: u16) -> AeonResult<ureq::Response> {
@@ -807,7 +844,7 @@ impl Reporter {
             &request.body,
             201,
         )?;
-        let echo: EvidenceEcho = decode_response(response)?;
+        let echo: EvidenceEcho = decode_response(response, CONTRACT_EVIDENCE)?;
         if echo.handoff_id != self.config.handoff.handoff_id
             || echo.sequence != sent.sequence
             || echo.kind != sent.kind
@@ -840,7 +877,7 @@ impl Reporter {
             &request.body,
             200,
         )?;
-        let echo: ResultEcho = decode_response(response)?;
+        let echo: ResultEcho = decode_response(response, CONTRACT_RESULT)?;
         if echo.handoff_id != self.config.handoff.handoff_id
             || echo.outcome != sent.outcome
             || echo.terminal_sequence != sent.terminal_sequence
@@ -1072,7 +1109,35 @@ fn accept_status(
     }
 }
 
-fn decode_response<T: for<'de> Deserialize<'de>>(response: ureq::Response) -> AeonResult<T> {
+/// True when `value` is exactly `<surface>/<major>.<minor>` for the pinned
+/// surface and major, with a decimal minor.
+fn contract_accepted(value: &str, (surface, major): (&str, u32)) -> bool {
+    let Some(version) = value
+        .strip_prefix(surface)
+        .and_then(|rest| rest.strip_prefix('/'))
+    else {
+        return false;
+    };
+    let Some((got_major, minor)) = version.split_once('.') else {
+        return false;
+    };
+    let decimal = |text: &str| {
+        !text.is_empty()
+            && text.len() <= 6
+            && text.bytes().all(|byte| byte.is_ascii_digit())
+            && (text == "0" || !text.starts_with('0'))
+    };
+    decimal(got_major) && decimal(minor) && got_major.parse::<u32>() == Ok(major)
+}
+
+fn decode_response<T: for<'de> Deserialize<'de>>(
+    response: ureq::Response,
+    contract: (&str, u32),
+) -> AeonResult<T> {
+    let declared = response.all(CONTRACT_HEADER);
+    if declared.len() != 1 || !contract_accepted(declared[0], contract) {
+        return Err(AeonReporterError::new("aeon_reporter_contract_refused"));
+    }
     let content_type = response.all("Content-Type");
     let json = content_type.len() == 1
         && matches!(
